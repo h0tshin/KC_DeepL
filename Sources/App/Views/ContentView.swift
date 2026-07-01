@@ -102,11 +102,15 @@ struct ContentView: View {
             scheduleAutoTranslation()
         }
         .onReceive(NotificationCenter.default.publisher(for: .kcDeepLPerformAction)) { notification in
-            guard let action = notification.object as? AppCommandAction else {
-                return
+            if let payload = notification.object as? AppCommandPayload {
+                handleCommandAction(
+                    payload.action,
+                    capturedText: payload.capturedText,
+                    statusMessage: payload.statusMessage
+                )
+            } else if let action = notification.object as? AppCommandAction {
+                handleCommandAction(action)
             }
-
-            handleCommandAction(action)
         }
         .sheet(item: $viewModel.captureState) { state in
             CaptureMockSheet(state: state) {
@@ -140,18 +144,38 @@ struct ContentView: View {
             : "\(viewModel.sourceText)\n\(clipboardText)"
     }
 
-    private func handleCommandAction(_ action: AppCommandAction) {
+    private func handleCommandAction(
+        _ action: AppCommandAction,
+        capturedText: String? = nil,
+        statusMessage: String? = nil
+    ) {
         switch action {
         case .textTranslation:
             selectedMode = .text
+            applyCapturedTextIfAvailable(capturedText)
         case .writing:
             selectedMode = .write
+            applyCapturedTextIfAvailable(capturedText)
         case .fileTranslation:
             selectedMode = .files
         case .screenCapture:
             selectedMode = .text
             viewModel.beginScreenCaptureMock()
         }
+
+        if let statusMessage {
+            viewModel.statusMessage = statusMessage
+        }
+    }
+
+    private func applyCapturedTextIfAvailable(_ text: String?) {
+        guard let text,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return
+        }
+
+        viewModel.sourceText = text
     }
 }
 
@@ -476,7 +500,7 @@ private struct SourceEditorPane: View {
                         .foregroundStyle(.secondary)
                         .frame(width: min(width - 64, 520), alignment: .leading)
 
-                    Text("또는 텍스트를 선택하고 ⇧⌘1를 눌러 빠르게 번역할 수 있습니다")
+                    Text("또는 텍스트를 선택하고 ⌃⇧1를 눌러 빠르게 번역할 수 있습니다")
                         .font(.system(size: 13))
                         .foregroundStyle(.tertiary)
                 }

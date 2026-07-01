@@ -135,9 +135,9 @@ private struct GeneralSettingsPane: View {
 }
 
 private struct ShortcutSettingsPane: View {
-    @AppStorage(PreferenceKeys.selectedTextShortcut) private var selectedTextShortcut = "⇧⌘1"
-    @AppStorage(PreferenceKeys.rewriteShortcut) private var rewriteShortcut = "⌃⌘C"
-    @AppStorage(PreferenceKeys.screenCaptureShortcut) private var screenCaptureShortcut = "⇧⌘2"
+    @AppStorage(PreferenceKeys.selectedTextShortcut) private var selectedTextShortcut = "⌃⇧1"
+    @AppStorage(PreferenceKeys.rewriteShortcut) private var rewriteShortcut = "⌃⇧2"
+    @AppStorage(PreferenceKeys.screenCaptureShortcut) private var screenCaptureShortcut = "⌃⇧3"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
@@ -171,9 +171,9 @@ private struct ShortcutSettingsPane: View {
             HStack {
                 Spacer()
                 Button("모두 기본값으로 초기화") {
-                    selectedTextShortcut = "⇧⌘1"
-                    rewriteShortcut = "⌃⌘C"
-                    screenCaptureShortcut = "⇧⌘2"
+                    selectedTextShortcut = "⌃⇧1"
+                    rewriteShortcut = "⌃⇧2"
+                    screenCaptureShortcut = "⌃⇧3"
                 }
             }
         }

@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Carbon
 import SwiftUI
 
@@ -7,10 +8,25 @@ enum AppCommandAction: String {
     case writing
     case fileTranslation
     case screenCapture
+
+    var capturesSelectedText: Bool {
+        switch self {
+        case .textTranslation, .writing:
+            true
+        case .fileTranslation, .screenCapture:
+            false
+        }
+    }
 }
 
 extension Notification.Name {
     static let kcDeepLPerformAction = Notification.Name("KCDeepLPerformAction")
+}
+
+struct AppCommandPayload {
+    let action: AppCommandAction
+    let capturedText: String?
+    let statusMessage: String?
 }
 
 final class AppActionDispatcher {
@@ -20,12 +36,17 @@ final class AppActionDispatcher {
 
     private init() {}
 
-    func perform(_ action: AppCommandAction) {
+    func perform(_ action: AppCommandAction, capturedText: String? = nil, statusMessage: String? = nil) {
         DispatchQueue.main.async {
             self.showMainWindow()
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                NotificationCenter.default.post(name: .kcDeepLPerformAction, object: action)
+                let payload = AppCommandPayload(
+                    action: action,
+                    capturedText: capturedText,
+                    statusMessage: statusMessage
+                )
+                NotificationCenter.default.post(name: .kcDeepLPerformAction, object: payload)
             }
         }
     }
@@ -182,7 +203,140 @@ final class GlobalHotKeyManager {
             return
         }
 
-        AppActionDispatcher.shared.perform(action)
+        guard action.capturesSelectedText else {
+            AppActionDispatcher.shared.perform(action)
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+            let result = SelectedTextCaptureService.captureSelectedText()
+            AppActionDispatcher.shared.perform(
+                action,
+                capturedText: result.text,
+                statusMessage: result.statusMessage
+            )
+        }
+    }
+}
+
+private struct SelectedTextCaptureResult {
+    let text: String?
+    let statusMessage: String?
+}
+
+private enum SelectedTextCaptureService {
+    static func captureSelectedText() -> SelectedTextCaptureResult {
+        guard isAccessibilityTrusted() else {
+            return SelectedTextCaptureResult(
+                text: nil,
+                statusMessage: "선택 텍스트를 자동으로 가져오려면 시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 KC DeepL을 허용해 주세요."
+            )
+        }
+
+        let pasteboard = NSPasteboard.general
+        let snapshot = PasteboardSnapshot.capture(from: pasteboard)
+        let changeCount = pasteboard.changeCount
+
+        guard postCopyShortcut() else {
+            return SelectedTextCaptureResult(
+                text: nil,
+                statusMessage: "선택 텍스트 복사 이벤트를 보낼 수 없습니다."
+            )
+        }
+
+        let copiedText = waitForCopiedText(on: pasteboard, originalChangeCount: changeCount)
+        snapshot.restore(to: pasteboard)
+
+        guard let copiedText,
+              !copiedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return SelectedTextCaptureResult(
+                text: nil,
+                statusMessage: "선택된 텍스트를 읽지 못했습니다. 텍스트를 블럭 지정한 뒤 다시 눌러 주세요."
+            )
+        }
+
+        return SelectedTextCaptureResult(text: copiedText, statusMessage: nil)
+    }
+
+    private static func isAccessibilityTrusted() -> Bool {
+        let options = [
+            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
+        ] as CFDictionary
+
+        return AXIsProcessTrustedWithOptions(options)
+    }
+
+    private static func postCopyShortcut() -> Bool {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let keyDown = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: CGKeyCode(kVK_ANSI_C),
+                keyDown: true
+              ),
+              let keyUp = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: CGKeyCode(kVK_ANSI_C),
+                keyDown: false
+              )
+        else {
+            return false
+        }
+
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.025)
+        keyUp.post(tap: .cghidEventTap)
+        return true
+    }
+
+    private static func waitForCopiedText(
+        on pasteboard: NSPasteboard,
+        originalChangeCount: Int
+    ) -> String? {
+        let deadline = Date().addingTimeInterval(0.75)
+
+        while Date() < deadline {
+            if pasteboard.changeCount != originalChangeCount,
+               let text = pasteboard.string(forType: .string) {
+                return text
+            }
+
+            Thread.sleep(forTimeInterval: 0.035)
+        }
+
+        return nil
+    }
+}
+
+private struct PasteboardSnapshot {
+    let items: [NSPasteboardItem]
+
+    static func capture(from pasteboard: NSPasteboard) -> PasteboardSnapshot {
+        let copiedItems: [NSPasteboardItem] = pasteboard.pasteboardItems?.map { item in
+            let copiedItem = NSPasteboardItem()
+
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    copiedItem.setData(data, forType: type)
+                }
+            }
+
+            return copiedItem
+        } ?? []
+
+        return PasteboardSnapshot(items: copiedItems)
+    }
+
+    func restore(to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+
+        guard !items.isEmpty else {
+            return
+        }
+
+        pasteboard.writeObjects(items)
     }
 }
 
