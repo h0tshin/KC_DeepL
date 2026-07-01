@@ -225,6 +225,8 @@ private struct TitlebarMenuAccessory: NSViewRepresentable {
         private let identifier = NSUserInterfaceItemIdentifier("KCDeepLTitlebarMainMenuAccessory")
 
         func installIfNeeded(on window: NSWindow) {
+            configure(window)
+
             let alreadyInstalled = window.titlebarAccessoryViewControllers.contains {
                 $0.view.identifier == identifier
             }
@@ -257,6 +259,12 @@ private struct TitlebarMenuAccessory: NSViewRepresentable {
             controller.view = containerView
             controller.layoutAttribute = .right
             window.addTitlebarAccessoryViewController(controller)
+        }
+
+        private func configure(_ window: NSWindow) {
+            window.titlebarAppearsTransparent = true
+            window.backgroundColor = AppTheme.titlebarNSColor
+            window.toolbar?.showsBaselineSeparator = false
         }
     }
 }
@@ -324,6 +332,7 @@ private struct LanguageBar: View {
                     }
                 }
             }
+            .padding(.trailing, 34)
         }
         .padding(.horizontal, 18)
         .frame(height: 50)
@@ -744,7 +753,7 @@ private struct ResultPane: View {
             .padding(24)
             .help("번역 결과 복사")
         }
-        .background(AppTheme.panelBackground.opacity(0.94))
+        .background(AppTheme.panelBackground)
         .overlay {
             Rectangle()
                 .stroke(isFocused ? AppTheme.accent : AppTheme.panelBorder, lineWidth: isFocused ? 2 : 1)
