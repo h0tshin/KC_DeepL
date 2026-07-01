@@ -35,6 +35,7 @@ struct ContentView: View {
                             sourceLanguage: $sourceLanguage,
                             targetLanguage: $targetLanguage,
                             showTools: $showTools,
+                            onPaste: pasteClipboardIntoSource,
                             onSwap: {
                                 viewModel.swapLanguages(
                                     sourceLanguage: &sourceLanguage,
@@ -48,8 +49,7 @@ struct ContentView: View {
                             translatedText: viewModel.translatedText,
                             isTranslating: viewModel.isTranslating,
                             errorMessage: viewModel.errorMessage,
-                            onCapture: viewModel.beginScreenCaptureMock,
-                            onPaste: pasteClipboardIntoSource
+                            onCapture: viewModel.beginScreenCaptureMock
                         )
 
                         BottomStatusBar(statusMessage: viewModel.statusMessage)
@@ -262,10 +262,29 @@ private struct LanguageBar: View {
     @Binding var sourceLanguage: LanguageOption
     @Binding var targetLanguage: LanguageOption
     @Binding var showTools: Bool
+    let onPaste: () -> Void
     let onSwap: () -> Void
 
     var body: some View {
         ZStack {
+            HStack {
+                Button(action: onPaste) {
+                    Label("붙여넣기", systemImage: "doc.on.clipboard")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+                .background(AppTheme.controlBackground.opacity(0.78), in: RoundedRectangle(cornerRadius: 7))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(AppTheme.panelBorder)
+                }
+                .help("클립보드 내용을 원문에 붙여넣기")
+
+                Spacer()
+            }
+
             HStack(spacing: 16) {
                 Picker("", selection: $sourceLanguage) {
                     ForEach(LanguageOption.sourceLanguages) { language in
@@ -305,9 +324,11 @@ private struct LanguageBar: View {
         }
         .padding(.horizontal, 18)
         .frame(height: 50)
-        .background(AppTheme.elevatedBackground)
+        .background(AppTheme.toolbarBackground)
         .overlay(alignment: .bottom) {
-            Divider().opacity(0.35)
+            Rectangle()
+                .fill(AppTheme.panelBorder)
+                .frame(height: 1)
         }
     }
 }
@@ -335,7 +356,6 @@ private struct TranslationWorkspace: View {
     let isTranslating: Bool
     let errorMessage: String?
     let onCapture: () -> Void
-    let onPaste: () -> Void
     @State private var focusedPane: WorkspacePane?
 
     var body: some View {
@@ -345,8 +365,7 @@ private struct TranslationWorkspace: View {
                     text: $sourceText,
                     width: proxy.size.width / 2,
                     isFocused: focusedPane == .source,
-                    onCapture: onCapture,
-                    onPaste: onPaste
+                    onCapture: onCapture
                 )
                 .onHover { isHovering in
                     focusedPane = isHovering ? .source : nil
@@ -376,7 +395,6 @@ private struct SourceEditorPane: View {
     let width: CGFloat
     let isFocused: Bool
     let onCapture: () -> Void
-    let onPaste: () -> Void
 
     private var hasFormatting: Bool {
         MarkdownFormatting.containsFormatting(in: text)
@@ -431,20 +449,6 @@ private struct SourceEditorPane: View {
                 }
 
                 HStack(spacing: 8) {
-                    Button(action: onPaste) {
-                        Label("붙여넣기", systemImage: "doc.on.clipboard")
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 10)
-                    .frame(height: 34)
-                    .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 7))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 7)
-                            .stroke(AppTheme.panelBorder)
-                    }
-                    .help("클립보드 내용을 원문에 붙여넣기")
-
                     if hasFormatting {
                         Button {
                             text = MarkdownFormatting.stripFormatting(from: text)
