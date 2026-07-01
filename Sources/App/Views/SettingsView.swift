@@ -69,8 +69,15 @@ private struct SettingsSidebar: View {
                 Button {
                     selectedCategory = category
                 } label: {
-                    Label(category.rawValue, systemImage: category.icon)
-                        .font(.system(size: 15, weight: .semibold))
+                    HStack(spacing: 12) {
+                        Image(systemName: category.icon)
+                            .font(.system(size: 18, weight: .semibold))
+                            .frame(width: 24, alignment: .center)
+
+                        Text(category.rawValue)
+                            .font(.system(size: 15, weight: .semibold))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 13)
                         .frame(height: 48)
@@ -99,11 +106,11 @@ private struct GeneralSettingsPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
-            SettingsSection(title: "DeepL 열기") {
+            SettingsSection(title: "KC DeepL 번역기") {
                 Toggle("기기를 켜면 앱이 자동으로 열립니다", isOn: $launchAtLogin)
             }
 
-            SettingsSection(title: "빠른 액세스 옵션", description: "특정 단축키 또는 부동 DeepL 아이콘 사용 시, 번역 또는 개선된 텍스트가 열릴 위치를 선택합니다.") {
+            SettingsSection(title: "빠른 액세스 옵션", description: "특정 단축키 또는 부동 KC DeepL 아이콘 사용 시, 번역 또는 개선된 텍스트가 열릴 위치를 선택합니다.") {
                 RadioGroup(
                     selection: $quickAccessMode,
                     items: [
@@ -113,7 +120,7 @@ private struct GeneralSettingsPane: View {
                 )
             }
 
-            SettingsSection(title: "DeepL 앱 닫기", description: "닫기를 누른 후의 앱 작동 방식을 선택하세요.") {
+            SettingsSection(title: "KC DeepL 앱 닫기", description: "닫기를 누른 후의 앱 작동 방식을 선택하세요.") {
                 RadioGroup(
                     selection: $closeBehavior,
                     items: [
@@ -285,30 +292,6 @@ private struct AdvancedSettingsPane: View {
                         .foregroundStyle(.secondary)
                     Slider(value: $temperature, in: 0...1, step: 0.1)
                         .frame(maxWidth: 360)
-                }
-            }
-
-            SettingsSection(title: "차단 목록", description: "KC DeepL 단축키를 사용하고 싶지 않은 앱을 추가합니다. + 또는 -를 클릭하여 앱을 추가하거나 제거할 수 있습니다.") {
-                HStack {
-                    Label("키체인 접근.app", systemImage: "app.badge")
-                        .font(.system(size: 15, weight: .semibold))
-                    Spacer()
-                }
-                .padding()
-                .frame(maxWidth: .infinity)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(AppTheme.separator)
-                )
-
-                HStack {
-                    Spacer()
-                    Button {} label: {
-                        Image(systemName: "plus")
-                    }
-                    Button {} label: {
-                        Image(systemName: "minus")
-                    }
                 }
             }
         }

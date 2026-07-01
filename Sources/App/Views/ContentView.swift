@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import KCDeepLCore
 
@@ -13,6 +14,7 @@ struct ContentView: View {
     @AppStorage(PreferenceKeys.geminiAPIKey) private var apiKey = AppDefaults.defaultGeminiAPIKey
     @AppStorage(PreferenceKeys.temperature) private var temperature = 0.2
     @AppStorage(PreferenceKeys.historyEnabled) private var historyEnabled = true
+    @AppStorage(PreferenceKeys.autoTranslate) private var autoTranslate = true
 
     private var provider: LLMProvider {
         LLMProvider(rawValue: providerRaw) ?? .gemini
@@ -20,13 +22,12 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TopModeBar(selectedMode: $selectedMode, showTools: $showTools)
-
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
                     LanguageBar(
                         sourceLanguage: $sourceLanguage,
                         targetLanguage: $targetLanguage,
+                        showTools: $showTools,
                         onSwap: {
                             viewModel.swapLanguages(
                                 sourceLanguage: &sourceLanguage,
@@ -40,7 +41,6 @@ struct ContentView: View {
                         translatedText: viewModel.translatedText,
                         isTranslating: viewModel.isTranslating,
                         errorMessage: viewModel.errorMessage,
-                        onTranslate: runTranslation,
                         onCapture: viewModel.beginScreenCaptureMock
                     )
 
@@ -55,6 +55,43 @@ struct ContentView: View {
         }
         .background(AppTheme.panelBackground)
         .foregroundStyle(.primary)
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                TitlebarModeControls(selectedMode: $selectedMode)
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                Circle()
+                    .fill(Color(nsColor: NSColor.systemBlue))
+                    .frame(width: 26, height: 26)
+                    .overlay(Text("H").font(.system(size: 13, weight: .bold)))
+                    .help("계정")
+
+                MainMenuButton()
+            }
+        }
+        .onAppear {
+            viewModel.runStartupChecks()
+        }
+        .onChange(of: viewModel.sourceText) { _, _ in
+            scheduleAutoTranslation()
+        }
+        .onChange(of: sourceLanguage) { _, _ in
+            scheduleAutoTranslation()
+        }
+        .onChange(of: targetLanguage) { _, _ in
+            scheduleAutoTranslation()
+        }
+        .onChange(of: providerRaw) { _, _ in
+            scheduleAutoTranslation()
+        }
+        .onChange(of: modelID) { _, _ in
+            scheduleAutoTranslation()
+        }
+        .onChange(of: apiKey) { _, _ in
+            viewModel.runStartupChecks()
+            scheduleAutoTranslation()
+        }
         .sheet(item: $viewModel.captureState) { state in
             CaptureMockSheet(state: state) {
                 viewModel.completeScreenCaptureMock()
@@ -62,18 +99,17 @@ struct ContentView: View {
         }
     }
 
-    private func runTranslation() {
-        Task {
-            await viewModel.translate(
-                sourceLanguage: sourceLanguage,
-                targetLanguage: targetLanguage,
-                provider: provider,
-                modelID: modelID,
-                apiKey: apiKey,
-                temperature: temperature,
-                historyEnabled: historyEnabled
-            )
-        }
+    private func scheduleAutoTranslation() {
+        viewModel.scheduleAutoTranslation(
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            provider: provider,
+            modelID: modelID,
+            apiKey: apiKey,
+            temperature: temperature,
+            historyEnabled: historyEnabled,
+            autoTranslate: autoTranslate
+        )
     }
 }
 
@@ -99,23 +135,23 @@ private enum TranslationMode: String, CaseIterable, Identifiable {
     }
 }
 
-private struct TopModeBar: View {
+private struct TitlebarModeControls: View {
     @Binding var selectedMode: TranslationMode
-    @Binding var showTools: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 6) {
             ForEach(TranslationMode.allCases) { mode in
                 Button {
                     selectedMode = mode
                 } label: {
                     Label(mode.rawValue, systemImage: mode.systemImage)
-                        .font(.system(size: 13, weight: .semibold))
-                        .padding(.horizontal, 10)
-                        .frame(height: 30)
+                        .font(.system(size: 12, weight: .semibold))
+                        .labelStyle(.titleAndIcon)
+                        .padding(.horizontal, 8)
+                        .frame(height: 27)
                         .background(
                             selectedMode == mode
-                                ? Color(nsColor: NSColor.controlAccentColor).opacity(0.25)
+                                ? Color(nsColor: NSColor.controlAccentColor).opacity(0.24)
                                 : Color.clear,
                             in: RoundedRectangle(cornerRadius: 6)
                         )
@@ -123,30 +159,6 @@ private struct TopModeBar: View {
                 .buttonStyle(.plain)
                 .help(mode.rawValue)
             }
-
-            Spacer()
-
-            Button {
-                showTools.toggle()
-            } label: {
-                Label("툴바", systemImage: "sidebar.right")
-                    .labelStyle(.iconOnly)
-            }
-            .compactIconButton()
-            .help("오른쪽 도구 패널")
-
-            Circle()
-                .fill(Color(nsColor: NSColor.systemBlue))
-                .frame(width: 30, height: 30)
-                .overlay(Text("H").font(.system(size: 15, weight: .bold)))
-
-            MainMenuButton()
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 42)
-        .background(Color.black.opacity(0.68))
-        .overlay(alignment: .bottom) {
-            Divider().opacity(0.25)
         }
     }
 }
@@ -177,34 +189,49 @@ private struct MainMenuButton: View {
 private struct LanguageBar: View {
     @Binding var sourceLanguage: LanguageOption
     @Binding var targetLanguage: LanguageOption
+    @Binding var showTools: Bool
     let onSwap: () -> Void
 
     var body: some View {
-        HStack(spacing: 16) {
-            Picker("", selection: $sourceLanguage) {
-                ForEach(LanguageOption.sourceLanguages) { language in
-                    Text(language.displayName).tag(language)
+        ZStack {
+            HStack(spacing: 16) {
+                Picker("", selection: $sourceLanguage) {
+                    ForEach(LanguageOption.sourceLanguages) { language in
+                        Text(language.displayName).tag(language)
+                    }
                 }
-            }
-            .pickerStyle(.menu)
-            .frame(width: 180)
+                .pickerStyle(.menu)
+                .frame(width: 180)
 
-            Button(action: onSwap) {
-                Image(systemName: "arrow.left.arrow.right")
-                    .font(.system(size: 14, weight: .semibold))
-            }
-            .compactIconButton()
-            .help("언어 전환")
-
-            Picker("", selection: $targetLanguage) {
-                ForEach(LanguageOption.targetLanguages) { language in
-                    Text(language.displayName).tag(language)
+                Button(action: onSwap) {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.system(size: 14, weight: .semibold))
                 }
-            }
-            .pickerStyle(.menu)
-            .frame(width: 180)
+                .compactIconButton()
+                .help("언어 전환")
 
-            Spacer()
+                Picker("", selection: $targetLanguage) {
+                    ForEach(LanguageOption.targetLanguages) { language in
+                        Text(language.displayName).tag(language)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 180)
+            }
+
+            HStack {
+                Spacer()
+
+                Button {
+                    showTools.toggle()
+                } label: {
+                    Label("툴바", systemImage: "sidebar.right")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("오른쪽 도구 패널")
+            }
         }
         .padding(.horizontal, 18)
         .frame(height: 50)
@@ -220,8 +247,8 @@ private struct TranslationWorkspace: View {
     let translatedText: String
     let isTranslating: Bool
     let errorMessage: String?
-    let onTranslate: () -> Void
     let onCapture: () -> Void
+    @State private var focusedPane: WorkspacePane?
 
     var body: some View {
         GeometryReader { proxy in
@@ -229,9 +256,12 @@ private struct TranslationWorkspace: View {
                 SourceEditorPane(
                     text: $sourceText,
                     width: proxy.size.width / 2,
-                    onTranslate: onTranslate,
+                    isFocused: focusedPane == .source,
                     onCapture: onCapture
                 )
+                .onHover { isHovering in
+                    focusedPane = isHovering ? .source : nil
+                }
 
                 Rectangle()
                     .fill(AppTheme.separator)
@@ -240,17 +270,26 @@ private struct TranslationWorkspace: View {
                 ResultPane(
                     translatedText: translatedText,
                     isTranslating: isTranslating,
-                    errorMessage: errorMessage
+                    errorMessage: errorMessage,
+                    isFocused: focusedPane == .result
                 )
+                .onHover { isHovering in
+                    focusedPane = isHovering ? .result : nil
+                }
             }
         }
     }
 }
 
+private enum WorkspacePane {
+    case source
+    case result
+}
+
 private struct SourceEditorPane: View {
     @Binding var text: String
     let width: CGFloat
-    let onTranslate: () -> Void
+    let isFocused: Bool
     let onCapture: () -> Void
 
     var body: some View {
@@ -280,14 +319,29 @@ private struct SourceEditorPane: View {
             VStack {
                 Spacer()
 
-                HStack {
+                if text.isEmpty {
                     FileDropMock()
+                        .frame(maxWidth: .infinity)
+                        .padding(.bottom, 54)
+                }
+
+                HStack(spacing: 8) {
                     Spacer()
+
+                    Button(action: copySourceText) {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 34, height: 34)
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
+                    .disabled(text.isEmpty)
+                    .help("원문 복사")
 
                     Button(action: onCapture) {
                         Image(systemName: "selection.pin.in.out")
-                            .font(.system(size: 20, weight: .medium))
-                            .padding(9)
+                            .font(.system(size: 18, weight: .medium))
+                            .frame(width: 34, height: 34)
                     }
                     .buttonStyle(.plain)
                     .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
@@ -299,22 +353,19 @@ private struct SourceEditorPane: View {
                     .help("텍스트 화면 캡처")
                 }
                 .padding(24)
-
-                HStack {
-                    Button(action: onTranslate) {
-                        Label("번역", systemImage: "arrow.right.circle.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.return, modifiers: [.command])
-
-                    Spacer()
-                }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 18)
             }
         }
         .background(AppTheme.panelBackground)
+        .overlay {
+            Rectangle()
+                .stroke(isFocused ? AppTheme.accent : Color.clear, lineWidth: 2)
+                .padding(1)
+        }
+    }
+
+    private func copySourceText() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 }
 
@@ -347,6 +398,7 @@ private struct ResultPane: View {
     let translatedText: String
     let isTranslating: Bool
     let errorMessage: String?
+    let isFocused: Bool
 
     var body: some View {
         ZStack {
@@ -361,16 +413,9 @@ private struct ResultPane: View {
                             .foregroundStyle(.orange)
                             .padding()
                     } else if translatedText.isEmpty {
-                        VStack(spacing: 6) {
-                            Text("DeepL로 더 빠르게 번역해 보세요.")
-                                .font(.system(size: 14))
-                                .foregroundStyle(.secondary)
-
-                            Text("작동 방식 자세히 보기")
-                                .font(.system(size: 13))
-                                .underline()
-                                .foregroundStyle(.primary)
-                        }
+                        Text("번역 결과가 이곳에 표시됩니다")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(.top, 220)
                     } else {
@@ -386,6 +431,11 @@ private struct ResultPane: View {
             }
         }
         .background(AppTheme.panelBackground.opacity(0.94))
+        .overlay {
+            Rectangle()
+                .stroke(isFocused ? AppTheme.accent : Color.clear, lineWidth: 2)
+                .padding(1)
+        }
     }
 }
 
@@ -393,23 +443,9 @@ private struct BottomStatusBar: View {
     let statusMessage: String
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button {} label: {
-                Image(systemName: "arrow.uturn.backward")
-            }
-            .compactIconButton()
-            .disabled(true)
-
-            Button {} label: {
-                Image(systemName: "arrow.uturn.forward")
-            }
-            .compactIconButton()
-            .disabled(true)
-
-            Spacer()
-
-            Image(systemName: "shield.checkered")
-                .foregroundStyle(AppTheme.success)
+        HStack(spacing: 8) {
+            Image(systemName: statusIcon)
+                .foregroundStyle(statusColor)
 
             Text(statusMessage)
                 .font(.system(size: 12, weight: .semibold))
@@ -417,11 +453,6 @@ private struct BottomStatusBar: View {
                 .lineLimit(1)
 
             Spacer()
-
-            Image(systemName: "textformat.size")
-            Image(systemName: "waveform")
-            Image(systemName: "keyboard")
-            Image(systemName: "questionmark.circle")
         }
         .padding(.horizontal, 14)
         .frame(height: 42)
@@ -429,6 +460,16 @@ private struct BottomStatusBar: View {
         .overlay(alignment: .top) {
             Divider().opacity(0.35)
         }
+    }
+
+    private var statusIcon: String {
+        statusMessage.contains("실패") || statusMessage.contains("키를 설정") || statusMessage.contains("모델을 선택")
+            ? "exclamationmark.triangle.fill"
+            : "checkmark.circle.fill"
+    }
+
+    private var statusColor: Color {
+        statusIcon == "exclamationmark.triangle.fill" ? .orange : AppTheme.success
     }
 }
 

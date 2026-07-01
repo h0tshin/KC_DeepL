@@ -6,15 +6,21 @@ final class TranslationViewModel: ObservableObject {
     @Published var sourceText = ""
     @Published var translatedText = ""
     @Published var isTranslating = false
-    @Published var statusMessage = "로그인되었으며 DeepL Pro 플랜을 이용 중입니다. 콘텐츠가 안전하게 보호됩니다."
+    @Published var statusMessage = "시스템과 API 상태를 확인하는 중입니다."
     @Published var errorMessage: String?
     @Published var captureState: CaptureState?
     @Published private(set) var history: [TranslationHistoryItem] = []
 
     private let client: TranslationClient
+    private var debouncedTranslationTask: Task<Void, Never>?
 
     init(client: TranslationClient = GeminiTranslationClient()) {
         self.client = client
+        runStartupChecks()
+    }
+
+    deinit {
+        debouncedTranslationTask?.cancel()
     }
 
     func translate(
@@ -26,10 +32,99 @@ final class TranslationViewModel: ObservableObject {
         temperature: Double,
         historyEnabled: Bool
     ) async {
-        guard !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        await translateSnapshot(
+            sourceText,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            provider: provider,
+            modelID: modelID,
+            apiKey: apiKey,
+            temperature: temperature,
+            historyEnabled: historyEnabled
+        )
+    }
+
+    func scheduleAutoTranslation(
+        sourceLanguage: LanguageOption,
+        targetLanguage: LanguageOption,
+        provider: LLMProvider,
+        modelID: String,
+        apiKey: String,
+        temperature: Double,
+        historyEnabled: Bool,
+        autoTranslate: Bool
+    ) {
+        debouncedTranslationTask?.cancel()
+        isTranslating = false
+
+        let pendingText = sourceText
+        guard !pendingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             translatedText = ""
             errorMessage = nil
-            statusMessage = "번역할 텍스트를 입력하거나 붙여넣으세요."
+            runStartupChecks()
+            return
+        }
+
+        guard autoTranslate else {
+            statusMessage = "자동 번역이 꺼져 있습니다."
+            return
+        }
+
+        statusMessage = "입력 중입니다. 1초 후 자동 번역합니다."
+
+        debouncedTranslationTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                return
+            }
+
+            await self?.translateSnapshot(
+                pendingText,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                provider: provider,
+                modelID: modelID,
+                apiKey: apiKey,
+                temperature: temperature,
+                historyEnabled: historyEnabled
+            )
+        }
+    }
+
+    func runStartupChecks() {
+        let defaults = UserDefaults.standard
+        let provider = LLMProvider(rawValue: defaults.string(forKey: PreferenceKeys.provider) ?? "") ?? .gemini
+        let modelID = defaults.string(forKey: PreferenceKeys.modelID) ?? AppDefaults.defaultModelID
+        let apiKey = defaults.string(forKey: PreferenceKeys.geminiAPIKey) ?? AppDefaults.defaultGeminiAPIKey
+
+        if provider == .gemini && apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            statusMessage = "Gemini API 키를 설정해 주세요."
+        } else if modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            statusMessage = "번역 모델을 선택해 주세요."
+        } else {
+            statusMessage = "사용할 준비가 되었습니다."
+        }
+    }
+
+    private func translateSnapshot(
+        _ text: String,
+        sourceLanguage: LanguageOption,
+        targetLanguage: LanguageOption,
+        provider: LLMProvider,
+        modelID: String,
+        apiKey: String,
+        temperature: Double,
+        historyEnabled: Bool
+    ) async {
+        guard sourceText == text else {
+            return
+        }
+
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            translatedText = ""
+            errorMessage = nil
+            runStartupChecks()
             return
         }
 
@@ -44,7 +139,7 @@ final class TranslationViewModel: ObservableObject {
         statusMessage = "\(modelID)로 번역 중입니다."
 
         let request = TranslationRequest(
-            sourceText: sourceText,
+            sourceText: text,
             sourceLanguage: sourceLanguage,
             targetLanguage: targetLanguage,
             provider: provider,
@@ -55,13 +150,17 @@ final class TranslationViewModel: ObservableObject {
 
         do {
             let output = try await client.translate(request)
+            guard sourceText == text, !Task.isCancelled else {
+                return
+            }
+
             translatedText = output
             statusMessage = "번역 완료: \(modelID)"
 
             if historyEnabled {
                 history.insert(
                     TranslationHistoryItem(
-                        sourceText: sourceText,
+                        sourceText: text,
                         translatedText: output,
                         sourceLanguage: sourceLanguage,
                         targetLanguage: targetLanguage,
@@ -70,13 +169,23 @@ final class TranslationViewModel: ObservableObject {
                     at: 0
                 )
             }
+        } catch is CancellationError {
+            if sourceText == text {
+                statusMessage = "입력 중입니다. 1초 후 자동 번역합니다."
+            }
         } catch {
+            guard sourceText == text else {
+                return
+            }
+
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             errorMessage = message
             statusMessage = "번역 실패"
         }
 
-        isTranslating = false
+        if sourceText == text {
+            isTranslating = false
+        }
     }
 
     func swapLanguages(sourceLanguage: inout LanguageOption, targetLanguage: inout LanguageOption) {

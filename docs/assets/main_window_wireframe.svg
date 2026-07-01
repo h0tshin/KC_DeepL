@@ -35,10 +35,9 @@
   <rect x="545" y="648" width="36" height="36" rx="8" stroke="#FFFFFF" stroke-dasharray="5 5"/>
   <text x="563" y="672" text-anchor="middle" fill="#FFFFFF" font-family="Arial" font-size="20">⌖</text>
 
-  <text x="900" y="390" text-anchor="middle" fill="#A8A8A8" font-family="Apple SD Gothic Neo, Arial" font-size="15">DeepL로 더 빠르게 번역해 보세요.</text>
-  <text x="900" y="415" text-anchor="middle" fill="#F5F5F5" font-family="Apple SD Gothic Neo, Arial" font-size="14" text-decoration="underline">작동 방식 자세히 보기</text>
+  <text x="900" y="390" text-anchor="middle" fill="#A8A8A8" font-family="Apple SD Gothic Neo, Arial" font-size="15">번역 결과가 이곳에 표시됩니다</text>
 
   <rect x="0" y="708" width="1200" height="52" fill="#3A3A3A"/>
-  <text x="580" y="740" text-anchor="middle" fill="#D5D5D5" font-family="Apple SD Gothic Neo, Arial" font-size="13" font-weight="700">로그인되었으며 Gemini 2.5 Flash-Lite 모델을 사용합니다.</text>
+  <text x="580" y="740" text-anchor="middle" fill="#D5D5D5" font-family="Apple SD Gothic Neo, Arial" font-size="13" font-weight="700">사용할 준비가 되었습니다.</text>
   <text x="1090" y="740" fill="#F0F0F0" font-family="Arial" font-size="15">Aa  ≋  ⌨  ?</text>
 </svg>
