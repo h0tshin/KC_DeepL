@@ -16,7 +16,10 @@ let package = Package(
         .executableTarget(
             name: "KCDeepL",
             dependencies: ["KCDeepLCore"],
-            path: "Sources/App"
+            path: "Sources/App",
+            resources: [
+                .copy("Resources")
+            ]
         ),
         .testTarget(
             name: "KCDeepLCoreTests",

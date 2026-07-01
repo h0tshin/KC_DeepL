@@ -101,6 +101,13 @@ struct ContentView: View {
             viewModel.runStartupChecks()
             scheduleAutoTranslation()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .kcDeepLPerformAction)) { notification in
+            guard let action = notification.object as? AppCommandAction else {
+                return
+            }
+
+            handleCommandAction(action)
+        }
         .sheet(item: $viewModel.captureState) { state in
             CaptureMockSheet(state: state) {
                 viewModel.completeScreenCaptureMock()
@@ -131,6 +138,20 @@ struct ContentView: View {
         viewModel.sourceText = viewModel.sourceText.isEmpty
             ? clipboardText
             : "\(viewModel.sourceText)\n\(clipboardText)"
+    }
+
+    private func handleCommandAction(_ action: AppCommandAction) {
+        switch action {
+        case .textTranslation:
+            selectedMode = .text
+        case .writing:
+            selectedMode = .write
+        case .fileTranslation:
+            selectedMode = .files
+        case .screenCapture:
+            selectedMode = .text
+            viewModel.beginScreenCaptureMock()
+        }
     }
 }
 
