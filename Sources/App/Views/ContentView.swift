@@ -288,39 +288,33 @@ private struct LanguageBar: View {
                 .buttonStyle(.plain)
                 .padding(.horizontal, 10)
                 .frame(height: 32)
-                .background(AppTheme.controlBackground.opacity(0.78), in: RoundedRectangle(cornerRadius: 7))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 7)
-                        .stroke(AppTheme.panelBorder)
-                }
+                .contentShape(Rectangle())
                 .help("클립보드 내용을 원문에 붙여넣기")
 
                 Spacer()
             }
 
             HStack(spacing: 16) {
-                Picker("", selection: $sourceLanguage) {
-                    ForEach(LanguageOption.sourceLanguages) { language in
-                        Text(language.displayName).tag(language)
-                    }
-                }
-                .pickerStyle(.menu)
-                .frame(width: 180)
+                LanguageMenu(
+                    selection: $sourceLanguage,
+                    languages: LanguageOption.sourceLanguages,
+                    help: "출발 언어 선택"
+                )
 
                 Button(action: onSwap) {
                     Image(systemName: "arrow.left.arrow.right")
                         .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
                 }
-                .compactIconButton()
+                .buttonStyle(.plain)
                 .help("언어 전환")
 
-                Picker("", selection: $targetLanguage) {
-                    ForEach(LanguageOption.targetLanguages) { language in
-                        Text(language.displayName).tag(language)
-                    }
-                }
-                .pickerStyle(.menu)
-                .frame(width: 180)
+                LanguageMenu(
+                    selection: $targetLanguage,
+                    languages: LanguageOption.targetLanguages,
+                    help: "도착 언어 선택"
+                )
             }
 
             HStack {
@@ -344,6 +338,41 @@ private struct LanguageBar: View {
                 .fill(AppTheme.panelBorder)
                 .frame(height: 1)
         }
+    }
+}
+
+private struct LanguageMenu: View {
+    @Binding var selection: LanguageOption
+    let languages: [LanguageOption]
+    let help: String
+
+    var body: some View {
+        Menu {
+            ForEach(languages) { language in
+                Button {
+                    selection = language
+                } label: {
+                    if selection == language {
+                        Label(language.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(language.displayName)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(selection.displayName)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.system(size: 13, weight: .semibold))
+            .frame(width: 180, height: 32)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }
 
