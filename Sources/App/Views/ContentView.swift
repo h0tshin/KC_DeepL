@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var sourceLanguage = LanguageOption.english
     @State private var targetLanguage = LanguageOption.korean
     @State private var selectedMode: TranslationMode = .text
+    @State private var pasteBackTarget: PasteBackTarget?
 
     @AppStorage(PreferenceKeys.provider) private var providerRaw = AppDefaults.defaultProvider.rawValue
     @AppStorage(PreferenceKeys.modelID) private var modelID = AppDefaults.defaultModelID
@@ -49,7 +50,9 @@ struct ContentView: View {
                             translatedText: viewModel.translatedText,
                             isTranslating: viewModel.isTranslating,
                             errorMessage: viewModel.errorMessage,
-                            onCapture: viewModel.beginScreenCaptureMock
+                            pasteBackTarget: pasteBackTarget,
+                            onCapture: viewModel.beginScreenCaptureMock,
+                            onPasteBack: pasteTranslationBackToSourceApp
                         )
 
                         BottomStatusBar(statusMessage: viewModel.statusMessage)
@@ -83,6 +86,9 @@ struct ContentView: View {
             viewModel.runStartupChecks()
         }
         .onChange(of: viewModel.sourceText) { _, _ in
+            if viewModel.sourceText.isEmpty {
+                pasteBackTarget = nil
+            }
             scheduleAutoTranslation()
         }
         .onChange(of: sourceLanguage) { _, _ in
@@ -107,7 +113,8 @@ struct ContentView: View {
                 handleCommandAction(
                     payload.action,
                     capturedText: payload.capturedText,
-                    statusMessage: payload.statusMessage
+                    statusMessage: payload.statusMessage,
+                    pasteBackTarget: payload.pasteBackTarget
                 )
             } else if let action = notification.object as? AppCommandAction {
                 handleCommandAction(action)
@@ -150,6 +157,7 @@ struct ContentView: View {
             return
         }
 
+        pasteBackTarget = nil
         viewModel.sourceText = viewModel.sourceText.isEmpty
             ? clipboardText
             : "\(viewModel.sourceText)\n\(clipboardText)"
@@ -158,19 +166,24 @@ struct ContentView: View {
     private func handleCommandAction(
         _ action: AppCommandAction,
         capturedText: String? = nil,
-        statusMessage: String? = nil
+        statusMessage: String? = nil,
+        pasteBackTarget: PasteBackTarget? = nil
     ) {
         switch action {
         case .textTranslation:
             selectedMode = .text
             applyCapturedTextIfAvailable(capturedText)
+            self.pasteBackTarget = pasteBackTarget
         case .writing:
             selectedMode = .write
             applyCapturedTextIfAvailable(capturedText)
+            self.pasteBackTarget = pasteBackTarget
         case .fileTranslation:
             selectedMode = .files
+            self.pasteBackTarget = nil
         case .screenCapture:
             selectedMode = .text
+            self.pasteBackTarget = nil
             viewModel.beginScreenCaptureMock()
         }
 
@@ -187,6 +200,15 @@ struct ContentView: View {
         }
 
         viewModel.sourceText = text
+    }
+
+    private func pasteTranslationBackToSourceApp() {
+        guard let pasteBackTarget else {
+            viewModel.statusMessage = "연결된 입력 위치가 없습니다."
+            return
+        }
+
+        viewModel.statusMessage = pasteBackTarget.paste(viewModel.translatedText)
     }
 }
 
@@ -454,7 +476,9 @@ private struct TranslationWorkspace: View {
     let translatedText: String
     let isTranslating: Bool
     let errorMessage: String?
+    let pasteBackTarget: PasteBackTarget?
     let onCapture: () -> Void
+    let onPasteBack: () -> Void
     @State private var focusedPane: WorkspacePane?
 
     var body: some View {
@@ -474,7 +498,9 @@ private struct TranslationWorkspace: View {
                     translatedText: translatedText,
                     isTranslating: isTranslating,
                     errorMessage: errorMessage,
-                    isFocused: focusedPane == .result
+                    isFocused: focusedPane == .result,
+                    showsPasteBackButton: pasteBackTarget != nil,
+                    onPasteBack: onPasteBack
                 )
                 .onHover { isHovering in
                     focusedPane = isHovering ? .result : nil
@@ -800,6 +826,8 @@ private struct ResultPane: View {
     let isTranslating: Bool
     let errorMessage: String?
     let isFocused: Bool
+    let showsPasteBackButton: Bool
+    let onPasteBack: () -> Void
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -829,16 +857,30 @@ private struct ResultPane: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Button(action: copyResultText) {
-                Image(systemName: "doc.on.doc")
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(width: 34, height: 34)
+            HStack(spacing: 8) {
+                if showsPasteBackButton && !translatedText.isEmpty {
+                    Button(action: onPasteBack) {
+                        Label("연결하여 붙여넣기", systemImage: "arrow.turn.down.left")
+                            .font(.system(size: 12, weight: .semibold))
+                            .padding(.horizontal, 10)
+                            .frame(height: 34)
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
+                    .help("번역 결과를 원래 입력 위치에 붙여넣기")
+                }
+
+                Button(action: copyResultText) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 16, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .frame(width: 34, height: 34)
+                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
+                .disabled(translatedText.isEmpty)
+                .help("번역 결과 복사")
             }
-            .buttonStyle(.plain)
-            .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
-            .disabled(translatedText.isEmpty)
             .padding(24)
-            .help("번역 결과 복사")
         }
         .background(AppTheme.panelBackground)
         .overlay {

@@ -27,6 +27,7 @@ struct AppCommandPayload {
     let action: AppCommandAction
     let capturedText: String?
     let statusMessage: String?
+    let pasteBackTarget: PasteBackTarget?
 }
 
 final class AppActionDispatcher {
@@ -36,7 +37,12 @@ final class AppActionDispatcher {
 
     private init() {}
 
-    func perform(_ action: AppCommandAction, capturedText: String? = nil, statusMessage: String? = nil) {
+    func perform(
+        _ action: AppCommandAction,
+        capturedText: String? = nil,
+        statusMessage: String? = nil,
+        pasteBackTarget: PasteBackTarget? = nil
+    ) {
         DispatchQueue.main.async {
             self.showMainWindow()
 
@@ -44,7 +50,8 @@ final class AppActionDispatcher {
                 let payload = AppCommandPayload(
                     action: action,
                     capturedText: capturedText,
-                    statusMessage: statusMessage
+                    statusMessage: statusMessage,
+                    pasteBackTarget: pasteBackTarget
                 )
                 NotificationCenter.default.post(name: .kcDeepLPerformAction, object: payload)
             }
@@ -213,7 +220,8 @@ final class GlobalHotKeyManager {
             AppActionDispatcher.shared.perform(
                 action,
                 capturedText: result.text,
-                statusMessage: result.statusMessage
+                statusMessage: result.statusMessage,
+                pasteBackTarget: result.pasteBackTarget
             )
         }
     }
@@ -222,6 +230,7 @@ final class GlobalHotKeyManager {
 private struct SelectedTextCaptureResult {
     let text: String?
     let statusMessage: String?
+    let pasteBackTarget: PasteBackTarget?
 }
 
 private enum SelectedTextCaptureService {
@@ -229,10 +238,12 @@ private enum SelectedTextCaptureService {
         guard isAccessibilityTrusted() else {
             return SelectedTextCaptureResult(
                 text: nil,
-                statusMessage: "선택 텍스트를 자동으로 가져오려면 시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 KC DeepL을 허용해 주세요."
+                statusMessage: "선택 텍스트를 자동으로 가져오려면 시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 KC DeepL을 허용해 주세요.",
+                pasteBackTarget: nil
             )
         }
 
+        let pasteBackTarget = PasteBackTarget.captureCurrentFocusIfInputCapable()
         let pasteboard = NSPasteboard.general
         let snapshot = PasteboardSnapshot.capture(from: pasteboard)
         let changeCount = pasteboard.changeCount
@@ -240,11 +251,15 @@ private enum SelectedTextCaptureService {
         guard postCopyShortcut() else {
             return SelectedTextCaptureResult(
                 text: nil,
-                statusMessage: "선택 텍스트 복사 이벤트를 보낼 수 없습니다."
+                statusMessage: "선택 텍스트 복사 이벤트를 보낼 수 없습니다.",
+                pasteBackTarget: nil
             )
         }
 
-        let copiedText = waitForCopiedText(on: pasteboard, originalChangeCount: changeCount)
+        let copiedText = PasteboardPolling.waitForCopiedText(
+            on: pasteboard,
+            originalChangeCount: changeCount
+        )
         snapshot.restore(to: pasteboard)
 
         guard let copiedText,
@@ -252,11 +267,16 @@ private enum SelectedTextCaptureService {
         else {
             return SelectedTextCaptureResult(
                 text: nil,
-                statusMessage: "선택된 텍스트를 읽지 못했습니다. 텍스트를 블럭 지정한 뒤 다시 눌러 주세요."
+                statusMessage: "선택된 텍스트를 읽지 못했습니다. 텍스트를 블럭 지정한 뒤 다시 눌러 주세요.",
+                pasteBackTarget: nil
             )
         }
 
-        return SelectedTextCaptureResult(text: copiedText, statusMessage: nil)
+        return SelectedTextCaptureResult(
+            text: copiedText,
+            statusMessage: nil,
+            pasteBackTarget: pasteBackTarget
+        )
     }
 
     private static func isAccessibilityTrusted() -> Bool {
@@ -268,15 +288,131 @@ private enum SelectedTextCaptureService {
     }
 
     private static func postCopyShortcut() -> Bool {
+        KeyboardShortcutPoster.postCommandKey(CGKeyCode(kVK_ANSI_C))
+    }
+}
+
+final class PasteBackTarget {
+    private let processIdentifier: pid_t
+    private let focusedElement: AXUIElement
+    private let appName: String
+
+    private init(processIdentifier: pid_t, focusedElement: AXUIElement, appName: String) {
+        self.processIdentifier = processIdentifier
+        self.focusedElement = focusedElement
+        self.appName = appName
+    }
+
+    static func captureCurrentFocusIfInputCapable() -> PasteBackTarget? {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              let focusedElement = focusedElement(for: app),
+              isInputCapable(focusedElement)
+        else {
+            return nil
+        }
+
+        return PasteBackTarget(
+            processIdentifier: app.processIdentifier,
+            focusedElement: focusedElement,
+            appName: app.localizedName ?? "이전 앱"
+        )
+    }
+
+    func paste(_ text: String) -> String {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "붙여넣을 번역 결과가 없습니다."
+        }
+
+        guard let app = NSRunningApplication(processIdentifier: processIdentifier) else {
+            return "\(appName)을 다시 찾을 수 없습니다."
+        }
+
+        let pasteboard = NSPasteboard.general
+        let snapshot = PasteboardSnapshot.capture(from: pasteboard)
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+
+        app.activate()
+        AXUIElementSetAttributeValue(focusedElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        Thread.sleep(forTimeInterval: 0.12)
+
+        if KeyboardShortcutPoster.postCommandKey(CGKeyCode(kVK_ANSI_V)) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                snapshot.restore(to: pasteboard)
+            }
+            return "\(appName)에 번역 결과를 붙여넣었습니다."
+        }
+
+        snapshot.restore(to: pasteboard)
+        return "\(appName)에 붙여넣기 이벤트를 보낼 수 없습니다."
+    }
+
+    private static func focusedElement(for app: NSRunningApplication) -> AXUIElement? {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &value
+        )
+
+        guard error == .success else {
+            return nil
+        }
+
+        guard let value,
+              CFGetTypeID(value) == AXUIElementGetTypeID()
+        else {
+            return nil
+        }
+
+        return (value as! AXUIElement)
+    }
+
+    private static func isInputCapable(_ element: AXUIElement) -> Bool {
+        if let role = stringAttribute(kAXRoleAttribute, from: element),
+           ["AXTextField", "AXTextArea", "AXComboBox"].contains(role) {
+            return true
+        }
+
+        if let subrole = stringAttribute(kAXSubroleAttribute, from: element),
+           subrole == "AXSecureTextField" {
+            return true
+        }
+
+        var isSettable = DarwinBoolean(false)
+        let error = AXUIElementIsAttributeSettable(
+            element,
+            kAXValueAttribute as CFString,
+            &isSettable
+        )
+
+        return error == .success && isSettable.boolValue
+    }
+
+    private static func stringAttribute(_ attribute: String, from element: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        guard error == .success else {
+            return nil
+        }
+
+        return value as? String
+    }
+}
+
+private enum KeyboardShortcutPoster {
+    static func postCommandKey(_ keyCode: CGKeyCode) -> Bool {
         guard let source = CGEventSource(stateID: .hidSystemState),
               let keyDown = CGEvent(
                 keyboardEventSource: source,
-                virtualKey: CGKeyCode(kVK_ANSI_C),
+                virtualKey: keyCode,
                 keyDown: true
               ),
               let keyUp = CGEvent(
                 keyboardEventSource: source,
-                virtualKey: CGKeyCode(kVK_ANSI_C),
+                virtualKey: keyCode,
                 keyDown: false
               )
         else {
@@ -290,8 +426,10 @@ private enum SelectedTextCaptureService {
         keyUp.post(tap: .cghidEventTap)
         return true
     }
+}
 
-    private static func waitForCopiedText(
+private enum PasteboardPolling {
+    static func waitForCopiedText(
         on pasteboard: NSPasteboard,
         originalChangeCount: Int
     ) -> String? {
