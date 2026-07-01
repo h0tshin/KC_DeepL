@@ -24,32 +24,47 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
-                    LanguageBar(
-                        sourceLanguage: $sourceLanguage,
-                        targetLanguage: $targetLanguage,
-                        showTools: $showTools,
-                        onSwap: {
-                            viewModel.swapLanguages(
-                                sourceLanguage: &sourceLanguage,
-                                targetLanguage: &targetLanguage
-                            )
-                        }
-                    )
+                    if selectedMode == .history {
+                        HistoryWorkspace(
+                            history: viewModel.history,
+                            onDelete: viewModel.deleteHistoryItem,
+                            onDeleteAll: viewModel.clearHistory
+                        )
+                    } else {
+                        LanguageBar(
+                            sourceLanguage: $sourceLanguage,
+                            targetLanguage: $targetLanguage,
+                            showTools: $showTools,
+                            onSwap: {
+                                viewModel.swapLanguages(
+                                    sourceLanguage: &sourceLanguage,
+                                    targetLanguage: &targetLanguage
+                                )
+                            }
+                        )
 
-                    TranslationWorkspace(
-                        sourceText: $viewModel.sourceText,
-                        translatedText: viewModel.translatedText,
-                        isTranslating: viewModel.isTranslating,
-                        errorMessage: viewModel.errorMessage,
-                        onCapture: viewModel.beginScreenCaptureMock
-                    )
+                        TranslationWorkspace(
+                            sourceText: $viewModel.sourceText,
+                            translatedText: viewModel.translatedText,
+                            isTranslating: viewModel.isTranslating,
+                            errorMessage: viewModel.errorMessage,
+                            onCapture: viewModel.beginScreenCaptureMock
+                        )
 
-                    BottomStatusBar(statusMessage: viewModel.statusMessage)
+                        BottomStatusBar(statusMessage: viewModel.statusMessage)
+                    }
                 }
 
                 if showTools {
-                    ToolsPanel(history: viewModel.history)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                    ToolsPanel(
+                        history: viewModel.history,
+                        onClose: {
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                showTools = false
+                            }
+                        }
+                    )
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
         }
@@ -61,12 +76,6 @@ struct ContentView: View {
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
-                Circle()
-                    .fill(Color(nsColor: NSColor.systemBlue))
-                    .frame(width: 26, height: 26)
-                    .overlay(Text("H").font(.system(size: 13, weight: .bold)))
-                    .help("계정")
-
                 MainMenuButton()
             }
         }
@@ -115,7 +124,7 @@ struct ContentView: View {
 
 private enum TranslationMode: String, CaseIterable, Identifiable {
     case text = "텍스트 번역"
-    case write = "DeepL Write"
+    case write = "글 작성"
     case files = "파일 번역"
     case history = "기록"
 
@@ -222,15 +231,13 @@ private struct LanguageBar: View {
             HStack {
                 Spacer()
 
-                Button {
-                    showTools.toggle()
-                } label: {
-                    Label("툴바", systemImage: "sidebar.right")
-                        .font(.system(size: 13, weight: .semibold))
+                if !showTools {
+                    ToolPanelToggleButton {
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            showTools = true
+                        }
+                    }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("오른쪽 도구 패널")
             }
         }
         .padding(.horizontal, 18)
@@ -239,6 +246,23 @@ private struct LanguageBar: View {
         .overlay(alignment: .bottom) {
             Divider().opacity(0.35)
         }
+    }
+}
+
+private struct ToolPanelToggleButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "sidebar.right")
+                .resizable()
+                .scaledToFit()
+                .padding(1)
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("툴바")
     }
 }
 
@@ -262,10 +286,6 @@ private struct TranslationWorkspace: View {
                 .onHover { isHovering in
                     focusedPane = isHovering ? .source : nil
                 }
-
-                Rectangle()
-                    .fill(AppTheme.separator)
-                    .frame(width: 1)
 
                 ResultPane(
                     translatedText: translatedText,
@@ -294,10 +314,7 @@ private struct SourceEditorPane: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            TextEditor(text: $text)
-                .font(.system(size: 26, weight: .regular))
-                .lineSpacing(5)
-                .scrollContentBackground(.hidden)
+            PlainTextEditor(text: $text)
                 .padding(20)
 
             if text.isEmpty {
@@ -369,6 +386,70 @@ private struct SourceEditorPane: View {
     }
 }
 
+private struct PlainTextEditor: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let textView = NSTextView()
+        textView.delegate = context.coordinator
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.font = NSFont.systemFont(ofSize: 26)
+        textView.textColor = .labelColor
+        textView.textContainerInset = NSSize(width: 0, height: 0)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+
+        let scrollView = NSScrollView()
+        scrollView.documentView = textView
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else {
+            return
+        }
+
+        if textView.string != text {
+            textView.string = text
+        }
+
+        textView.font = NSFont.systemFont(ofSize: 26)
+        textView.textColor = .labelColor
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        @Binding private var text: String
+
+        init(text: Binding<String>) {
+            _text = text
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else {
+                return
+            }
+
+            text = textView.string
+        }
+    }
+}
+
 private struct FileDropMock: View {
     var body: some View {
         VStack(spacing: 8) {
@@ -401,7 +482,7 @@ private struct ResultPane: View {
     let isFocused: Bool
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .bottomTrailing) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if isTranslating {
@@ -416,8 +497,8 @@ private struct ResultPane: View {
                         Text("번역 결과가 이곳에 표시됩니다")
                             .font(.system(size: 15, weight: .medium))
                             .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(.top, 220)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .padding(.top, 220)
                     } else {
                         Text(translatedText)
                             .font(.system(size: 25))
@@ -429,6 +510,17 @@ private struct ResultPane: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+
+            Button(action: copyResultText) {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
+            .disabled(translatedText.isEmpty)
+            .padding(24)
+            .help("번역 결과 복사")
         }
         .background(AppTheme.panelBackground.opacity(0.94))
         .overlay {
@@ -436,6 +528,142 @@ private struct ResultPane: View {
                 .stroke(isFocused ? AppTheme.accent : Color.clear, lineWidth: 2)
                 .padding(1)
         }
+    }
+
+    private func copyResultText() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(translatedText, forType: .string)
+    }
+}
+
+private struct HistoryWorkspace: View {
+    let history: [TranslationHistoryItem]
+    let onDelete: (TranslationHistoryItem.ID) -> Void
+    let onDeleteAll: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Spacer()
+
+                Button(action: onDeleteAll) {
+                    Label("기록 삭제", systemImage: "trash")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color(nsColor: NSColor.systemCyan))
+                .disabled(history.isEmpty)
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 18)
+
+            if history.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.secondary)
+
+                    Text("아직 저장된 번역 기록이 없습니다")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        ForEach(history) { item in
+                            HistoryCard(item: item) {
+                                onDelete(item.id)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 28)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppTheme.panelBackground)
+    }
+}
+
+private struct HistoryCard: View {
+    let item: TranslationHistoryItem
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(item.relativeTimestamp)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 18, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color(nsColor: NSColor.systemCyan))
+                .help("기록 삭제")
+            }
+
+            HistoryTextBlock(
+                label: "출발 언어",
+                language: item.sourceLanguage.displayName,
+                text: item.sourceText
+            )
+
+            Divider().opacity(0.22)
+
+            HistoryTextBlock(
+                label: "도착 언어",
+                language: item.targetLanguage.displayName,
+                text: item.translatedText
+            )
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AppTheme.controlBackground.opacity(0.92), in: RoundedRectangle(cornerRadius: 5))
+        .overlay {
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(AppTheme.separator)
+        }
+    }
+}
+
+private struct HistoryTextBlock: View {
+    let label: String
+    let language: String
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 5) {
+                Text("\(label):")
+                    .font(.system(size: 13, weight: .bold))
+                Text(language)
+                    .font(.system(size: 13, weight: .bold))
+                Text("\(text.count)자")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(text)
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private extension TranslationHistoryItem {
+    var relativeTimestamp: String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: timestamp, relativeTo: Date())
     }
 }
 
@@ -475,14 +703,14 @@ private struct BottomStatusBar: View {
 
 private struct ToolsPanel: View {
     let history: [TranslationHistoryItem]
+    let onClose: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Image(systemName: "sidebar.right")
+                ToolPanelToggleButton(action: onClose)
                 Spacer()
             }
-            .font(.title3)
 
             Text("편집 도구")
                 .font(.caption)

@@ -157,7 +157,7 @@ private struct ShortcutSettingsPane: View {
 
             ShortcutRow(
                 title: "선택한 텍스트 다시 쓰기",
-                description: "선택한 텍스트를 KC DeepL Write로 즉시 교정할 수 있습니다.",
+                description: "선택한 텍스트를 글 작성 모드로 즉시 교정할 수 있습니다.",
                 shortcut: $rewriteShortcut
             )
 

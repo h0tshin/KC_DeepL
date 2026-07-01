@@ -7,11 +7,9 @@
   <circle cx="80" cy="23" r="8" fill="#28C840"/>
   <rect x="110" y="9" width="112" height="28" rx="6" fill="#DDEEFF"/>
   <text x="132" y="28" fill="#2D5E9E" font-family="Apple SD Gothic Neo, Arial" font-size="14" font-weight="700">텍스트 번역</text>
-  <text x="250" y="29" fill="#FFFFFF" font-family="Apple SD Gothic Neo, Arial" font-size="14" font-weight="700">DeepL Write</text>
+  <text x="250" y="29" fill="#FFFFFF" font-family="Apple SD Gothic Neo, Arial" font-size="14" font-weight="700">글 작성</text>
   <text x="395" y="29" fill="#FFFFFF" font-family="Apple SD Gothic Neo, Arial" font-size="14" font-weight="700">파일 번역</text>
   <text x="515" y="29" fill="#FFFFFF" font-family="Apple SD Gothic Neo, Arial" font-size="14" font-weight="700">기록</text>
-  <circle cx="1138" cy="23" r="15" fill="#0A84FF"/>
-  <text x="1133" y="29" fill="#FFFFFF" font-family="Arial" font-size="14" font-weight="700">H</text>
   <text x="1170" y="29" fill="#FFFFFF" font-family="Arial" font-size="24">☰</text>
 
   <rect x="0" y="46" width="1200" height="58" fill="#2B2B2B"/>

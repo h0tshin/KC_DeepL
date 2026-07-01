@@ -213,6 +213,16 @@ final class TranslationViewModel: ObservableObject {
         captureState = nil
         statusMessage = "캡처가 입력 영역에 첨부되었습니다. OCR은 to-be 기능입니다."
     }
+
+    func deleteHistoryItem(id: TranslationHistoryItem.ID) {
+        history.removeAll { $0.id == id }
+        statusMessage = "선택한 번역 기록을 삭제했습니다."
+    }
+
+    func clearHistory() {
+        history.removeAll()
+        statusMessage = "번역 기록을 모두 삭제했습니다."
+    }
 }
 
 struct CaptureState: Identifiable, Equatable {

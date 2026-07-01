@@ -14,6 +14,7 @@ struct KCDeepLApp: App {
             ContentView()
                 .frame(minWidth: 980, minHeight: 600)
         }
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandMenu("KC DeepL") {
                 Button("선택한 텍스트 번역") {}
