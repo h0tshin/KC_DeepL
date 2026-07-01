@@ -10,7 +10,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 
 ROOT = Path(__file__).resolve().parents[1]
 RESOURCES = ROOT / "Sources" / "App" / "Resources"
-SOURCE_ICON = RESOURCES / "AppIconSource.jpg"
+SOURCE_ICON = RESOURCES / "AppIconSource.png"
 APP_ICON = RESOURCES / "AppIcon.png"
 MENUBAR_ICON = RESOURCES / "MenuBarIcon.png"
 ICONSET = RESOURCES / "AppIcon.iconset"
@@ -22,7 +22,7 @@ def foreground_bounds(image: Image.Image, padding: int = 18) -> tuple[int, int, 
     white = Image.new("RGB", rgb.size, (255, 255, 255))
     difference = ImageChops.difference(rgb, white).convert("L")
     mask = difference.point(lambda value: 255 if value > 18 else 0)
-    bounds = mask.getbbox()
+    bounds = largest_component_bounds(mask)
     if bounds is None:
         return (0, 0, image.width, image.height)
 
@@ -35,8 +35,75 @@ def foreground_bounds(image: Image.Image, padding: int = 18) -> tuple[int, int, 
     )
 
 
+def largest_component_bounds(mask: Image.Image) -> tuple[int, int, int, int] | None:
+    scale = 256 / max(mask.size)
+    small_size = (
+        max(1, round(mask.width * scale)),
+        max(1, round(mask.height * scale)),
+    )
+    small = mask.resize(small_size, Image.Resampling.NEAREST)
+    pixels = small.load()
+    visited: set[tuple[int, int]] = set()
+    best: tuple[int, int, int, int, int] | None = None
+
+    for y in range(small.height):
+        for x in range(small.width):
+            if (x, y) in visited or pixels[x, y] == 0:
+                continue
+
+            stack = [(x, y)]
+            visited.add((x, y))
+            count = 0
+            left = right = x
+            top = bottom = y
+
+            while stack:
+                current_x, current_y = stack.pop()
+                count += 1
+                left = min(left, current_x)
+                right = max(right, current_x)
+                top = min(top, current_y)
+                bottom = max(bottom, current_y)
+
+                for next_x, next_y in (
+                    (current_x + 1, current_y),
+                    (current_x - 1, current_y),
+                    (current_x, current_y + 1),
+                    (current_x, current_y - 1),
+                ):
+                    if (
+                        next_x < 0
+                        or next_y < 0
+                        or next_x >= small.width
+                        or next_y >= small.height
+                        or (next_x, next_y) in visited
+                        or pixels[next_x, next_y] == 0
+                    ):
+                        continue
+
+                    visited.add((next_x, next_y))
+                    stack.append((next_x, next_y))
+
+            if best is None or count > best[0]:
+                best = (count, left, top, right + 1, bottom + 1)
+
+    if best is None:
+        return None
+
+    _, left, top, right, bottom = best
+    x_scale = mask.width / small.width
+    y_scale = mask.height / small.height
+    return (
+        max(0, int(left * x_scale)),
+        max(0, int(top * y_scale)),
+        min(mask.width, int(right * x_scale)),
+        min(mask.height, int(bottom * y_scale)),
+    )
+
+
 def make_app_icon() -> None:
     source = Image.open(SOURCE_ICON).convert("RGBA")
+    remove_source_watermark(source)
     crop = source.crop(foreground_bounds(source))
 
     size = 1024
@@ -52,7 +119,7 @@ def make_app_icon() -> None:
     tile_draw = ImageDraw.Draw(tile_mask)
     tile_draw.rounded_rectangle((72, 72, 952, 952), radius=182, fill=255)
 
-    graphic = ImageOps.contain(crop, (850, 850), Image.Resampling.LANCZOS)
+    graphic = ImageOps.contain(crop, (910, 910), Image.Resampling.LANCZOS)
     x = (size - graphic.width) // 2
     y = (size - graphic.height) // 2
     tile = Image.new("RGBA", (size, size), (248, 249, 248, 255))
@@ -61,8 +128,23 @@ def make_app_icon() -> None:
     canvas.save(APP_ICON)
 
 
+def remove_source_watermark(image: Image.Image) -> None:
+    width, height = image.size
+    draw = ImageDraw.Draw(image)
+    draw.rectangle(
+        (
+            round(width * 0.87),
+            round(height * 0.83),
+            width,
+            height,
+        ),
+        fill=(255, 255, 255, 255),
+    )
+
+
 def make_menubar_icon() -> None:
     source = Image.open(SOURCE_ICON).convert("RGBA")
+    remove_source_watermark(source)
     crop = source.crop(foreground_bounds(source, padding=4))
     graphic = ImageOps.contain(crop, (30, 30), Image.Resampling.LANCZOS)
 
