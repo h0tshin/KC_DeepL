@@ -1,9 +1,9 @@
 import SwiftUI
 
 enum AppTheme {
-    static let titlebarNSColor = rgbColor(31, 31, 31)
-    static let panelNSColor = rgbColor(45, 45, 45)
-    static let statusBarNSColor = rgbColor(64, 64, 64)
+    static let titlebarNSColor = sRGBColor(red: 31, green: 31, blue: 31)
+    static let panelNSColor = sRGBColor(red: 45, green: 45, blue: 45)
+    static let statusBarNSColor = sRGBColor(red: 64, green: 64, blue: 64)
 
     static let titlebarBackground = Color(nsColor: titlebarNSColor)
     static let panelBackground = Color(nsColor: panelNSColor)
@@ -17,9 +17,9 @@ enum AppTheme {
     static let selectedTitlebarForeground = Color(nsColor: NSColor(calibratedRed: 0.04, green: 0.28, blue: 0.56, alpha: 1))
     static let success = Color(nsColor: NSColor.systemGreen)
 
-    private static func rgbColor(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat) -> NSColor {
+    private static func sRGBColor(red: CGFloat, green: CGFloat, blue: CGFloat) -> NSColor {
         NSColor(
-            calibratedRed: red / 255,
+            srgbRed: red / 255,
             green: green / 255,
             blue: blue / 255,
             alpha: 1

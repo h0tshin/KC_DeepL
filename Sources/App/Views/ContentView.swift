@@ -77,6 +77,8 @@ struct ContentView: View {
                 TitlebarModeControls(selectedMode: $selectedMode)
             }
         }
+        .toolbarBackground(AppTheme.titlebarBackground, for: .windowToolbar)
+        .toolbarBackground(.visible, for: .windowToolbar)
         .onAppear {
             viewModel.runStartupChecks()
         }
