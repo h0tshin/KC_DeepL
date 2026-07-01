@@ -332,7 +332,7 @@ private struct LanguageBar: View {
                     }
                 }
             }
-            .padding(.trailing, 34)
+            .padding(.trailing, 10)
         }
         .padding(.horizontal, 18)
         .frame(height: 50)
