@@ -26,6 +26,7 @@ extension Notification.Name {
 struct AppCommandPayload {
     let action: AppCommandAction
     let capturedText: String?
+    let capturedAttributedText: NSAttributedString?
     let statusMessage: String?
     let pasteBackTarget: PasteBackTarget?
 }
@@ -40,6 +41,7 @@ final class AppActionDispatcher {
     func perform(
         _ action: AppCommandAction,
         capturedText: String? = nil,
+        capturedAttributedText: NSAttributedString? = nil,
         statusMessage: String? = nil,
         pasteBackTarget: PasteBackTarget? = nil
     ) {
@@ -50,6 +52,7 @@ final class AppActionDispatcher {
                 let payload = AppCommandPayload(
                     action: action,
                     capturedText: capturedText,
+                    capturedAttributedText: capturedAttributedText,
                     statusMessage: statusMessage,
                     pasteBackTarget: pasteBackTarget
                 )
@@ -220,6 +223,7 @@ final class GlobalHotKeyManager {
             AppActionDispatcher.shared.perform(
                 action,
                 capturedText: result.text,
+                capturedAttributedText: result.attributedText,
                 statusMessage: result.statusMessage,
                 pasteBackTarget: result.pasteBackTarget
             )
@@ -229,6 +233,7 @@ final class GlobalHotKeyManager {
 
 private struct SelectedTextCaptureResult {
     let text: String?
+    let attributedText: NSAttributedString?
     let statusMessage: String?
     let pasteBackTarget: PasteBackTarget?
 }
@@ -238,6 +243,7 @@ private enum SelectedTextCaptureService {
         guard isAccessibilityTrusted() else {
             return SelectedTextCaptureResult(
                 text: nil,
+                attributedText: nil,
                 statusMessage: "선택 텍스트를 자동으로 가져오려면 시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 KC DeepL을 허용해 주세요.",
                 pasteBackTarget: nil
             )
@@ -251,6 +257,7 @@ private enum SelectedTextCaptureService {
         guard postCopyShortcut() else {
             return SelectedTextCaptureResult(
                 text: nil,
+                attributedText: nil,
                 statusMessage: "선택 텍스트 복사 이벤트를 보낼 수 없습니다.",
                 pasteBackTarget: nil
             )
@@ -260,6 +267,7 @@ private enum SelectedTextCaptureService {
             on: pasteboard,
             originalChangeCount: changeCount
         )
+        let copiedAttributedText = RichTextFormatting.attributedString(from: pasteboard)
         snapshot.restore(to: pasteboard)
 
         guard let copiedText,
@@ -267,6 +275,7 @@ private enum SelectedTextCaptureService {
         else {
             return SelectedTextCaptureResult(
                 text: nil,
+                attributedText: nil,
                 statusMessage: "선택된 텍스트를 읽지 못했습니다. 텍스트를 블럭 지정한 뒤 다시 눌러 주세요.",
                 pasteBackTarget: nil
             )
@@ -274,6 +283,7 @@ private enum SelectedTextCaptureService {
 
         return SelectedTextCaptureResult(
             text: copiedText,
+            attributedText: copiedAttributedText,
             statusMessage: nil,
             pasteBackTarget: pasteBackTarget
         )
@@ -330,8 +340,7 @@ final class PasteBackTarget {
 
         let pasteboard = NSPasteboard.general
         let snapshot = PasteboardSnapshot.capture(from: pasteboard)
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        RichTextFormatting.writeMarkdown(text, to: pasteboard)
 
         app.activate()
         AXUIElementSetAttributeValue(focusedElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)

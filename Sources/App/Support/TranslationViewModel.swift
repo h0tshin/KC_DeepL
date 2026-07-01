@@ -1,9 +1,10 @@
-import Foundation
+import AppKit
 import KCDeepLCore
 
 @MainActor
 final class TranslationViewModel: ObservableObject {
     @Published var sourceText = ""
+    @Published var sourceAttributedText = RichTextFormatting.plainAttributedString("")
     @Published var translatedText = ""
     @Published var isTranslating = false
     @Published var statusMessage = "시스템과 API 상태를 확인하는 중입니다."
@@ -38,8 +39,13 @@ final class TranslationViewModel: ObservableObject {
         temperature: Double,
         historyEnabled: Bool
     ) async {
+        let translationText = RichTextFormatting.markdown(
+            from: sourceAttributedText,
+            fallback: sourceText
+        )
         await translateSnapshot(
-            sourceText,
+            translationText,
+            expectedSourceText: sourceText,
             sourceLanguage: sourceLanguage,
             targetLanguage: targetLanguage,
             provider: provider,
@@ -63,8 +69,12 @@ final class TranslationViewModel: ObservableObject {
         debouncedTranslationTask?.cancel()
         isTranslating = false
 
-        let pendingText = sourceText
-        guard !pendingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let expectedSourceText = sourceText
+        let pendingText = RichTextFormatting.markdown(
+            from: sourceAttributedText,
+            fallback: expectedSourceText
+        )
+        guard !expectedSourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             translatedText = ""
             errorMessage = nil
             runStartupChecks()
@@ -87,6 +97,7 @@ final class TranslationViewModel: ObservableObject {
 
             await self?.translateSnapshot(
                 pendingText,
+                expectedSourceText: expectedSourceText,
                 sourceLanguage: sourceLanguage,
                 targetLanguage: targetLanguage,
                 provider: provider,
@@ -115,6 +126,7 @@ final class TranslationViewModel: ObservableObject {
 
     private func translateSnapshot(
         _ text: String,
+        expectedSourceText: String,
         sourceLanguage: LanguageOption,
         targetLanguage: LanguageOption,
         provider: LLMProvider,
@@ -123,7 +135,7 @@ final class TranslationViewModel: ObservableObject {
         temperature: Double,
         historyEnabled: Bool
     ) async {
-        guard sourceText == text else {
+        guard sourceText == expectedSourceText else {
             return
         }
 
@@ -156,7 +168,7 @@ final class TranslationViewModel: ObservableObject {
 
         do {
             let output = try await client.translate(request)
-            guard sourceText == text, !Task.isCancelled else {
+            guard sourceText == expectedSourceText, !Task.isCancelled else {
                 return
             }
 
@@ -175,11 +187,11 @@ final class TranslationViewModel: ObservableObject {
                 )
             }
         } catch is CancellationError {
-            if sourceText == text {
+            if sourceText == expectedSourceText {
                 statusMessage = "입력 중입니다. 1초 후 자동 번역합니다."
             }
         } catch {
-            guard sourceText == text else {
+            guard sourceText == expectedSourceText else {
                 return
             }
 
@@ -188,9 +200,40 @@ final class TranslationViewModel: ObservableObject {
             statusMessage = "번역 실패"
         }
 
-        if sourceText == text {
+        if sourceText == expectedSourceText {
             isTranslating = false
         }
+    }
+
+    func setSourceText(_ text: String) {
+        sourceText = text
+        sourceAttributedText = RichTextFormatting.plainAttributedString(text)
+    }
+
+    func setSourceAttributedText(_ attributedText: NSAttributedString) {
+        let normalized = RichTextFormatting.normalize(attributedText)
+        sourceText = normalized.string
+        sourceAttributedText = normalized
+    }
+
+    func appendSourceAttributedText(_ attributedText: NSAttributedString) {
+        guard !attributedText.string.isEmpty else {
+            return
+        }
+
+        if sourceAttributedText.length == 0 {
+            setSourceAttributedText(attributedText)
+            return
+        }
+
+        let mutable = NSMutableAttributedString(attributedString: sourceAttributedText)
+        mutable.append(RichTextFormatting.plainAttributedString("\n"))
+        mutable.append(RichTextFormatting.normalize(attributedText))
+        setSourceAttributedText(mutable)
+    }
+
+    func clearSourceText() {
+        setSourceText("")
     }
 
     func swapLanguages(sourceLanguage: inout LanguageOption, targetLanguage: inout LanguageOption) {
@@ -203,6 +246,7 @@ final class TranslationViewModel: ObservableObject {
 
         swap(&sourceLanguage, &targetLanguage)
         swap(&sourceText, &translatedText)
+        sourceAttributedText = RichTextFormatting.plainAttributedString(sourceText)
     }
 
     private func moveTranslatedTextToSource() {
@@ -210,7 +254,7 @@ final class TranslationViewModel: ObservableObject {
             return
         }
 
-        sourceText = translatedText
+        setSourceText(translatedText)
         translatedText = ""
     }
 
@@ -224,7 +268,7 @@ final class TranslationViewModel: ObservableObject {
 
     func completeScreenCaptureMock() {
         let capturedMarker = "[캡처된 화면 영역]\nOCR 텍스트 인식은 다음 구현 단계에서 Vision 프레임워크로 연결됩니다."
-        sourceText = sourceText.isEmpty ? capturedMarker : "\(sourceText)\n\n\(capturedMarker)"
+        setSourceText(sourceText.isEmpty ? capturedMarker : "\(sourceText)\n\n\(capturedMarker)")
         captureState = nil
         statusMessage = "캡처가 입력 영역에 첨부되었습니다. OCR은 to-be 기능입니다."
     }

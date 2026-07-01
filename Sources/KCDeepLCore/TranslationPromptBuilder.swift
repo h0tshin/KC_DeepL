@@ -9,7 +9,9 @@ public enum TranslationPromptBuilder {
         return """
         You are a professional translation engine.
         Translate the user's text from \(sourceName) to \(request.targetLanguage.displayName).
-        Preserve meaning, formatting, line breaks, lists, and domain-specific terms.
+        Preserve meaning, domain-specific terms, and the original document structure.
+        Preserve Markdown or HTML-like formatting markers exactly, including headings, bold, italic, underline tags, links, lists, tables, placeholders, and line breaks.
+        Translate only human-readable content inside those structures.
         If the source text is already in the target language, improve naturalness without changing meaning.
         Return only the translated text. Do not include explanations.
 

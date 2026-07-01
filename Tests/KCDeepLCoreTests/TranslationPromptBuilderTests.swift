@@ -17,6 +17,7 @@ final class TranslationPromptBuilderTests: XCTestCase {
         XCTAssertTrue(prompt.contains("영어"))
         XCTAssertTrue(prompt.contains("한국어"))
         XCTAssertTrue(prompt.contains("Return only the translated text"))
+        XCTAssertTrue(prompt.contains("Preserve Markdown or HTML-like formatting markers"))
         XCTAssertTrue(prompt.contains("Hello, world."))
     }
 

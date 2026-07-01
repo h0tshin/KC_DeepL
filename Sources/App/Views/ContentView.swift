@@ -46,7 +46,14 @@ struct ContentView: View {
                         )
 
                         TranslationWorkspace(
-                            sourceText: $viewModel.sourceText,
+                            sourceText: Binding(
+                                get: { viewModel.sourceText },
+                                set: { viewModel.setSourceText($0) }
+                            ),
+                            sourceAttributedText: Binding(
+                                get: { viewModel.sourceAttributedText },
+                                set: { viewModel.setSourceAttributedText($0) }
+                            ),
                             translatedText: viewModel.translatedText,
                             isTranslating: viewModel.isTranslating,
                             errorMessage: viewModel.errorMessage,
@@ -113,6 +120,7 @@ struct ContentView: View {
                 handleCommandAction(
                     payload.action,
                     capturedText: payload.capturedText,
+                    capturedAttributedText: payload.capturedAttributedText,
                     statusMessage: payload.statusMessage,
                     pasteBackTarget: payload.pasteBackTarget
                 )
@@ -151,32 +159,31 @@ struct ContentView: View {
     }
 
     private func pasteClipboardIntoSource() {
-        guard let clipboardText = NSPasteboard.general.string(forType: .string),
-              !clipboardText.isEmpty
+        guard let clipboardText = RichTextFormatting.attributedString(from: NSPasteboard.general),
+              !clipboardText.string.isEmpty
         else {
             return
         }
 
         pasteBackTarget = nil
-        viewModel.sourceText = viewModel.sourceText.isEmpty
-            ? clipboardText
-            : "\(viewModel.sourceText)\n\(clipboardText)"
+        viewModel.appendSourceAttributedText(clipboardText)
     }
 
     private func handleCommandAction(
         _ action: AppCommandAction,
         capturedText: String? = nil,
+        capturedAttributedText: NSAttributedString? = nil,
         statusMessage: String? = nil,
         pasteBackTarget: PasteBackTarget? = nil
     ) {
         switch action {
         case .textTranslation:
             selectedMode = .text
-            applyCapturedTextIfAvailable(capturedText)
+            applyCapturedTextIfAvailable(capturedText, attributedText: capturedAttributedText)
             self.pasteBackTarget = pasteBackTarget
         case .writing:
             selectedMode = .write
-            applyCapturedTextIfAvailable(capturedText)
+            applyCapturedTextIfAvailable(capturedText, attributedText: capturedAttributedText)
             self.pasteBackTarget = pasteBackTarget
         case .fileTranslation:
             selectedMode = .files
@@ -192,14 +199,20 @@ struct ContentView: View {
         }
     }
 
-    private func applyCapturedTextIfAvailable(_ text: String?) {
+    private func applyCapturedTextIfAvailable(_ text: String?, attributedText: NSAttributedString?) {
+        if let attributedText,
+           !attributedText.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            viewModel.setSourceAttributedText(attributedText)
+            return
+        }
+
         guard let text,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
             return
         }
 
-        viewModel.sourceText = text
+        viewModel.setSourceText(text)
     }
 
     private func pasteTranslationBackToSourceApp() {
@@ -473,6 +486,7 @@ private struct ToolPanelToggleButton: View {
 
 private struct TranslationWorkspace: View {
     @Binding var sourceText: String
+    @Binding var sourceAttributedText: NSAttributedString
     let translatedText: String
     let isTranslating: Bool
     let errorMessage: String?
@@ -486,6 +500,7 @@ private struct TranslationWorkspace: View {
             HStack(spacing: 0) {
                 SourceEditorPane(
                     text: $sourceText,
+                    attributedText: $sourceAttributedText,
                     width: proxy.size.width / 2,
                     isFocused: focusedPane == .source,
                     onCapture: onCapture
@@ -517,17 +532,18 @@ private enum WorkspacePane {
 
 private struct SourceEditorPane: View {
     @Binding var text: String
+    @Binding var attributedText: NSAttributedString
     let width: CGFloat
     let isFocused: Bool
     let onCapture: () -> Void
 
     private var hasFormatting: Bool {
-        MarkdownFormatting.containsFormatting(in: text)
+        RichTextFormatting.hasFormatting(attributedText) || MarkdownFormatting.containsFormatting(in: text)
     }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            PlainTextEditor(text: $text)
+            RichTextEditor(text: $text, attributedText: $attributedText)
                 .padding(20)
 
             if text.isEmpty {
@@ -633,34 +649,40 @@ private struct SourceEditorPane: View {
     }
 
     private func copySourceText() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        RichTextFormatting.write(attributedText, to: NSPasteboard.general)
     }
 }
 
-private struct PlainTextEditor: NSViewRepresentable {
+private struct RichTextEditor: NSViewRepresentable {
     @Binding var text: String
+    @Binding var attributedText: NSAttributedString
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text)
+        Coordinator(text: $text, attributedText: $attributedText)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = NSTextView()
         textView.delegate = context.coordinator
         textView.drawsBackground = false
-        textView.isRichText = false
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.font = NSFont.systemFont(ofSize: 26)
         textView.textColor = .labelColor
+        textView.typingAttributes = [
+            .font: NSFont.systemFont(ofSize: 26),
+            .foregroundColor: NSColor.labelColor
+        ]
         textView.textContainerInset = NSSize(width: 0, height: 0)
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = true
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
-        MarkdownStyler.apply(to: textView)
+        textView.textStorage?.setAttributedString(RichTextFormatting.normalize(attributedText))
 
         let scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -678,29 +700,61 @@ private struct PlainTextEditor: NSViewRepresentable {
             return
         }
 
-        if textView.string != text {
-            textView.string = text
+        if !textView.attributedString().isEqual(to: attributedText) {
+            context.coordinator.apply(attributedText, to: textView)
         }
 
         textView.font = NSFont.systemFont(ofSize: 26)
         textView.textColor = .labelColor
-        MarkdownStyler.apply(to: textView)
+        textView.typingAttributes = [
+            .font: NSFont.systemFont(ofSize: 26),
+            .foregroundColor: NSColor.labelColor
+        ]
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         @Binding private var text: String
+        @Binding private var attributedText: NSAttributedString
+        private var isApplyingProgrammaticUpdate = false
 
-        init(text: Binding<String>) {
+        init(text: Binding<String>, attributedText: Binding<NSAttributedString>) {
             _text = text
+            _attributedText = attributedText
+        }
+
+        func apply(_ attributed: NSAttributedString, to textView: NSTextView) {
+            guard !isApplyingProgrammaticUpdate else {
+                return
+            }
+
+            isApplyingProgrammaticUpdate = true
+            let selectedRanges = clampedSelectionRanges(textView.selectedRanges, textLength: attributed.length)
+            textView.textStorage?.setAttributedString(RichTextFormatting.normalize(attributed))
+            textView.selectedRanges = selectedRanges
+            isApplyingProgrammaticUpdate = false
         }
 
         func textDidChange(_ notification: Notification) {
+            guard !isApplyingProgrammaticUpdate else {
+                return
+            }
+
             guard let textView = notification.object as? NSTextView else {
                 return
             }
 
-            text = textView.string
-            MarkdownStyler.apply(to: textView)
+            let normalized = RichTextFormatting.normalize(textView.attributedString())
+            text = normalized.string
+            attributedText = normalized
+        }
+
+        private func clampedSelectionRanges(_ ranges: [NSValue], textLength: Int) -> [NSValue] {
+            ranges.map { value in
+                let range = value.rangeValue
+                let location = min(range.location, textLength)
+                let length = min(range.length, max(0, textLength - location))
+                return NSValue(range: NSRange(location: location, length: length))
+            }
         }
     }
 }
@@ -891,8 +945,7 @@ private struct ResultPane: View {
     }
 
     private func copyResultText() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(translatedText, forType: .string)
+        RichTextFormatting.writeMarkdown(translatedText, to: NSPasteboard.general)
     }
 }
 
