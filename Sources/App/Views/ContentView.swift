@@ -48,7 +48,8 @@ struct ContentView: View {
                             translatedText: viewModel.translatedText,
                             isTranslating: viewModel.isTranslating,
                             errorMessage: viewModel.errorMessage,
-                            onCapture: viewModel.beginScreenCaptureMock
+                            onCapture: viewModel.beginScreenCaptureMock,
+                            onPaste: pasteClipboardIntoSource
                         )
 
                         BottomStatusBar(statusMessage: viewModel.statusMessage)
@@ -69,14 +70,11 @@ struct ContentView: View {
             }
         }
         .background(AppTheme.panelBackground)
+        .background(TitlebarMenuAccessory().frame(width: 0, height: 0))
         .foregroundStyle(.primary)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 TitlebarModeControls(selectedMode: $selectedMode)
-            }
-
-            ToolbarItemGroup(placement: .primaryAction) {
-                MainMenuButton()
             }
         }
         .onAppear {
@@ -119,6 +117,18 @@ struct ContentView: View {
             historyEnabled: historyEnabled,
             autoTranslate: autoTranslate
         )
+    }
+
+    private func pasteClipboardIntoSource() {
+        guard let clipboardText = NSPasteboard.general.string(forType: .string),
+              !clipboardText.isEmpty
+        else {
+            return
+        }
+
+        viewModel.sourceText = viewModel.sourceText.isEmpty
+            ? clipboardText
+            : "\(viewModel.sourceText)\n\(clipboardText)"
     }
 }
 
@@ -192,6 +202,59 @@ private struct MainMenuButton: View {
         .buttonStyle(.plain)
         .frame(width: 30, height: 30)
         .help("메뉴")
+    }
+}
+
+private struct TitlebarMenuAccessory: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let window = view.window else {
+                return
+            }
+
+            context.coordinator.installIfNeeded(on: window)
+        }
+    }
+
+    final class Coordinator {
+        private let identifier = NSUserInterfaceItemIdentifier("KCDeepLTitlebarMainMenuAccessory")
+
+        func installIfNeeded(on window: NSWindow) {
+            let alreadyInstalled = window.titlebarAccessoryViewControllers.contains {
+                $0.view.identifier == identifier
+            }
+
+            guard !alreadyInstalled else {
+                return
+            }
+
+            let hostingView = NSHostingView(rootView: MainMenuButton())
+            hostingView.translatesAutoresizingMaskIntoConstraints = false
+
+            let containerView = NSView(frame: NSRect(x: 0, y: 0, width: 36, height: 30))
+            containerView.identifier = identifier
+            containerView.addSubview(hostingView)
+
+            NSLayoutConstraint.activate([
+                hostingView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+                hostingView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+                hostingView.topAnchor.constraint(equalTo: containerView.topAnchor),
+                hostingView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor)
+            ])
+
+            let controller = NSTitlebarAccessoryViewController()
+            controller.view = containerView
+            controller.layoutAttribute = .right
+            window.addTitlebarAccessoryViewController(controller)
+        }
     }
 }
 
@@ -272,6 +335,7 @@ private struct TranslationWorkspace: View {
     let isTranslating: Bool
     let errorMessage: String?
     let onCapture: () -> Void
+    let onPaste: () -> Void
     @State private var focusedPane: WorkspacePane?
 
     var body: some View {
@@ -281,7 +345,8 @@ private struct TranslationWorkspace: View {
                     text: $sourceText,
                     width: proxy.size.width / 2,
                     isFocused: focusedPane == .source,
-                    onCapture: onCapture
+                    onCapture: onCapture,
+                    onPaste: onPaste
                 )
                 .onHover { isHovering in
                     focusedPane = isHovering ? .source : nil
@@ -311,6 +376,11 @@ private struct SourceEditorPane: View {
     let width: CGFloat
     let isFocused: Bool
     let onCapture: () -> Void
+    let onPaste: () -> Void
+
+    private var hasFormatting: Bool {
+        MarkdownFormatting.containsFormatting(in: text)
+    }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -333,6 +403,24 @@ private struct SourceEditorPane: View {
                 .allowsHitTesting(false)
             }
 
+            if !text.isEmpty {
+                HStack {
+                    Spacer()
+
+                    Button {
+                        text = ""
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .medium))
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.plain)
+                    .help("전체 삭제")
+                }
+                .padding(.top, 12)
+                .padding(.trailing, 16)
+            }
+
             VStack {
                 Spacer()
 
@@ -343,7 +431,40 @@ private struct SourceEditorPane: View {
                 }
 
                 HStack(spacing: 8) {
+                    Button(action: onPaste) {
+                        Label("붙여넣기", systemImage: "doc.on.clipboard")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 10)
+                    .frame(height: 34)
+                    .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 7))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7)
+                            .stroke(AppTheme.panelBorder)
+                    }
+                    .help("클립보드 내용을 원문에 붙여넣기")
+
+                    if hasFormatting {
+                        Button {
+                            text = MarkdownFormatting.stripFormatting(from: text)
+                        } label: {
+                            Image(systemName: "textformat")
+                                .font(.system(size: 16, weight: .semibold))
+                                .frame(width: 34, height: 34)
+                        }
+                        .buttonStyle(.plain)
+                        .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
+                        .help("서식 지우기")
+                    }
+
                     Spacer()
+
+                    Text("\(text.count)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(minWidth: 42, alignment: .trailing)
 
                     Button(action: copySourceText) {
                         Image(systemName: "doc.on.doc")
@@ -375,7 +496,7 @@ private struct SourceEditorPane: View {
         .background(AppTheme.panelBackground)
         .overlay {
             Rectangle()
-                .stroke(isFocused ? AppTheme.accent : Color.clear, lineWidth: 2)
+                .stroke(isFocused ? AppTheme.accent : AppTheme.panelBorder, lineWidth: isFocused ? 2 : 1)
                 .padding(1)
         }
     }
@@ -408,6 +529,7 @@ private struct PlainTextEditor: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
+        MarkdownStyler.apply(to: textView)
 
         let scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -431,6 +553,7 @@ private struct PlainTextEditor: NSViewRepresentable {
 
         textView.font = NSFont.systemFont(ofSize: 26)
         textView.textColor = .labelColor
+        MarkdownStyler.apply(to: textView)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -446,7 +569,99 @@ private struct PlainTextEditor: NSViewRepresentable {
             }
 
             text = textView.string
+            MarkdownStyler.apply(to: textView)
         }
+    }
+}
+
+private enum MarkdownFormatting {
+    static func containsFormatting(in text: String) -> Bool {
+        text.range(of: #"(^|\s)(#{1,6}\s|[-*]\s|\d+\.\s|>\s)|(\*\*|__|`|\[.+\]\(.+\))"#, options: .regularExpression) != nil
+    }
+
+    static func stripFormatting(from text: String) -> String {
+        var stripped = text
+        let replacements: [(String, String)] = [
+            (#"(?m)^#{1,6}\s*"#, ""),
+            (#"\*\*(.*?)\*\*"#, "$1"),
+            (#"__(.*?)__"#, "$1"),
+            (#"\*(.*?)\*"#, "$1"),
+            (#"`([^`]+)`"#, "$1"),
+            (#"\[(.*?)\]\((.*?)\)"#, "$1"),
+            (#"(?m)^>\s*"#, ""),
+            (#"(?m)^\s*[-*]\s+"#, ""),
+            (#"(?m)^\s*\d+\.\s+"#, "")
+        ]
+
+        for (pattern, template) in replacements {
+            stripped = stripped.replacingOccurrences(
+                of: pattern,
+                with: template,
+                options: .regularExpression
+            )
+        }
+
+        return stripped
+    }
+}
+
+private enum MarkdownStyler {
+    static func apply(to textView: NSTextView) {
+        let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+        guard fullRange.length > 0 else {
+            return
+        }
+
+        let selectedRanges = textView.selectedRanges
+        let storage = textView.textStorage
+        storage?.beginEditing()
+        storage?.setAttributes(
+            [
+                .font: NSFont.systemFont(ofSize: 26),
+                .foregroundColor: NSColor.labelColor
+            ],
+            range: fullRange
+        )
+
+        apply(pattern: #"(?m)^#{1,3}\s+(.+)$"#, to: textView, font: .boldSystemFont(ofSize: 28))
+        apply(pattern: #"\*\*(.*?)\*\*"#, to: textView, font: .boldSystemFont(ofSize: 26))
+        apply(pattern: #"__(.*?)__"#, to: textView, font: .boldSystemFont(ofSize: 26))
+        apply(pattern: #"`([^`]+)`"#, to: textView, font: .monospacedSystemFont(ofSize: 24, weight: .regular))
+        storage?.endEditing()
+        textView.selectedRanges = selectedRanges
+    }
+
+    private static func apply(pattern: String, to textView: NSTextView, font: NSFont) {
+        guard let expression = try? NSRegularExpression(pattern: pattern) else {
+            return
+        }
+
+        let text = textView.string as NSString
+        let range = NSRange(location: 0, length: text.length)
+        let matches = expression.matches(in: textView.string, range: range)
+
+        for match in matches {
+            textView.textStorage?.addAttribute(.font, value: font, range: match.range)
+        }
+    }
+}
+
+private struct MarkdownText: View {
+    let text: String
+    var fontSize: CGFloat
+    var weight: Font.Weight = .regular
+    var lineLimit: Int?
+
+    var body: some View {
+        Text(attributedText)
+            .font(.system(size: fontSize, weight: weight))
+            .lineSpacing(6)
+            .lineLimit(lineLimit)
+    }
+
+    private var attributedText: AttributedString {
+        (try? AttributedString(markdown: text))
+            ?? AttributedString(text)
     }
 }
 
@@ -500,9 +715,7 @@ private struct ResultPane: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .padding(.top, 220)
                     } else {
-                        Text(translatedText)
-                            .font(.system(size: 25))
-                            .lineSpacing(6)
+                        MarkdownText(text: translatedText, fontSize: 25)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(28)
@@ -525,7 +738,7 @@ private struct ResultPane: View {
         .background(AppTheme.panelBackground.opacity(0.94))
         .overlay {
             Rectangle()
-                .stroke(isFocused ? AppTheme.accent : Color.clear, lineWidth: 2)
+                .stroke(isFocused ? AppTheme.accent : AppTheme.panelBorder, lineWidth: isFocused ? 2 : 1)
                 .padding(1)
         }
     }
@@ -650,9 +863,7 @@ private struct HistoryTextBlock: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text(text)
-                .font(.system(size: 14, weight: .semibold))
-                .lineLimit(3)
+            MarkdownText(text: text, fontSize: 14, weight: .semibold, lineLimit: 3)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -759,7 +970,7 @@ private struct ToolsPanel: View {
         .background(AppTheme.panelBackground)
         .overlay(alignment: .leading) {
             Rectangle()
-                .fill(AppTheme.separator)
+                .fill(AppTheme.panelBorder)
                 .frame(width: 1)
         }
     }

@@ -10,6 +10,7 @@
 - UI: SwiftUI
 - 네트워크: `URLSession`
 - 설정 저장: `UserDefaults` + `@AppStorage`
+- 번역 기록 저장: Application Support의 `KCDeepL/translation-history.json`
 
 ## 2. 모듈 구조
 
@@ -32,6 +33,7 @@ Sources/
     LanguageOption.swift
     LLMProvider.swift
     TranslationHistoryItem.swift
+    TranslationHistoryStore.swift
     TranslationPromptBuilder.swift
     TranslationRequest.swift
 ```
@@ -113,6 +115,7 @@ Content-Type: application/json
 - 기본 Gemini 설정 등록 검증
 - Gemini 응답 파싱 검증
 - 빈 응답 오류 검증
+- 파일 기반 번역 기록 저장/로드 검증
 
 추가 예정:
 

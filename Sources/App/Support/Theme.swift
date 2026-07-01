@@ -5,6 +5,7 @@ enum AppTheme {
     static let elevatedBackground = Color(nsColor: NSColor(calibratedWhite: 0.19, alpha: 1))
     static let controlBackground = Color(nsColor: NSColor(calibratedWhite: 0.24, alpha: 1))
     static let separator = Color.white.opacity(0.09)
+    static let panelBorder = elevatedBackground
     static let accent = Color(nsColor: NSColor.systemBlue)
     static let success = Color(nsColor: NSColor.systemGreen)
 }

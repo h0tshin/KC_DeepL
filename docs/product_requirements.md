@@ -15,7 +15,7 @@ KC DeepL은 macOS에서 어디서든 빠르게 텍스트를 번역하는 즉석 
 - 고급 설정: LLM 공급자, API 키, 세부 모델, 자동 번역, temperature
 - 기본 LLM 설정: Gemini / `gemini-2.5-flash-lite`
 - 화면 캡처 진입: 캡처 선택 목업과 입력 영역 첨부
-- 번역 기록의 메모리 저장과 설정 토글
+- 번역 기록의 파일 저장과 설정 토글
 - SwiftPM 빌드/실행 스크립트와 Codex Run 액션
 
 ### 제외 또는 다음 단계

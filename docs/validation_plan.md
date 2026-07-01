@@ -47,6 +47,8 @@
 - HTTP 실패는 status code와 메시지를 표시한다.
 - 성공 응답은 오른쪽 결과 패널에 표시한다.
 - 기록 토글이 켜져 있으면 최근 기록에 저장한다.
+- 앱을 재실행해도 번역 기록이 유지되고 기록 모드에서 조회/삭제할 수 있다.
+- 마크다운 문법이 포함된 입력과 번역 결과는 가능한 범위에서 서식 있게 표시된다.
 
 ## 6. 회귀 테스트
 
@@ -54,6 +56,7 @@
 
 - `TranslationPromptBuilderTests`
 - `GeminiResponseParserTests`
+- `TranslationHistoryStoreTests`
 
 추가해야 할 테스트:
 

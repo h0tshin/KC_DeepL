@@ -12,10 +12,16 @@ final class TranslationViewModel: ObservableObject {
     @Published private(set) var history: [TranslationHistoryItem] = []
 
     private let client: TranslationClient
+    private let historyStore: TranslationHistoryStoring
     private var debouncedTranslationTask: Task<Void, Never>?
 
-    init(client: TranslationClient = GeminiTranslationClient()) {
+    init(
+        client: TranslationClient = GeminiTranslationClient(),
+        historyStore: TranslationHistoryStoring = FileTranslationHistoryStore()
+    ) {
         self.client = client
+        self.historyStore = historyStore
+        loadHistory()
         runStartupChecks()
     }
 
@@ -158,15 +164,14 @@ final class TranslationViewModel: ObservableObject {
             statusMessage = "번역 완료: \(modelID)"
 
             if historyEnabled {
-                history.insert(
+                appendHistoryItem(
                     TranslationHistoryItem(
                         sourceText: text,
                         translatedText: output,
                         sourceLanguage: sourceLanguage,
                         targetLanguage: targetLanguage,
                         modelID: modelID
-                    ),
-                    at: 0
+                    )
                 )
             }
         } catch is CancellationError {
@@ -216,12 +221,35 @@ final class TranslationViewModel: ObservableObject {
 
     func deleteHistoryItem(id: TranslationHistoryItem.ID) {
         history.removeAll { $0.id == id }
-        statusMessage = "선택한 번역 기록을 삭제했습니다."
+        persistHistory(successMessage: "선택한 번역 기록을 삭제했습니다.")
     }
 
     func clearHistory() {
         history.removeAll()
-        statusMessage = "번역 기록을 모두 삭제했습니다."
+        persistHistory(successMessage: "번역 기록을 모두 삭제했습니다.")
+    }
+
+    private func loadHistory() {
+        do {
+            history = try historyStore.load()
+        } catch {
+            history = []
+            statusMessage = "번역 기록을 불러오지 못했습니다: \(error.localizedDescription)"
+        }
+    }
+
+    private func appendHistoryItem(_ item: TranslationHistoryItem) {
+        history.insert(item, at: 0)
+        persistHistory(successMessage: "번역 완료: \(item.modelID)")
+    }
+
+    private func persistHistory(successMessage: String) {
+        do {
+            try historyStore.save(history)
+            statusMessage = successMessage
+        } catch {
+            statusMessage = "번역 기록 저장 실패: \(error.localizedDescription)"
+        }
     }
 }
 
