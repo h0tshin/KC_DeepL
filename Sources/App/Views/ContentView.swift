@@ -168,12 +168,9 @@ private struct TitlebarModeControls: View {
                         .labelStyle(.titleAndIcon)
                         .padding(.horizontal, 8)
                         .frame(height: 27)
-                        .background(
-                            selectedMode == mode
-                                ? Color(nsColor: NSColor.controlAccentColor).opacity(0.24)
-                                : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 6)
-                        )
+                        .foregroundStyle(selectedMode == mode ? AppTheme.selectedTitlebarForeground : Color.primary)
+                        .background(selectedMode == mode ? AppTheme.selectedTitlebarBackground : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .help(mode.rawValue)
@@ -236,10 +233,16 @@ private struct TitlebarMenuAccessory: NSViewRepresentable {
                 return
             }
 
-            let hostingView = NSHostingView(rootView: MainMenuButton())
+            let hostingView = NSHostingView(
+                rootView: HStack(spacing: 0) {
+                    MainMenuButton()
+                    Spacer(minLength: 0)
+                }
+                .frame(width: 58, height: 30)
+            )
             hostingView.translatesAutoresizingMaskIntoConstraints = false
 
-            let containerView = NSView(frame: NSRect(x: 0, y: 0, width: 36, height: 30))
+            let containerView = NSView(frame: NSRect(x: 0, y: 0, width: 58, height: 30))
             containerView.identifier = identifier
             containerView.addSubview(hostingView)
 
@@ -464,11 +467,13 @@ private struct SourceEditorPane: View {
 
                     Spacer()
 
-                    Text("\(text.count)")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                        .frame(minWidth: 42, alignment: .trailing)
+                    if !text.isEmpty {
+                        Text("\(text.count)")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .frame(minWidth: 42, alignment: .trailing)
+                    }
 
                     Button(action: copySourceText) {
                         Image(systemName: "doc.on.doc")
