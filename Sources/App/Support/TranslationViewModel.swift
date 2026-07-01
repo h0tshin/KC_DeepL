@@ -196,12 +196,22 @@ final class TranslationViewModel: ObservableObject {
     func swapLanguages(sourceLanguage: inout LanguageOption, targetLanguage: inout LanguageOption) {
         guard sourceLanguage != .autoDetect else {
             sourceLanguage = targetLanguage
-            targetLanguage = .korean
+            targetLanguage = targetLanguage == .korean ? .english : .korean
+            moveTranslatedTextToSource()
             return
         }
 
         swap(&sourceLanguage, &targetLanguage)
         swap(&sourceText, &translatedText)
+    }
+
+    private func moveTranslatedTextToSource() {
+        guard !translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+
+        sourceText = translatedText
+        translatedText = ""
     }
 
     func beginScreenCaptureMock() {

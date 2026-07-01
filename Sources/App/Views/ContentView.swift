@@ -5,7 +5,7 @@ import KCDeepLCore
 struct ContentView: View {
     @StateObject private var viewModel = TranslationViewModel()
     @SceneStorage("kc.main.showTools") private var showTools = false
-    @State private var sourceLanguage = LanguageOption.autoDetect
+    @State private var sourceLanguage = LanguageOption.english
     @State private var targetLanguage = LanguageOption.korean
     @State private var selectedMode: TranslationMode = .text
 
@@ -89,6 +89,7 @@ struct ContentView: View {
             scheduleAutoTranslation()
         }
         .onChange(of: targetLanguage) { _, _ in
+            normalizeSourceLanguageForTarget()
             scheduleAutoTranslation()
         }
         .onChange(of: providerRaw) { _, _ in
@@ -130,6 +131,16 @@ struct ContentView: View {
             historyEnabled: historyEnabled,
             autoTranslate: autoTranslate
         )
+    }
+
+    private func normalizeSourceLanguageForTarget() {
+        guard targetLanguage == .english,
+              sourceLanguage != .korean
+        else {
+            return
+        }
+
+        sourceLanguage = .korean
     }
 
     private func pasteClipboardIntoSource() {
@@ -563,9 +574,9 @@ private struct SourceEditorPane: View {
                     Button(action: copySourceText) {
                         Image(systemName: "doc.on.doc")
                             .font(.system(size: 16, weight: .semibold))
-                            .frame(width: 34, height: 34)
                     }
                     .buttonStyle(.plain)
+                    .frame(width: 34, height: 34)
                     .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
                     .disabled(text.isEmpty)
                     .help("원문 복사")
@@ -573,14 +584,14 @@ private struct SourceEditorPane: View {
                     Button(action: onCapture) {
                         Image(systemName: "selection.pin.in.out")
                             .font(.system(size: 18, weight: .medium))
-                            .frame(width: 34, height: 34)
                     }
                     .buttonStyle(.plain)
+                    .frame(width: 34, height: 34)
                     .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
                             .stroke(style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
-                            .foregroundStyle(.white.opacity(0.8))
+                            .foregroundStyle(Color.gray.opacity(0.82))
                     )
                     .help("텍스트 화면 캡처")
                 }
