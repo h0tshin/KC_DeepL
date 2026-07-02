@@ -33,8 +33,7 @@ struct ContentView: View {
                         )
                     } else if selectedMode == .write {
                         LiveTranslationWorkspace(
-                            showTools: $showTools,
-                            statusMessage: viewModel.statusMessage
+                            showTools: $showTools
                         )
                     } else {
                         LanguageBar(
@@ -273,68 +272,6 @@ private struct TitlebarModeControls: View {
                 .help(mode.rawValue)
             }
         }
-    }
-}
-
-private struct LiveTranslationWorkspace: View {
-    @Binding var showTools: Bool
-    let statusMessage: String
-
-    var body: some View {
-        VStack(spacing: 0) {
-            LiveTranslationBar(showTools: $showTools)
-
-            GeometryReader { proxy in
-                HStack(spacing: 0) {
-                    LiveTranslationPane()
-                        .frame(width: proxy.size.width * 0.25)
-
-                    LiveTranslationPane()
-                        .frame(maxWidth: .infinity)
-                }
-            }
-
-            BottomStatusBar(statusMessage: statusMessage)
-        }
-        .background(AppTheme.panelBackground)
-    }
-}
-
-private struct LiveTranslationBar: View {
-    @Binding var showTools: Bool
-
-    var body: some View {
-        HStack {
-            Spacer()
-
-            if !showTools {
-                ToolPanelToggleButton {
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        showTools = true
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, 18)
-        .frame(height: 50)
-        .background(AppTheme.toolbarBackground)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(AppTheme.panelBorder)
-                .frame(height: 1)
-        }
-    }
-}
-
-private struct LiveTranslationPane: View {
-    var body: some View {
-        Rectangle()
-            .fill(AppTheme.panelBackground)
-            .overlay {
-                Rectangle()
-                    .stroke(AppTheme.panelBorder, lineWidth: 1)
-                    .padding(1)
-            }
     }
 }
 

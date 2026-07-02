@@ -55,6 +55,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Live 번역에서 사용자의 마이크 음성을 실시간으로 통역하기 위해 필요합니다.</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
 </dict>

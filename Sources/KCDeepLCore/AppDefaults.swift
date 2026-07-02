@@ -29,13 +29,14 @@ public enum PreferenceKeys {
     public static let liveLocalTargetEcho = "kc.live.translation.localTargetEcho"
     public static let liveRemoteTargetEcho = "kc.live.translation.remoteTargetEcho"
     public static let livePauseRemoteInputOnStart = "kc.live.translation.pauseRemoteInputOnStart"
+    public static let liveListenerVolume = "kc.live.audio.listenerVolume"
 }
 
 public enum AppDefaults {
     public static let defaultProvider = LLMProvider.gemini
     public static let defaultModelID = "gemini-2.5-flash-lite"
     public static let defaultGeminiAPIKey = "[REDACTED-REMOVED]"
-    public static let defaultLiveModelID = "gemini-3.5-live-translate"
+    public static let defaultLiveModelID = "gemini-3.5-live-translate-preview"
     public static let defaultLiveListeningAPIKey = "[REDACTED-REMOVED]"
 }
 
@@ -69,7 +70,8 @@ public extension UserDefaults {
             PreferenceKeys.liveRemoteTargetLanguage: "ko",
             PreferenceKeys.liveLocalTargetEcho: false,
             PreferenceKeys.liveRemoteTargetEcho: false,
-            PreferenceKeys.livePauseRemoteInputOnStart: true
+            PreferenceKeys.livePauseRemoteInputOnStart: true,
+            PreferenceKeys.liveListenerVolume: 1.0
         ])
     }
 }

@@ -36,5 +36,6 @@ final class TranslationPromptBuilderTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveRemoteMicInput), "2: BlackHole 2ch (2ch, 48000Hz)")
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveRemoteTargetLanguage), "ko")
         XCTAssertTrue(defaults.bool(forKey: PreferenceKeys.livePauseRemoteInputOnStart))
+        XCTAssertEqual(defaults.double(forKey: PreferenceKeys.liveListenerVolume), 1.0)
     }
 }

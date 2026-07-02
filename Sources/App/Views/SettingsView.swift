@@ -318,16 +318,12 @@ private struct LLMLiveTranslationSettingsPane: View {
     @AppStorage(PreferenceKeys.liveLocalTargetEcho) private var localTargetEcho = false
     @AppStorage(PreferenceKeys.liveRemoteTargetEcho) private var remoteTargetEcho = false
     @AppStorage(PreferenceKeys.livePauseRemoteInputOnStart) private var pauseRemoteInputOnStart = true
+    @AppStorage(PreferenceKeys.liveListenerVolume) private var listenerVolume = 1.0
+    @State private var inputDeviceOptions: [String] = []
+    @State private var outputDeviceOptions: [String] = []
 
     private let liveModelOptions = [
         LiveModelOption(id: AppDefaults.defaultLiveModelID, title: "Gemini 3.5 Live Translate")
-    ]
-
-    private let audioDeviceOptions = [
-        "1: BlackHole 16ch (16ch, 48000Hz)",
-        "2: BlackHole 2ch (2ch, 48000Hz)",
-        "3: MacBook Pro 마이크 (1ch, 48000Hz)",
-        "4: MacBook Pro 스피커 (2ch, 48000Hz)"
     ]
 
     private var liveProviderBinding: Binding<LLMProvider> {
@@ -356,10 +352,10 @@ private struct LLMLiveTranslationSettingsPane: View {
             }
 
             SettingsSection(title: "Audio Routing") {
-                AudioRoutingPicker(title: "상대방 마이크 입력", selection: $remoteMicInput, options: audioDeviceOptions)
-                AudioRoutingPicker(title: "상대방 스피커 출력", selection: $remoteSpeakerOutput, options: audioDeviceOptions)
-                AudioRoutingPicker(title: "말하는 마이크 입력", selection: $localMicInput, options: audioDeviceOptions)
-                AudioRoutingPicker(title: "듣리는 스피커 출력", selection: $localSpeakerOutput, options: audioDeviceOptions)
+                AudioRoutingPicker(title: "상대방 마이크 입력", selection: $remoteMicInput, options: inputDeviceOptions)
+                AudioRoutingPicker(title: "상대방 스피커 출력", selection: $remoteSpeakerOutput, options: outputDeviceOptions)
+                AudioRoutingPicker(title: "말하는 마이크 입력", selection: $localMicInput, options: inputDeviceOptions)
+                AudioRoutingPicker(title: "듣리는 스피커 출력", selection: $localSpeakerOutput, options: outputDeviceOptions)
             }
 
             SettingsSection(title: "Translation") {
@@ -369,7 +365,28 @@ private struct LLMLiveTranslationSettingsPane: View {
                 Toggle("내 target 언어 echo", isOn: $localTargetEcho)
                 Toggle("상대방 target 언어 echo", isOn: $remoteTargetEcho)
                 Toggle("대화 시작 중에는 상대방 입력 잠시 중지", isOn: $pauseRemoteInputOnStart)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("듣는 볼륨 \(Int(listenerVolume * 100))%")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Slider(value: $listenerVolume, in: 0...1)
+                        .frame(maxWidth: 360)
+                }
             }
+        }
+        .onAppear(perform: refreshAudioDeviceOptions)
+    }
+
+    private func refreshAudioDeviceOptions() {
+        inputDeviceOptions = LiveAudioDeviceRegistry.inputDeviceLabels(including: remoteMicInput)
+        if !inputDeviceOptions.contains(localMicInput) {
+            inputDeviceOptions.append(localMicInput)
+        }
+
+        outputDeviceOptions = LiveAudioDeviceRegistry.outputDeviceLabels(including: remoteSpeakerOutput)
+        if !outputDeviceOptions.contains(localSpeakerOutput) {
+            outputDeviceOptions.append(localSpeakerOutput)
         }
     }
 }
