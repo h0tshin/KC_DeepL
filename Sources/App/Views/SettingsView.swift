@@ -19,12 +19,12 @@ struct SettingsView: View {
                         ShortcutSettingsPane()
                     case .accessibility:
                         AccessibilitySettingsPane()
-                    case .files:
-                        FileHistorySettingsPane()
                     case .llmTextTranslation:
                         LLMTextTranslationSettingsPane()
                     case .llmLiveTranslation:
                         LLMLiveTranslationSettingsPane()
+                    case .files:
+                        FileHistorySettingsPane()
                     case .advanced:
                         AdvancedSettingsPane()
                     }
@@ -43,9 +43,9 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     case general = "일반"
     case shortcuts = "키보드 단축키"
     case accessibility = "손쉬운 사용"
-    case files = "파일 및 번역"
-    case llmTextTranslation = "LLM 텍스트 번역"
-    case llmLiveTranslation = "LLM Live 번역"
+    case llmTextTranslation = "LLM 번역"
+    case llmLiveTranslation = "LLM Live"
+    case files = "파일 번역"
     case advanced = "고급"
 
     var id: String { rawValue }
@@ -58,12 +58,12 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
             "keyboard"
         case .accessibility:
             "figure.stand"
-        case .files:
-            "textformat"
         case .llmTextTranslation:
             "text.bubble"
         case .llmLiveTranslation:
             "speaker.wave.2"
+        case .files:
+            "textformat"
         case .advanced:
             "slider.horizontal.3"
         }
@@ -276,23 +276,19 @@ private struct LLMTextTranslationSettingsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
             SettingsSection(title: "LLM 번역 모델", description: "텍스트 번역에 사용할 모델 공급자와 세부 모델을 선택합니다.") {
-                Picker("공급자", selection: providerBinding) {
+                SettingsPickerRow(title: "공급자", selection: providerBinding, width: 320) {
                     ForEach(LLMProvider.allCases) { provider in
                         Text(provider.displayName).tag(provider)
                     }
                 }
-                .frame(width: 320)
 
-                Picker("세부 모델", selection: $modelID) {
+                SettingsPickerRow(title: "세부모델", selection: $modelID, width: 320) {
                     ForEach(currentProvider.models) { model in
                         Text(model.displayName).tag(model.id)
                     }
                 }
-                .frame(width: 320)
 
-                SecureField("API 키", text: $apiKey)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 500)
+                SettingsSecureFieldRow(title: "번역 API", text: $apiKey, width: 500)
 
                 Toggle("입력 후 자동 번역", isOn: $autoTranslate)
 
@@ -345,25 +341,18 @@ private struct LLMLiveTranslationSettingsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
             SettingsSection(title: "LLM 라이브 번역 모델", description: "실시간 음성 번역에 사용할 모델과 양방향 API 키를 설정합니다.") {
-                Picker("공급자", selection: liveProviderBinding) {
+                SettingsPickerRow(title: "공급자", selection: liveProviderBinding, width: 320) {
                     Text(LLMProvider.gemini.displayName).tag(LLMProvider.gemini)
                 }
-                .frame(width: 320)
 
-                Picker("세부모델", selection: $liveModelID) {
+                SettingsPickerRow(title: "세부모델", selection: $liveModelID, width: 320) {
                     ForEach(liveModelOptions) { model in
                         Text(model.title).tag(model.id)
                     }
                 }
-                .frame(width: 320)
 
-                SecureField("수화용 api", text: $listeningAPIKey)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 620)
-
-                SecureField("발화용 api", text: $speakingAPIKey)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 620)
+                SettingsSecureFieldRow(title: "수화용 API", text: $listeningAPIKey, width: 620)
+                SettingsSecureFieldRow(title: "발화용 API", text: $speakingAPIKey, width: 620)
             }
 
             SettingsSection(title: "Audio Routing") {
@@ -374,8 +363,8 @@ private struct LLMLiveTranslationSettingsPane: View {
             }
 
             SettingsSection(title: "Translation") {
-                SettingsTextFieldRow(title: "내 말 target", text: $localTargetLanguage, width: 230)
-                SettingsTextFieldRow(title: "상대방 말 target", text: $remoteTargetLanguage, width: 230)
+                SettingsTextFieldRow(title: "상대방 언어", text: $localTargetLanguage, width: 230)
+                SettingsTextFieldRow(title: "발화자 언어", text: $remoteTargetLanguage, width: 230)
 
                 Toggle("내 target 언어 echo", isOn: $localTargetEcho)
                 Toggle("상대방 target 언어 echo", isOn: $remoteTargetEcho)
@@ -422,6 +411,41 @@ private struct AudioRoutingPicker: View {
     }
 }
 
+private struct SettingsPickerRow<SelectionValue: Hashable, Content: View>: View {
+    let title: String
+    @Binding var selection: SelectionValue
+    var width: CGFloat
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: 16) {
+            SettingsRowTitle(title)
+
+            Picker("", selection: $selection) {
+                content
+            }
+            .labelsHidden()
+            .frame(width: width, alignment: .leading)
+        }
+    }
+}
+
+private struct SettingsSecureFieldRow: View {
+    let title: String
+    @Binding var text: String
+    var width: CGFloat
+
+    var body: some View {
+        HStack(spacing: 16) {
+            SettingsRowTitle(title)
+
+            SecureField("", text: $text)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: width)
+        }
+    }
+}
+
 private struct SettingsTextFieldRow: View {
     let title: String
     @Binding var text: String
@@ -429,14 +453,26 @@ private struct SettingsTextFieldRow: View {
 
     var body: some View {
         HStack(spacing: 16) {
-            Text(title)
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 150, alignment: .leading)
+            SettingsRowTitle(title)
 
             TextField("", text: $text)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: width)
         }
+    }
+}
+
+private struct SettingsRowTitle: View {
+    let title: String
+
+    init(_ title: String) {
+        self.title = title
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 14, weight: .semibold))
+            .frame(width: 150, alignment: .leading)
     }
 }
 
