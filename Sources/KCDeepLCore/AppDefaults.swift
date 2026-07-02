@@ -16,12 +16,27 @@ public enum PreferenceKeys {
     public static let geminiAPIKey = "kc.advanced.geminiAPIKey"
     public static let autoTranslate = "kc.advanced.autoTranslate"
     public static let temperature = "kc.advanced.temperature"
+    public static let liveProvider = "kc.live.provider"
+    public static let liveModelID = "kc.live.modelID"
+    public static let liveListeningAPIKey = "kc.live.listeningAPIKey"
+    public static let liveSpeakingAPIKey = "kc.live.speakingAPIKey"
+    public static let liveRemoteMicInput = "kc.live.audio.remoteMicInput"
+    public static let liveRemoteSpeakerOutput = "kc.live.audio.remoteSpeakerOutput"
+    public static let liveLocalMicInput = "kc.live.audio.localMicInput"
+    public static let liveLocalSpeakerOutput = "kc.live.audio.localSpeakerOutput"
+    public static let liveLocalTargetLanguage = "kc.live.translation.localTargetLanguage"
+    public static let liveRemoteTargetLanguage = "kc.live.translation.remoteTargetLanguage"
+    public static let liveLocalTargetEcho = "kc.live.translation.localTargetEcho"
+    public static let liveRemoteTargetEcho = "kc.live.translation.remoteTargetEcho"
+    public static let livePauseRemoteInputOnStart = "kc.live.translation.pauseRemoteInputOnStart"
 }
 
 public enum AppDefaults {
     public static let defaultProvider = LLMProvider.gemini
     public static let defaultModelID = "gemini-2.5-flash-lite"
     public static let defaultGeminiAPIKey = "[REDACTED-REMOVED]"
+    public static let defaultLiveModelID = "gemini-3.5-live-translate"
+    public static let defaultLiveListeningAPIKey = "[REDACTED-REMOVED]"
 }
 
 public extension UserDefaults {
@@ -41,7 +56,20 @@ public extension UserDefaults {
             PreferenceKeys.modelID: AppDefaults.defaultModelID,
             PreferenceKeys.geminiAPIKey: AppDefaults.defaultGeminiAPIKey,
             PreferenceKeys.autoTranslate: true,
-            PreferenceKeys.temperature: 0.2
+            PreferenceKeys.temperature: 0.2,
+            PreferenceKeys.liveProvider: AppDefaults.defaultProvider.rawValue,
+            PreferenceKeys.liveModelID: AppDefaults.defaultLiveModelID,
+            PreferenceKeys.liveListeningAPIKey: AppDefaults.defaultLiveListeningAPIKey,
+            PreferenceKeys.liveSpeakingAPIKey: AppDefaults.defaultGeminiAPIKey,
+            PreferenceKeys.liveRemoteMicInput: "2: BlackHole 2ch (2ch, 48000Hz)",
+            PreferenceKeys.liveRemoteSpeakerOutput: "1: BlackHole 16ch (16ch, 48000Hz)",
+            PreferenceKeys.liveLocalMicInput: "3: MacBook Pro 마이크 (1ch, 48000Hz)",
+            PreferenceKeys.liveLocalSpeakerOutput: "4: MacBook Pro 스피커 (2ch, 48000Hz)",
+            PreferenceKeys.liveLocalTargetLanguage: "en",
+            PreferenceKeys.liveRemoteTargetLanguage: "ko",
+            PreferenceKeys.liveLocalTargetEcho: false,
+            PreferenceKeys.liveRemoteTargetEcho: false,
+            PreferenceKeys.livePauseRemoteInputOnStart: true
         ])
     }
 }

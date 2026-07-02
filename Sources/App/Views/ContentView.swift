@@ -31,6 +31,8 @@ struct ContentView: View {
                             onDelete: viewModel.deleteHistoryItem,
                             onDeleteAll: viewModel.clearHistory
                         )
+                    } else if selectedMode == .write {
+                        LiveTranslationWorkspace()
                     } else {
                         LanguageBar(
                             sourceLanguage: $sourceLanguage,
@@ -183,8 +185,7 @@ struct ContentView: View {
             self.pasteBackTarget = pasteBackTarget
         case .writing:
             selectedMode = .write
-            applyCapturedTextIfAvailable(capturedText, attributedText: capturedAttributedText)
-            self.pasteBackTarget = pasteBackTarget
+            self.pasteBackTarget = nil
         case .fileTranslation:
             selectedMode = .files
             self.pasteBackTarget = nil
@@ -227,7 +228,7 @@ struct ContentView: View {
 
 private enum TranslationMode: String, CaseIterable, Identifiable {
     case text = "텍스트 번역"
-    case write = "글 작성"
+    case write = "Live 번역"
     case files = "파일 번역"
     case history = "기록"
 
@@ -238,7 +239,7 @@ private enum TranslationMode: String, CaseIterable, Identifiable {
         case .text:
             "textformat"
         case .write:
-            "pencil"
+            "speaker.wave.2"
         case .files:
             "doc.text"
         case .history:
@@ -269,6 +270,14 @@ private struct TitlebarModeControls: View {
                 .help(mode.rawValue)
             }
         }
+    }
+}
+
+private struct LiveTranslationWorkspace: View {
+    var body: some View {
+        Color.clear
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(AppTheme.panelBackground)
     }
 }
 

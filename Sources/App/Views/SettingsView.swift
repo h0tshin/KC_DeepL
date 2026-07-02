@@ -21,6 +21,10 @@ struct SettingsView: View {
                         AccessibilitySettingsPane()
                     case .files:
                         FileHistorySettingsPane()
+                    case .llmTextTranslation:
+                        LLMTextTranslationSettingsPane()
+                    case .llmLiveTranslation:
+                        LLMLiveTranslationSettingsPane()
                     case .advanced:
                         AdvancedSettingsPane()
                     }
@@ -30,7 +34,7 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(width: 900, height: 660)
+        .frame(width: 1100, height: 720)
         .background(AppTheme.panelBackground)
     }
 }
@@ -40,6 +44,8 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     case shortcuts = "키보드 단축키"
     case accessibility = "손쉬운 사용"
     case files = "파일 및 번역"
+    case llmTextTranslation = "LLM 텍스트 번역"
+    case llmLiveTranslation = "LLM Live 번역"
     case advanced = "고급"
 
     var id: String { rawValue }
@@ -54,6 +60,10 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
             "figure.stand"
         case .files:
             "textformat"
+        case .llmTextTranslation:
+            "text.bubble"
+        case .llmLiveTranslation:
+            "speaker.wave.2"
         case .advanced:
             "slider.horizontal.3"
         }
@@ -156,8 +166,8 @@ private struct ShortcutSettingsPane: View {
             )
 
             ShortcutRow(
-                title: "선택한 텍스트 다시 쓰기",
-                description: "선택한 텍스트를 글 작성 모드로 즉시 교정할 수 있습니다.",
+                title: "Live 번역",
+                description: "라이브 번역 화면을 단축키로 즉시 열 수 있습니다.",
                 shortcut: $rewriteShortcut
             )
 
@@ -241,7 +251,7 @@ private struct FileHistorySettingsPane: View {
     }
 }
 
-private struct AdvancedSettingsPane: View {
+private struct LLMTextTranslationSettingsPane: View {
     @AppStorage(PreferenceKeys.provider) private var providerRaw = AppDefaults.defaultProvider.rawValue
     @AppStorage(PreferenceKeys.modelID) private var modelID = AppDefaults.defaultModelID
     @AppStorage(PreferenceKeys.geminiAPIKey) private var apiKey = AppDefaults.defaultGeminiAPIKey
@@ -294,6 +304,138 @@ private struct AdvancedSettingsPane: View {
                         .frame(maxWidth: 360)
                 }
             }
+        }
+    }
+}
+
+private struct LLMLiveTranslationSettingsPane: View {
+    @AppStorage(PreferenceKeys.liveProvider) private var liveProviderRaw = AppDefaults.defaultProvider.rawValue
+    @AppStorage(PreferenceKeys.liveModelID) private var liveModelID = AppDefaults.defaultLiveModelID
+    @AppStorage(PreferenceKeys.liveListeningAPIKey) private var listeningAPIKey = AppDefaults.defaultLiveListeningAPIKey
+    @AppStorage(PreferenceKeys.liveSpeakingAPIKey) private var speakingAPIKey = AppDefaults.defaultGeminiAPIKey
+    @AppStorage(PreferenceKeys.liveRemoteMicInput) private var remoteMicInput = "2: BlackHole 2ch (2ch, 48000Hz)"
+    @AppStorage(PreferenceKeys.liveRemoteSpeakerOutput) private var remoteSpeakerOutput = "1: BlackHole 16ch (16ch, 48000Hz)"
+    @AppStorage(PreferenceKeys.liveLocalMicInput) private var localMicInput = "3: MacBook Pro 마이크 (1ch, 48000Hz)"
+    @AppStorage(PreferenceKeys.liveLocalSpeakerOutput) private var localSpeakerOutput = "4: MacBook Pro 스피커 (2ch, 48000Hz)"
+    @AppStorage(PreferenceKeys.liveLocalTargetLanguage) private var localTargetLanguage = "en"
+    @AppStorage(PreferenceKeys.liveRemoteTargetLanguage) private var remoteTargetLanguage = "ko"
+    @AppStorage(PreferenceKeys.liveLocalTargetEcho) private var localTargetEcho = false
+    @AppStorage(PreferenceKeys.liveRemoteTargetEcho) private var remoteTargetEcho = false
+    @AppStorage(PreferenceKeys.livePauseRemoteInputOnStart) private var pauseRemoteInputOnStart = true
+
+    private let liveModelOptions = [
+        LiveModelOption(id: AppDefaults.defaultLiveModelID, title: "Gemini 3.5 Live Translate")
+    ]
+
+    private let audioDeviceOptions = [
+        "1: BlackHole 16ch (16ch, 48000Hz)",
+        "2: BlackHole 2ch (2ch, 48000Hz)",
+        "3: MacBook Pro 마이크 (1ch, 48000Hz)",
+        "4: MacBook Pro 스피커 (2ch, 48000Hz)"
+    ]
+
+    private var liveProviderBinding: Binding<LLMProvider> {
+        Binding {
+            LLMProvider(rawValue: liveProviderRaw) ?? .gemini
+        } set: { provider in
+            liveProviderRaw = provider.rawValue
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 30) {
+            SettingsSection(title: "LLM 라이브 번역 모델", description: "실시간 음성 번역에 사용할 모델과 양방향 API 키를 설정합니다.") {
+                Picker("공급자", selection: liveProviderBinding) {
+                    Text(LLMProvider.gemini.displayName).tag(LLMProvider.gemini)
+                }
+                .frame(width: 320)
+
+                Picker("세부모델", selection: $liveModelID) {
+                    ForEach(liveModelOptions) { model in
+                        Text(model.title).tag(model.id)
+                    }
+                }
+                .frame(width: 320)
+
+                SecureField("수화용 api", text: $listeningAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 620)
+
+                SecureField("발화용 api", text: $speakingAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 620)
+            }
+
+            SettingsSection(title: "Audio Routing") {
+                AudioRoutingPicker(title: "상대방 마이크 입력", selection: $remoteMicInput, options: audioDeviceOptions)
+                AudioRoutingPicker(title: "상대방 스피커 출력", selection: $remoteSpeakerOutput, options: audioDeviceOptions)
+                AudioRoutingPicker(title: "말하는 마이크 입력", selection: $localMicInput, options: audioDeviceOptions)
+                AudioRoutingPicker(title: "듣리는 스피커 출력", selection: $localSpeakerOutput, options: audioDeviceOptions)
+            }
+
+            SettingsSection(title: "Translation") {
+                SettingsTextFieldRow(title: "내 말 target", text: $localTargetLanguage, width: 230)
+                SettingsTextFieldRow(title: "상대방 말 target", text: $remoteTargetLanguage, width: 230)
+
+                Toggle("내 target 언어 echo", isOn: $localTargetEcho)
+                Toggle("상대방 target 언어 echo", isOn: $remoteTargetEcho)
+                Toggle("대화 시작 중에는 상대방 입력 잠시 중지", isOn: $pauseRemoteInputOnStart)
+            }
+        }
+    }
+}
+
+private struct AdvancedSettingsPane: View {
+    var body: some View {
+        Text("kc.Shin")
+            .font(.system(size: 34, weight: .semibold, design: .rounded))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .frame(minHeight: 560)
+    }
+}
+
+private struct LiveModelOption: Identifiable {
+    let id: String
+    let title: String
+}
+
+private struct AudioRoutingPicker: View {
+    let title: String
+    @Binding var selection: String
+    let options: [String]
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 150, alignment: .leading)
+
+            Picker("", selection: $selection) {
+                ForEach(options, id: \.self) { option in
+                    Text(option).tag(option)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 640)
+        }
+    }
+}
+
+private struct SettingsTextFieldRow: View {
+    let title: String
+    @Binding var text: String
+    var width: CGFloat
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 150, alignment: .leading)
+
+            TextField("", text: $text)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: width)
         }
     }
 }

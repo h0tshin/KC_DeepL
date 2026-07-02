@@ -23,7 +23,7 @@ struct KCDeepLApp: App {
                 }
                 .keyboardShortcut("1", modifiers: [.control, .shift])
 
-                Button("글쓰기") {
+                Button("Live 번역") {
                     AppActionDispatcher.shared.perform(.writing)
                 }
                 .keyboardShortcut("2", modifiers: [.control, .shift])

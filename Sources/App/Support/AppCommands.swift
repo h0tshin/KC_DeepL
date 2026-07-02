@@ -11,9 +11,9 @@ enum AppCommandAction: String {
 
     var capturesSelectedText: Bool {
         switch self {
-        case .textTranslation, .writing:
+        case .textTranslation:
             true
-        case .fileTranslation, .screenCapture:
+        case .writing, .fileTranslation, .screenCapture:
             false
         }
     }

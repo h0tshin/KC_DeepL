@@ -29,5 +29,12 @@ final class TranslationPromptBuilderTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.modelID), "gemini-2.5-flash-lite")
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.geminiAPIKey), AppDefaults.defaultGeminiAPIKey)
         XCTAssertTrue(defaults.bool(forKey: PreferenceKeys.autoTranslate))
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveProvider), LLMProvider.gemini.rawValue)
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveModelID), AppDefaults.defaultLiveModelID)
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveListeningAPIKey), AppDefaults.defaultLiveListeningAPIKey)
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveSpeakingAPIKey), AppDefaults.defaultGeminiAPIKey)
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveRemoteMicInput), "2: BlackHole 2ch (2ch, 48000Hz)")
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveRemoteTargetLanguage), "ko")
+        XCTAssertTrue(defaults.bool(forKey: PreferenceKeys.livePauseRemoteInputOnStart))
     }
 }

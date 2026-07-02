@@ -39,7 +39,7 @@ final class AppStatusItemController: NSObject {
         ))
 
         menu.addItem(actionItem(
-            title: "글쓰기",
+            title: "Live 번역",
             keyEquivalent: "2",
             modifiers: [.control, .shift],
             action: #selector(performWriting)
