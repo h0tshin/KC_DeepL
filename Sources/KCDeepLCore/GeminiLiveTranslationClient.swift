@@ -64,6 +64,7 @@ public struct GeminiLiveTranslationConfiguration: Equatable {
 }
 
 public enum GeminiLiveTranslationEvent: Equatable {
+    case setupComplete
     case inputTranscript(text: String, languageCode: String?)
     case outputTranscript(text: String, languageCode: String?)
     case audio(Data)
@@ -98,7 +99,7 @@ public final class GeminiLiveTranslationWebSocketClient: GeminiLiveTranslationCo
             encoder: encoder
         )
         task.resume()
-        try await session.sendSetup()
+        try await session.sendSetupAndWaitForCompletion()
         session.startReceiving()
         return session
     }
@@ -152,7 +153,7 @@ public final class GeminiLiveTranslationSession {
         close()
     }
 
-    func sendSetup() async throws {
+    func sendSetupAndWaitForCompletion() async throws {
         let data = try GeminiLiveTranslationMessageFactory.setupMessageData(
             configuration: configuration,
             encoder: encoder
@@ -161,6 +162,7 @@ public final class GeminiLiveTranslationSession {
             throw GeminiLiveTranslationError.socketMessageEncodingFailed
         }
         try await task.send(.string(json))
+        try await waitForSetupComplete()
     }
 
     public func sendAudioChunk(_ data: Data) async throws {
@@ -224,6 +226,33 @@ public final class GeminiLiveTranslationSession {
         }
     }
 
+    private func waitForSetupComplete() async throws {
+        while true {
+            let message = try await task.receive()
+            let data: Data
+            switch message {
+            case .data(let value):
+                data = value
+            case .string(let value):
+                guard let stringData = value.data(using: .utf8) else {
+                    throw GeminiLiveTranslationError.socketMessageDecodingFailed
+                }
+                data = stringData
+            @unknown default:
+                throw GeminiLiveTranslationError.socketMessageDecodingFailed
+            }
+
+            let events = try GeminiLiveTranslationResponseParser.events(from: data)
+            if events.contains(.setupComplete) {
+                return
+            }
+
+            for event in events {
+                continuation.yield(event)
+            }
+        }
+    }
+
     private static func makeEventStream() -> (
         stream: AsyncThrowingStream<GeminiLiveTranslationEvent, Error>,
         continuation: AsyncThrowingStream<GeminiLiveTranslationEvent, Error>.Continuation
@@ -246,13 +275,13 @@ enum GeminiLiveTranslationMessageFactory {
                 model: "models/\(configuration.modelID)",
                 generationConfig: GenerationConfig(
                     responseModalities: ["AUDIO"],
-                    inputAudioTranscription: EmptyObject(),
-                    outputAudioTranscription: EmptyObject(),
                     translationConfig: TranslationConfig(
                         targetLanguageCode: configuration.targetLanguageCode,
                         echoTargetLanguage: configuration.echoTargetLanguage
                     )
-                )
+                ),
+                inputAudioTranscription: EmptyObject(),
+                outputAudioTranscription: EmptyObject()
             )
         )
         return try encoder.encode(message)
@@ -279,12 +308,12 @@ enum GeminiLiveTranslationMessageFactory {
     private struct Setup: Encodable {
         let model: String
         let generationConfig: GenerationConfig
+        let inputAudioTranscription: EmptyObject
+        let outputAudioTranscription: EmptyObject
     }
 
     private struct GenerationConfig: Encodable {
         let responseModalities: [String]
-        let inputAudioTranscription: EmptyObject
-        let outputAudioTranscription: EmptyObject
         let translationConfig: TranslationConfig
     }
 
@@ -321,6 +350,10 @@ enum GeminiLiveTranslationResponseParser {
     static func events(from data: Data) throws -> [GeminiLiveTranslationEvent] {
         let response = try JSONDecoder().decode(ServerMessage.self, from: data)
         var events: [GeminiLiveTranslationEvent] = []
+
+        if response.setupComplete != nil {
+            events.append(.setupComplete)
+        }
 
         if let error = response.error {
             events.append(.error(error.message))
@@ -363,9 +396,12 @@ enum GeminiLiveTranslationResponseParser {
     }
 
     private struct ServerMessage: Decodable {
+        let setupComplete: SetupComplete?
         let serverContent: ServerContent?
         let error: ServerError?
     }
+
+    private struct SetupComplete: Decodable {}
 
     private struct ServerError: Decodable {
         let message: String

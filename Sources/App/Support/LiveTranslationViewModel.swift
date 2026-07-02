@@ -268,7 +268,7 @@ final class LiveTranslationViewModel: ObservableObject {
             }
         case .error(let message):
             statusMessage = "Live API 오류: \(message)"
-        case .audio:
+        case .setupComplete, .audio:
             break
         }
     }
