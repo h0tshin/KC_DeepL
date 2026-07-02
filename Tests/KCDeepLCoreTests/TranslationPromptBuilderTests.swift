@@ -33,9 +33,29 @@ final class TranslationPromptBuilderTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveModelID), AppDefaults.defaultLiveModelID)
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveListeningAPIKey), AppDefaults.defaultLiveListeningAPIKey)
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveSpeakingAPIKey), AppDefaults.defaultGeminiAPIKey)
-        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveRemoteMicInput), "2: BlackHole 2ch (2ch, 48000Hz)")
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveRemoteMicInput), "")
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveRemoteSpeakerOutput), "")
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveLocalMicInput), "")
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveLocalSpeakerOutput), "")
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveRemoteTargetLanguage), "ko")
         XCTAssertTrue(defaults.bool(forKey: PreferenceKeys.livePauseRemoteInputOnStart))
         XCTAssertEqual(defaults.double(forKey: PreferenceKeys.liveListenerVolume), 1.0)
+    }
+
+    func testRegisterDefaultsMigratesLegacyLiveSettings() {
+        let defaults = UserDefaults(suiteName: "KCDeepLCoreTests-\(UUID().uuidString)")!
+        defaults.set("[REDACTED-REMOVED]", forKey: PreferenceKeys.liveListeningAPIKey)
+        defaults.set("2: BlackHole 2ch (2ch, 48000Hz)", forKey: PreferenceKeys.liveRemoteMicInput)
+        defaults.set("1: BlackHole 16ch (16ch, 48000Hz)", forKey: PreferenceKeys.liveRemoteSpeakerOutput)
+        defaults.set("3: MacBook Pro 마이크 (1ch, 48000Hz)", forKey: PreferenceKeys.liveLocalMicInput)
+        defaults.set("4: MacBook Pro 스피커 (2ch, 48000Hz)", forKey: PreferenceKeys.liveLocalSpeakerOutput)
+
+        defaults.registerKCDeepLDefaults()
+
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveListeningAPIKey), AppDefaults.defaultGeminiAPIKey)
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveRemoteMicInput), "")
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveRemoteSpeakerOutput), "")
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveLocalMicInput), "")
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveLocalSpeakerOutput), "")
     }
 }

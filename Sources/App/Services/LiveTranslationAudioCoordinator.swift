@@ -136,7 +136,7 @@ final class LiveTranslationAudioCoordinator {
         let outputDevice = LiveAudioDeviceRegistry.resolveDevice(
             selection: settings.remoteSpeakerOutput,
             direction: .output,
-            preferredNames: ["BlackHole 2ch", "BlackHole"]
+            preferredNames: ["BlackHole 16ch", "BlackHole 2ch", "BlackHole"]
         )
         let stream = LiveBypassAudioStream(inputDevice: inputDevice, outputDevice: outputDevice)
         try stream.start()
@@ -224,7 +224,7 @@ final class LiveTranslationAudioCoordinator {
         let outputDevice = LiveAudioDeviceRegistry.resolveDevice(
             selection: settings.remoteSpeakerOutput,
             direction: .output,
-            preferredNames: ["BlackHole 2ch", "BlackHole"]
+            preferredNames: ["BlackHole 16ch", "BlackHole 2ch", "BlackHole"]
         )
 
         let session = try await client.connect(
@@ -301,10 +301,37 @@ final class LiveTranslationAudioCoordinator {
                     }
                 }
             } catch {
+                guard !Task.isCancelled,
+                      !Self.isCancellation(error)
+                else {
+                    return
+                }
+
                 await MainActor.run {
-                    self?.onLog?("Live API 수신 실패: \(error.localizedDescription)")
+                    self?.onLog?("Live API 연결 실패: \(Self.userFacingErrorMessage(error))")
                 }
             }
         }
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
+
+    private static func userFacingErrorMessage(_ error: Error) -> String {
+        let message = error.localizedDescription
+        if message.localizedCaseInsensitiveContains("expired")
+            || message.localizedCaseInsensitiveContains("unauthorized")
+            || message.localizedCaseInsensitiveContains("forbidden")
+            || message.localizedCaseInsensitiveContains("401")
+            || message.localizedCaseInsensitiveContains("403") {
+            return "인증 값이 만료되었거나 유효하지 않습니다. 설정의 수화용/발화용 API 키를 확인해 주세요."
+        }
+        return message
     }
 }

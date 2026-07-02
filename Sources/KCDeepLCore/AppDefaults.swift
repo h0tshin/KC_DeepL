@@ -37,7 +37,15 @@ public enum AppDefaults {
     public static let defaultModelID = "gemini-2.5-flash-lite"
     public static let defaultGeminiAPIKey = "[REDACTED-REMOVED]"
     public static let defaultLiveModelID = "gemini-3.5-live-translate-preview"
-    public static let defaultLiveListeningAPIKey = "[REDACTED-REMOVED]"
+    public static let defaultLiveListeningAPIKey = defaultGeminiAPIKey
+
+    fileprivate static let legacyDefaultLiveListeningAPIKey = "[REDACTED-REMOVED]"
+    fileprivate static let legacyLiveAudioDeviceSelections = [
+        "1: BlackHole 16ch (16ch, 48000Hz)",
+        "2: BlackHole 2ch (2ch, 48000Hz)",
+        "3: MacBook Pro 마이크 (1ch, 48000Hz)",
+        "4: MacBook Pro 스피커 (2ch, 48000Hz)"
+    ]
 }
 
 public extension UserDefaults {
@@ -62,10 +70,10 @@ public extension UserDefaults {
             PreferenceKeys.liveModelID: AppDefaults.defaultLiveModelID,
             PreferenceKeys.liveListeningAPIKey: AppDefaults.defaultLiveListeningAPIKey,
             PreferenceKeys.liveSpeakingAPIKey: AppDefaults.defaultGeminiAPIKey,
-            PreferenceKeys.liveRemoteMicInput: "2: BlackHole 2ch (2ch, 48000Hz)",
-            PreferenceKeys.liveRemoteSpeakerOutput: "1: BlackHole 16ch (16ch, 48000Hz)",
-            PreferenceKeys.liveLocalMicInput: "3: MacBook Pro 마이크 (1ch, 48000Hz)",
-            PreferenceKeys.liveLocalSpeakerOutput: "4: MacBook Pro 스피커 (2ch, 48000Hz)",
+            PreferenceKeys.liveRemoteMicInput: "",
+            PreferenceKeys.liveRemoteSpeakerOutput: "",
+            PreferenceKeys.liveLocalMicInput: "",
+            PreferenceKeys.liveLocalSpeakerOutput: "",
             PreferenceKeys.liveLocalTargetLanguage: "en",
             PreferenceKeys.liveRemoteTargetLanguage: "ko",
             PreferenceKeys.liveLocalTargetEcho: false,
@@ -73,5 +81,27 @@ public extension UserDefaults {
             PreferenceKeys.livePauseRemoteInputOnStart: true,
             PreferenceKeys.liveListenerVolume: 1.0
         ])
+
+        migrateLegacyLiveDefaults()
+    }
+
+    private func migrateLegacyLiveDefaults() {
+        if string(forKey: PreferenceKeys.liveListeningAPIKey) == AppDefaults.legacyDefaultLiveListeningAPIKey {
+            set(AppDefaults.defaultLiveListeningAPIKey, forKey: PreferenceKeys.liveListeningAPIKey)
+        }
+
+        [
+            PreferenceKeys.liveRemoteMicInput,
+            PreferenceKeys.liveRemoteSpeakerOutput,
+            PreferenceKeys.liveLocalMicInput,
+            PreferenceKeys.liveLocalSpeakerOutput
+        ].forEach { key in
+            guard let value = string(forKey: key),
+                  AppDefaults.legacyLiveAudioDeviceSelections.contains(value)
+            else {
+                return
+            }
+            removeObject(forKey: key)
+        }
     }
 }

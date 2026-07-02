@@ -36,8 +36,10 @@ struct LiveAudioDevice: Identifiable, Hashable {
     let isSystemDefault: Bool
 
     var displayLabel: String {
-        let prefix = isSystemDefault ? "Default" : id
-        return "\(prefix): \(name) (\(channelCount)ch, \(sampleRate)Hz)"
+        if isSystemDefault {
+            return direction == .input ? "시스템 기본 마이크" : "시스템 기본 스피커"
+        }
+        return name
     }
 }
 
@@ -50,12 +52,20 @@ enum LiveAudioDeviceRegistry {
         availableDevices(direction: .output)
     }
 
-    static func inputDeviceLabels(including currentSelection: String) -> [String] {
-        labels(for: availableInputDevices(), including: currentSelection)
+    static func inputDeviceLabels() -> [String] {
+        labels(for: availableInputDevices())
     }
 
-    static func outputDeviceLabels(including currentSelection: String) -> [String] {
-        labels(for: availableOutputDevices(), including: currentSelection)
+    static func outputDeviceLabels() -> [String] {
+        labels(for: availableOutputDevices())
+    }
+
+    static func normalizedInputDeviceLabel(selection: String, preferredNames: [String]) -> String {
+        resolveDevice(selection: selection, direction: .input, preferredNames: preferredNames).displayLabel
+    }
+
+    static func normalizedOutputDeviceLabel(selection: String, preferredNames: [String]) -> String {
+        resolveDevice(selection: selection, direction: .output, preferredNames: preferredNames).displayLabel
     }
 
     static func resolveDevice(
@@ -95,18 +105,19 @@ enum LiveAudioDeviceRegistry {
         return devices[0]
     }
 
-    private static func labels(for devices: [LiveAudioDevice], including currentSelection: String) -> [String] {
-        var labels = devices.map(\.displayLabel)
-        if !currentSelection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           !labels.contains(currentSelection) {
-            labels.append(currentSelection)
+    private static func labels(for devices: [LiveAudioDevice]) -> [String] {
+        var seenLabels: Set<String> = []
+        return devices.compactMap { device in
+            let label = device.displayLabel
+            guard !seenLabels.contains(label) else {
+                return nil
+            }
+            seenLabels.insert(label)
+            return label
         }
-        return labels
     }
 
     private static func availableDevices(direction: LiveAudioDeviceDirection) -> [LiveAudioDevice] {
-        let defaultDevice = defaultDevice(direction: direction)
-        let defaultUID = defaultDevice?.uid
         let concreteDevices = (try? allAudioObjectIDs())?.compactMap { objectID -> LiveAudioDevice? in
             let channelCount = channelCount(for: objectID, scope: direction.coreAudioScope)
             guard channelCount > 0 else {
@@ -132,20 +143,6 @@ enum LiveAudioDeviceRegistry {
 
         let sortedDevices = concreteDevices.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-        }
-
-        if let defaultDevice {
-            let defaultAlias = LiveAudioDevice(
-                id: "system-default-\(direction.rawValue)",
-                audioObjectID: defaultDevice.audioObjectID,
-                uid: nil,
-                name: "System default \(direction.rawValue)",
-                channelCount: defaultDevice.channelCount,
-                sampleRate: defaultDevice.sampleRate,
-                direction: direction,
-                isSystemDefault: true
-            )
-            return [defaultAlias] + sortedDevices.filter { $0.uid != defaultUID }
         }
 
         return sortedDevices.isEmpty ? [fallbackDevice(direction: direction)] : sortedDevices
@@ -178,7 +175,7 @@ enum LiveAudioDeviceRegistry {
             id: "system-default-\(direction.rawValue)",
             audioObjectID: nil,
             uid: nil,
-            name: "System default \(direction.rawValue)",
+            name: direction == .input ? "시스템 기본 마이크" : "시스템 기본 스피커",
             channelCount: direction == .input ? 1 : 2,
             sampleRate: 48_000,
             direction: direction,

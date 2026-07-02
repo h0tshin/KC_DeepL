@@ -309,10 +309,10 @@ private struct LLMLiveTranslationSettingsPane: View {
     @AppStorage(PreferenceKeys.liveModelID) private var liveModelID = AppDefaults.defaultLiveModelID
     @AppStorage(PreferenceKeys.liveListeningAPIKey) private var listeningAPIKey = AppDefaults.defaultLiveListeningAPIKey
     @AppStorage(PreferenceKeys.liveSpeakingAPIKey) private var speakingAPIKey = AppDefaults.defaultGeminiAPIKey
-    @AppStorage(PreferenceKeys.liveRemoteMicInput) private var remoteMicInput = "2: BlackHole 2ch (2ch, 48000Hz)"
-    @AppStorage(PreferenceKeys.liveRemoteSpeakerOutput) private var remoteSpeakerOutput = "1: BlackHole 16ch (16ch, 48000Hz)"
-    @AppStorage(PreferenceKeys.liveLocalMicInput) private var localMicInput = "3: MacBook Pro 마이크 (1ch, 48000Hz)"
-    @AppStorage(PreferenceKeys.liveLocalSpeakerOutput) private var localSpeakerOutput = "4: MacBook Pro 스피커 (2ch, 48000Hz)"
+    @AppStorage(PreferenceKeys.liveRemoteMicInput) private var remoteMicInput = ""
+    @AppStorage(PreferenceKeys.liveRemoteSpeakerOutput) private var remoteSpeakerOutput = ""
+    @AppStorage(PreferenceKeys.liveLocalMicInput) private var localMicInput = ""
+    @AppStorage(PreferenceKeys.liveLocalSpeakerOutput) private var localSpeakerOutput = ""
     @AppStorage(PreferenceKeys.liveLocalTargetLanguage) private var localTargetLanguage = "en"
     @AppStorage(PreferenceKeys.liveRemoteTargetLanguage) private var remoteTargetLanguage = "ko"
     @AppStorage(PreferenceKeys.liveLocalTargetEcho) private var localTargetEcho = false
@@ -379,15 +379,25 @@ private struct LLMLiveTranslationSettingsPane: View {
     }
 
     private func refreshAudioDeviceOptions() {
-        inputDeviceOptions = LiveAudioDeviceRegistry.inputDeviceLabels(including: remoteMicInput)
-        if !inputDeviceOptions.contains(localMicInput) {
-            inputDeviceOptions.append(localMicInput)
-        }
+        remoteMicInput = LiveAudioDeviceRegistry.normalizedInputDeviceLabel(
+            selection: remoteMicInput,
+            preferredNames: ["BlackHole 2ch", "BlackHole"]
+        )
+        localMicInput = LiveAudioDeviceRegistry.normalizedInputDeviceLabel(
+            selection: localMicInput,
+            preferredNames: ["MacBook Pro 마이크", "Built-in Microphone"]
+        )
+        remoteSpeakerOutput = LiveAudioDeviceRegistry.normalizedOutputDeviceLabel(
+            selection: remoteSpeakerOutput,
+            preferredNames: ["BlackHole 16ch", "BlackHole 2ch", "BlackHole"]
+        )
+        localSpeakerOutput = LiveAudioDeviceRegistry.normalizedOutputDeviceLabel(
+            selection: localSpeakerOutput,
+            preferredNames: ["MacBook Pro 스피커", "External Headphones", "Headphones"]
+        )
 
-        outputDeviceOptions = LiveAudioDeviceRegistry.outputDeviceLabels(including: remoteSpeakerOutput)
-        if !outputDeviceOptions.contains(localSpeakerOutput) {
-            outputDeviceOptions.append(localSpeakerOutput)
-        }
+        inputDeviceOptions = LiveAudioDeviceRegistry.inputDeviceLabels()
+        outputDeviceOptions = LiveAudioDeviceRegistry.outputDeviceLabels()
     }
 }
 
