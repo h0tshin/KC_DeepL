@@ -356,7 +356,7 @@ enum GeminiLiveTranslationResponseParser {
         }
 
         if let error = response.error {
-            events.append(.error(error.message))
+            events.append(.error(error.displayMessage))
         }
 
         guard let content = response.serverContent else {
@@ -364,19 +364,22 @@ enum GeminiLiveTranslationResponseParser {
         }
 
         if let inputTranscription = content.inputTranscription,
-           !inputTranscription.text.isEmpty {
-            events.append(.inputTranscript(text: inputTranscription.text, languageCode: inputTranscription.languageCode))
+           let text = inputTranscription.text?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !text.isEmpty {
+            events.append(.inputTranscript(text: text, languageCode: inputTranscription.languageCode))
         }
 
         if let outputTranscription = content.outputTranscription,
-           !outputTranscription.text.isEmpty {
-            events.append(.outputTranscript(text: outputTranscription.text, languageCode: outputTranscription.languageCode))
+           let text = outputTranscription.text?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !text.isEmpty {
+            events.append(.outputTranscript(text: text, languageCode: outputTranscription.languageCode))
         }
 
         if let parts = content.modelTurn?.parts {
             for part in parts {
                 guard let inlineData = part.inlineData,
-                      let audio = Data(base64Encoded: inlineData.data)
+                      let encodedData = inlineData.data,
+                      let audio = Data(base64Encoded: encodedData)
                 else {
                     continue
                 }
@@ -404,7 +407,27 @@ enum GeminiLiveTranslationResponseParser {
     private struct SetupComplete: Decodable {}
 
     private struct ServerError: Decodable {
-        let message: String
+        let message: String?
+        let status: String?
+        let code: Int?
+
+        var displayMessage: String {
+            if let message,
+               !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return message
+            }
+
+            if let status,
+               !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return status
+            }
+
+            if let code {
+                return "code \(code)"
+            }
+
+            return "알 수 없는 Live API 오류"
+        }
     }
 
     private struct ServerContent: Decodable {
@@ -416,12 +439,12 @@ enum GeminiLiveTranslationResponseParser {
     }
 
     private struct Transcription: Decodable {
-        let text: String
+        let text: String?
         let languageCode: String?
     }
 
     private struct ModelTurn: Decodable {
-        let parts: [Part]
+        let parts: [Part]?
     }
 
     private struct Part: Decodable {
@@ -429,7 +452,7 @@ enum GeminiLiveTranslationResponseParser {
     }
 
     private struct InlineData: Decodable {
-        let data: String
+        let data: String?
         let mimeType: String?
     }
 }

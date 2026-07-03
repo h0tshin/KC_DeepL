@@ -84,6 +84,42 @@ final class GeminiLiveTranslationClientTests: XCTestCase {
         XCTAssertEqual(events, [.setupComplete])
     }
 
+    func testResponseParserIgnoresPartialLiveResponseChunks() throws {
+        let json = """
+        {
+          "serverContent": {
+            "inputTranscription": {},
+            "outputTranscription": { "languageCode": "ko" },
+            "modelTurn": {
+              "parts": [
+                { "inlineData": { "mimeType": "audio/pcm;rate=24000" } },
+                { "text": "ignored text part" }
+              ]
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let events = try GeminiLiveTranslationResponseParser.events(from: json)
+
+        XCTAssertTrue(events.isEmpty)
+    }
+
+    func testResponseParserUsesFallbackErrorMessageWhenMessageIsMissing() throws {
+        let json = """
+        {
+          "error": {
+            "code": 400,
+            "status": "INVALID_ARGUMENT"
+          }
+        }
+        """.data(using: .utf8)!
+
+        let events = try GeminiLiveTranslationResponseParser.events(from: json)
+
+        XCTAssertEqual(events, [.error("INVALID_ARGUMENT")])
+    }
+
     func testCredentialInfersEphemeralTokenEndpointMode() {
         XCTAssertEqual(GeminiLiveCredential(rawValue: "AQ.token"), .ephemeralToken("AQ.token"))
         XCTAssertEqual(GeminiLiveCredential(rawValue: "AIza-test"), .apiKey("AIza-test"))
