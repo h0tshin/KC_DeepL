@@ -40,6 +40,7 @@ struct LiveTranslationWorkspace: View {
                     conversation: viewModel.selectedConversation,
                     incomingDraft: viewModel.incomingDraft,
                     outgoingDraft: viewModel.outgoingDraft,
+                    karaokeHighlights: viewModel.karaokeHighlights,
                     isMicrophoneTranslationEnabled: viewModel.isMicrophoneTranslationEnabled,
                     onToggleMicrophone: {
                         viewModel.setMicrophoneTranslationEnabled(!viewModel.isMicrophoneTranslationEnabled)
@@ -224,6 +225,7 @@ private struct LiveConversationDetail: View {
     let conversation: LiveConversation?
     let incomingDraft: LiveTranscriptDraft
     let outgoingDraft: LiveTranscriptDraft
+    let karaokeHighlights: [LiveConversationMessage.ID: Int]
     let isMicrophoneTranslationEnabled: Bool
     let onToggleMicrophone: () -> Void
     @State private var followsLatest = true
@@ -243,7 +245,10 @@ private struct LiveConversationDetail: View {
                             LazyVStack(spacing: 18) {
                                 if let conversation {
                                     ForEach(conversation.messages) { message in
-                                        LiveMessageBubble(message: message)
+                                        LiveMessageBubble(
+                                            message: message,
+                                            karaokeHighlightedCharacters: karaokeHighlights[message.id] ?? 0
+                                        )
                                             .id(message.id)
                                     }
                                 }
@@ -387,6 +392,7 @@ private struct LiveScrollBottomPreferenceKey: PreferenceKey {
 
 private struct LiveMessageBubble: View {
     let message: LiveConversationMessage
+    var karaokeHighlightedCharacters: Int = 0
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 10) {
@@ -404,16 +410,20 @@ private struct LiveMessageBubble: View {
 
     private var bubble: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(primaryText)
-                .font(.system(size: 24, weight: .bold))
-                .foregroundStyle(message.speaker == .me ? Color.white : Color.primary)
-                .fixedSize(horizontal: false, vertical: true)
+            LiveKaraokeText(
+                text: primaryText,
+                highlightedCharacters: primaryHighlightedCharacters,
+                font: .system(size: 24, weight: .bold),
+                baseColor: message.speaker == .me ? Color.white : Color.primary
+            )
 
             if !secondaryText.isEmpty {
-                Text(secondaryText)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(message.speaker == .me ? Color.white.opacity(0.78) : Color.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                LiveKaraokeText(
+                    text: secondaryText,
+                    highlightedCharacters: secondaryHighlightedCharacters,
+                    font: .system(size: 15, weight: .semibold),
+                    baseColor: message.speaker == .me ? Color.white.opacity(0.78) : Color.secondary
+                )
             }
         }
         .padding(.horizontal, 18)
@@ -449,6 +459,50 @@ private struct LiveMessageBubble: View {
         case .other:
             return message.originalText
         }
+    }
+
+    private var primaryHighlightedCharacters: Int {
+        guard message.speaker == .me,
+              secondaryText.isEmpty
+        else {
+            return 0
+        }
+        return karaokeHighlightedCharacters
+    }
+
+    private var secondaryHighlightedCharacters: Int {
+        guard message.speaker == .me,
+              !secondaryText.isEmpty
+        else {
+            return 0
+        }
+        return karaokeHighlightedCharacters
+    }
+}
+
+private struct LiveKaraokeText: View {
+    let text: String
+    let highlightedCharacters: Int
+    let font: Font
+    let baseColor: Color
+
+    var body: some View {
+        renderedText
+            .font(font)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var renderedText: Text {
+        let clampedCount = min(max(0, highlightedCharacters), text.count)
+        guard clampedCount > 0 else {
+            return Text(text).foregroundColor(baseColor)
+        }
+
+        let splitIndex = text.index(text.startIndex, offsetBy: clampedCount)
+        let highlighted = String(text[..<splitIndex])
+        let remaining = String(text[splitIndex...])
+        return Text(highlighted).foregroundColor(.black)
+            + Text(remaining).foregroundColor(baseColor)
     }
 }
 

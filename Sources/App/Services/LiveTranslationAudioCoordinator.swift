@@ -71,6 +71,7 @@ actor LiveAudioChunkSender {
 @MainActor
 final class LiveTranslationAudioCoordinator {
     var onEvent: ((LiveTranslationAudioDirection, GeminiLiveTranslationEvent) -> Void)?
+    var onPlaybackProgress: ((LiveTranslationAudioDirection, LiveAudioPlaybackProgress) -> Void)?
     var onLog: ((String) -> Void)?
 
     private let client: GeminiLiveTranslationConnecting
@@ -178,6 +179,11 @@ final class LiveTranslationAudioCoordinator {
             channelCount: 1,
             gain: settings.listenerVolume
         )
+        output.onPlaybackProgress = { [weak self] progress in
+            Task { @MainActor [weak self] in
+                self?.onPlaybackProgress?(.incoming, progress)
+            }
+        }
         try output.start()
 
         let sender = LiveAudioChunkSender(session: session)
@@ -236,6 +242,11 @@ final class LiveTranslationAudioCoordinator {
             )
         )
         let output = LivePCMOutputQueue(device: outputDevice, sampleRate: 24_000, channelCount: 1)
+        output.onPlaybackProgress = { [weak self] progress in
+            Task { @MainActor [weak self] in
+                self?.onPlaybackProgress?(.outgoing, progress)
+            }
+        }
         try output.start()
 
         let sender = LiveAudioChunkSender(session: session)

@@ -27,12 +27,19 @@ struct LiveTranscriptDraft: Equatable {
     }
 }
 
+private struct LiveKaraokeSegment: Equatable {
+    let messageID: LiveConversationMessage.ID
+    var text: String
+    var highlightedCharacters: Int
+}
+
 @MainActor
 final class LiveTranslationViewModel: ObservableObject {
     @Published private(set) var conversations: [LiveConversation] = []
     @Published var selectedConversationID: LiveConversation.ID?
     @Published private(set) var incomingDraft = LiveTranscriptDraft(speaker: .other)
     @Published private(set) var outgoingDraft = LiveTranscriptDraft(speaker: .me)
+    @Published private(set) var karaokeHighlights: [LiveConversationMessage.ID: Int] = [:]
     @Published private(set) var isOnAir = false
     @Published private(set) var isMicrophoneTranslationEnabled = false
     @Published private(set) var statusMessage = "Live 번역 준비 중"
@@ -47,6 +54,13 @@ final class LiveTranslationViewModel: ObservableObject {
     private let store: LiveConversationStoring
     private let audioCoordinator: LiveTranslationAudioCoordinator
     private var hasStartedBypass = false
+    private var outgoingKaraokeSegments: [LiveKaraokeSegment] = []
+    private var pendingOutgoingPlaybackDuration: TimeInterval = 0
+    private var lastOutgoingPlaybackDuration: TimeInterval = 0
+    private var lastOutgoingBufferedDuration: TimeInterval = 0
+    private var outgoingKaraokeCharacterCarry: Double = 0
+    private var outgoingTurnDidComplete = false
+    private var outgoingTurnCompletionTask: Task<Void, Never>?
 
     init(
         store: LiveConversationStoring = FileLiveConversationStore(),
@@ -91,12 +105,14 @@ final class LiveTranslationViewModel: ObservableObject {
         conversations.insert(conversation, at: 0)
         selectedConversationID = conversation.id
         resetDrafts()
+        resetOutgoingKaraoke(clearHighlights: true)
         persist(status: "새 대화를 만들었습니다.")
     }
 
     func selectConversation(_ id: LiveConversation.ID?) {
         selectedConversationID = id
         resetDrafts()
+        resetOutgoingKaraoke(clearHighlights: true)
         persist(status: "대화를 전환했습니다.")
     }
 
@@ -131,6 +147,7 @@ final class LiveTranslationViewModel: ObservableObject {
         } else {
             isMicrophoneTranslationEnabled = false
             audioCoordinator.stopOutgoingTranslation()
+            resetOutgoingKaraoke(clearHighlights: false)
             startMicBypass()
         }
     }
@@ -154,6 +171,9 @@ final class LiveTranslationViewModel: ObservableObject {
     private func configureCoordinator() {
         audioCoordinator.onEvent = { [weak self] direction, event in
             self?.handle(event: event, direction: direction)
+        }
+        audioCoordinator.onPlaybackProgress = { [weak self] direction, progress in
+            self?.handlePlaybackProgress(progress, direction: direction)
         }
         audioCoordinator.onLog = { [weak self] message in
             self?.statusMessage = message
@@ -226,6 +246,7 @@ final class LiveTranslationViewModel: ObservableObject {
 
         do {
             statusMessage = "마이크 통역 연결 중"
+            resetOutgoingKaraoke(clearHighlights: false)
             try await audioCoordinator.startOutgoingTranslation(settings: settings)
             isMicrophoneTranslationEnabled = true
             statusMessage = "마이크 통역 중"
@@ -263,16 +284,26 @@ final class LiveTranslationViewModel: ObservableObject {
     private func handle(event: GeminiLiveTranslationEvent, direction: LiveTranslationAudioDirection) {
         switch event {
         case .inputTranscript(let text, _):
+            if direction == .outgoing {
+                markOutgoingTurnActive()
+            }
             updateDraft(direction: direction, field: .original, text: text)
         case .outputTranscript(let text, _):
+            if direction == .outgoing {
+                markOutgoingTurnActive()
+            }
             updateDraft(direction: direction, field: .translation, text: text)
         case .turnComplete:
             finishDraft(direction: direction)
+            if direction == .outgoing {
+                markOutgoingTurnComplete()
+            }
         case .interrupted:
             if direction == .incoming {
                 incomingDraft.reset()
             } else {
                 outgoingDraft.reset()
+                resetOutgoingKaraoke(clearHighlights: false)
             }
         case .error(let message):
             statusMessage = "Live API 오류: \(message)"
@@ -445,6 +476,9 @@ final class LiveTranslationViewModel: ObservableObject {
             }
 
             setSecondaryText(attachment.text, in: &conversations[conversationIndex].messages[messageIndex])
+            if speaker == .me {
+                enqueueOutgoingKaraokeSegment(messageID: targetID, text: attachment.text)
+            }
             appendConsumed(attachment.text, field: secondaryField, to: &draft)
             consumedSegmentCount += attachment.segmentCount
             attachedIDs.formUnion(attachment.messageIDs)
@@ -634,6 +668,10 @@ final class LiveTranslationViewModel: ObservableObject {
                 translatedText: updatedDraft.translatedText
             )
         )
+        if speaker == .me,
+           let messageID = conversations[index].messages.last?.id {
+            enqueueOutgoingKaraokeSegment(messageID: messageID, text: updatedDraft.translatedText)
+        }
         conversations[index].updatedAt = Date()
 
         resetDraft(for: speaker)
@@ -772,6 +810,9 @@ final class LiveTranslationViewModel: ObservableObject {
         }
 
         conversations[conversationIndex].messages.append(message)
+        if speaker == .me {
+            enqueueOutgoingKaraokeSegment(messageID: message.id, text: message.translatedText)
+        }
         return message.id
     }
 
@@ -791,6 +832,186 @@ final class LiveTranslationViewModel: ObservableObject {
         case .other:
             message.originalText = text
         }
+    }
+
+    private func handlePlaybackProgress(
+        _ progress: LiveAudioPlaybackProgress,
+        direction: LiveTranslationAudioDirection
+    ) {
+        guard direction == .outgoing else {
+            return
+        }
+
+        lastOutgoingBufferedDuration = progress.bufferedDuration
+        guard progress.enqueuedFrames > 0 || progress.playedFrames > 0 else {
+            lastOutgoingPlaybackDuration = 0
+            return
+        }
+
+        let playedDuration = progress.playedDuration
+        guard playedDuration >= lastOutgoingPlaybackDuration else {
+            lastOutgoingPlaybackDuration = playedDuration
+            return
+        }
+
+        let delta = min(playedDuration - lastOutgoingPlaybackDuration, 1.0)
+        lastOutgoingPlaybackDuration = playedDuration
+
+        if delta > 0 {
+            advanceOutgoingKaraoke(by: delta)
+        }
+
+        if progress.isDrained && outgoingTurnDidComplete {
+            completeOutgoingKaraokeQueue()
+        }
+    }
+
+    private func markOutgoingTurnActive() {
+        outgoingTurnDidComplete = false
+        outgoingTurnCompletionTask?.cancel()
+        outgoingTurnCompletionTask = nil
+    }
+
+    private func markOutgoingTurnComplete() {
+        outgoingTurnDidComplete = true
+        outgoingTurnCompletionTask?.cancel()
+
+        let delay = max(0.35, lastOutgoingBufferedDuration + 0.35)
+        outgoingTurnCompletionTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self,
+                  self.outgoingTurnDidComplete
+            else {
+                return
+            }
+            self.completeOutgoingKaraokeQueue()
+        }
+    }
+
+    private func enqueueOutgoingKaraokeSegment(messageID: LiveConversationMessage.ID, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+
+        let existingHighlight = min(karaokeHighlights[messageID] ?? 0, trimmed.count)
+        if let index = outgoingKaraokeSegments.firstIndex(where: { $0.messageID == messageID }) {
+            outgoingKaraokeSegments[index].text = trimmed
+            outgoingKaraokeSegments[index].highlightedCharacters = min(
+                outgoingKaraokeSegments[index].highlightedCharacters,
+                trimmed.count
+            )
+        } else if existingHighlight < trimmed.count {
+            outgoingKaraokeSegments.append(
+                LiveKaraokeSegment(
+                    messageID: messageID,
+                    text: trimmed,
+                    highlightedCharacters: existingHighlight
+                )
+            )
+        }
+
+        karaokeHighlights[messageID] = existingHighlight
+
+        if pendingOutgoingPlaybackDuration > 0 {
+            let pendingDuration = pendingOutgoingPlaybackDuration
+            pendingOutgoingPlaybackDuration = 0
+            advanceOutgoingKaraoke(by: pendingDuration)
+        }
+    }
+
+    private func advanceOutgoingKaraoke(by duration: TimeInterval) {
+        var remainingDuration = max(0, duration)
+        var consumedTextInThisAdvance = false
+
+        while remainingDuration > 0 {
+            guard !outgoingKaraokeSegments.isEmpty else {
+                if !consumedTextInThisAdvance {
+                    pendingOutgoingPlaybackDuration = min(8.0, pendingOutgoingPlaybackDuration + remainingDuration)
+                }
+                return
+            }
+
+            var segment = outgoingKaraokeSegments[0]
+            let totalCharacters = segment.text.count
+            let remainingCharacters = totalCharacters - segment.highlightedCharacters
+
+            guard remainingCharacters > 0 else {
+                karaokeHighlights[segment.messageID] = totalCharacters
+                outgoingKaraokeSegments.removeFirst()
+                outgoingKaraokeCharacterCarry = 0
+                continue
+            }
+
+            let rate = karaokeCharactersPerSecond(for: segment.text)
+            let characterBudget = remainingDuration * rate + outgoingKaraokeCharacterCarry
+            let wholeCharacters = Int(characterBudget)
+            outgoingKaraokeCharacterCarry = characterBudget - Double(wholeCharacters)
+
+            guard wholeCharacters > 0 else {
+                return
+            }
+
+            let highlightedCharacters = min(wholeCharacters, remainingCharacters)
+            segment.highlightedCharacters += highlightedCharacters
+            karaokeHighlights[segment.messageID] = segment.highlightedCharacters
+            consumedTextInThisAdvance = true
+
+            let consumedDuration = Double(highlightedCharacters) / rate
+            remainingDuration = max(0, remainingDuration - consumedDuration)
+
+            if segment.highlightedCharacters >= totalCharacters {
+                karaokeHighlights[segment.messageID] = totalCharacters
+                outgoingKaraokeSegments.removeFirst()
+                outgoingKaraokeCharacterCarry = 0
+            } else {
+                outgoingKaraokeSegments[0] = segment
+                return
+            }
+        }
+    }
+
+    private func completeOutgoingKaraokeQueue() {
+        for segment in outgoingKaraokeSegments {
+            karaokeHighlights[segment.messageID] = segment.text.count
+        }
+        outgoingKaraokeSegments.removeAll()
+        pendingOutgoingPlaybackDuration = 0
+        outgoingKaraokeCharacterCarry = 0
+        outgoingTurnDidComplete = false
+        outgoingTurnCompletionTask?.cancel()
+        outgoingTurnCompletionTask = nil
+    }
+
+    private func resetOutgoingKaraoke(clearHighlights: Bool) {
+        outgoingKaraokeSegments.removeAll()
+        pendingOutgoingPlaybackDuration = 0
+        lastOutgoingPlaybackDuration = 0
+        lastOutgoingBufferedDuration = 0
+        outgoingKaraokeCharacterCarry = 0
+        outgoingTurnDidComplete = false
+        outgoingTurnCompletionTask?.cancel()
+        outgoingTurnCompletionTask = nil
+        if clearHighlights {
+            karaokeHighlights = [:]
+        }
+    }
+
+    private func karaokeCharactersPerSecond(for text: String) -> Double {
+        let characters = text.filter { !$0.isWhitespace && !$0.isNewline }
+        guard !characters.isEmpty else {
+            return 10.0
+        }
+
+        let cjkCount = characters.filter { character in
+            character.unicodeScalars.contains { scalar in
+                (0xAC00...0xD7AF).contains(Int(scalar.value))
+                    || (0x3040...0x30FF).contains(Int(scalar.value))
+                    || (0x4E00...0x9FFF).contains(Int(scalar.value))
+            }
+        }.count
+        let cjkRatio = Double(cjkCount) / Double(characters.count)
+        return (8.0 * cjkRatio) + (13.5 * (1.0 - cjkRatio))
     }
 
     private func persist(status: String) {
