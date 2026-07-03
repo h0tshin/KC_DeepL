@@ -5,9 +5,6 @@ struct LiveTranscriptDraft: Equatable {
     var speaker: LiveConversationSpeaker
     var originalText = ""
     var translatedText = ""
-    var consumedOriginalText = ""
-    var consumedTranslatedText = ""
-    var pendingSecondaryMessageIDs: [LiveConversationMessage.ID] = []
     var updatedAt = Date()
 
     var isEmpty: Bool {
@@ -15,14 +12,20 @@ struct LiveTranscriptDraft: Equatable {
             && translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    mutating func reset(clearConsumedText: Bool = true) {
+    init(speaker: LiveConversationSpeaker) {
+        self.speaker = speaker
+    }
+
+    init(_ draft: LiveTranscriptAssemblyDraft) {
+        self.speaker = draft.speaker
+        self.originalText = draft.originalText
+        self.translatedText = draft.translatedText
+        self.updatedAt = Date()
+    }
+
+    mutating func reset() {
         originalText = ""
         translatedText = ""
-        if clearConsumedText {
-            consumedOriginalText = ""
-            consumedTranslatedText = ""
-            pendingSecondaryMessageIDs = []
-        }
         updatedAt = Date()
     }
 }
@@ -54,6 +57,8 @@ final class LiveTranslationViewModel: ObservableObject {
     private let store: LiveConversationStoring
     private let audioCoordinator: LiveTranslationAudioCoordinator
     private var hasStartedBypass = false
+    private var incomingAssembler = LiveTranscriptTurnAssembler(speaker: .other)
+    private var outgoingAssembler = LiveTranscriptTurnAssembler(speaker: .me)
     private var outgoingKaraokeSegments: [LiveKaraokeSegment] = []
     private var pendingOutgoingPlaybackDuration: TimeInterval = 0
     private var lastOutgoingPlaybackDuration: TimeInterval = 0
@@ -300,9 +305,9 @@ final class LiveTranslationViewModel: ObservableObject {
             }
         case .interrupted:
             if direction == .incoming {
-                incomingDraft.reset()
+                resetAssembler(for: .incoming)
             } else {
-                outgoingDraft.reset()
+                resetAssembler(for: .outgoing)
                 resetOutgoingKaraoke(clearHighlights: false)
             }
         case .error(let message):
@@ -317,521 +322,94 @@ final class LiveTranslationViewModel: ObservableObject {
         case translation
     }
 
-    private struct SecondaryAttachment {
-        let messageIDs: [LiveConversationMessage.ID]
-        let text: String
-        let segmentCount: Int
-    }
-
     private func updateDraft(direction: LiveTranslationAudioDirection, field: DraftField, text: String) {
         let speaker: LiveConversationSpeaker = direction == .incoming ? .other : .me
+        let assemblyField = assemblyField(for: field)
+        let changes: [LiveTranscriptAssemblyChange]
+
         if speaker == .other {
-            update(&incomingDraft, field: field, text: text)
-            attachCompletedSecondarySegments(for: .other)
-            consumeCompletedPrimarySegments(for: .other)
+            changes = incomingAssembler.update(field: assemblyField, text: text)
+            incomingDraft = LiveTranscriptDraft(incomingAssembler.draft)
         } else {
-            update(&outgoingDraft, field: field, text: text)
-            attachCompletedSecondarySegments(for: .me)
-            consumeCompletedPrimarySegments(for: .me)
-        }
-    }
-
-    private func update(_ draft: inout LiveTranscriptDraft, field: DraftField, text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return
+            changes = outgoingAssembler.update(field: assemblyField, text: text)
+            outgoingDraft = LiveTranscriptDraft(outgoingAssembler.draft)
         }
 
-        switch field {
-        case .original:
-            let incoming = stripConsumedPrefix(trimmed, consumed: draft.consumedOriginalText)
-            guard !incoming.isEmpty else {
-                return
-            }
-            draft.originalText = mergedTranscript(current: draft.originalText, incoming: incoming)
-        case .translation:
-            let incoming = stripConsumedPrefix(trimmed, consumed: draft.consumedTranslatedText)
-            guard !incoming.isEmpty else {
-                return
-            }
-            draft.translatedText = mergedTranscript(current: draft.translatedText, incoming: incoming)
-        }
-        draft.updatedAt = Date()
-    }
-
-    private func consumeCompletedPrimarySegments(for speaker: LiveConversationSpeaker) {
-        guard let conversationIndex = selectedConversationIndex else {
-            return
-        }
-
-        var draft = draft(for: speaker)
-        let primaryField = primaryField(for: speaker)
-        let secondaryField = secondaryField(for: speaker)
-        let primaryText = text(primaryField, in: draft)
-        let primarySplit = LiveConversationSegmenter.splitCompletedSegments(in: primaryText)
-        guard !primarySplit.completedSegments.isEmpty else {
-            setDraft(draft, for: speaker)
-            return
-        }
-
-        let secondarySplit = LiveConversationSegmenter.splitCompletedSegments(in: text(secondaryField, in: draft))
-        var consumedSecondaryCount = 0
-
-        for (offset, primarySegment) in primarySplit.completedSegments.enumerated() {
-            let secondarySegment = offset < secondarySplit.completedSegments.count
-                ? secondarySplit.completedSegments[offset]
-                : ""
-            let messageID = appendMessage(
-                speaker: speaker,
-                primaryText: primarySegment,
-                secondaryText: secondarySegment,
-                toConversationAt: conversationIndex
-            )
-            appendConsumed(primarySegment, field: primaryField, to: &draft)
-
-            if !secondarySegment.isEmpty {
-                appendConsumed(secondarySegment, field: secondaryField, to: &draft)
-                consumedSecondaryCount += 1
-            } else {
-                draft.pendingSecondaryMessageIDs.append(messageID)
-            }
-        }
-
-        setText(primarySplit.remainder, field: primaryField, in: &draft)
-        setText(
-            remainingText(
-                completedSegments: secondarySplit.completedSegments,
-                consumedCount: consumedSecondaryCount,
-                remainder: secondarySplit.remainder
-            ),
-            field: secondaryField,
-            in: &draft
-        )
-        conversations[conversationIndex].updatedAt = Date()
-        setDraft(draft, for: speaker)
-        persist(status: "대화를 기록했습니다.")
-    }
-
-    private func attachCompletedSecondarySegments(for speaker: LiveConversationSpeaker, force: Bool = false) {
-        guard let conversationIndex = selectedConversationIndex else {
-            return
-        }
-
-        var draft = draft(for: speaker)
-        let secondaryField = secondaryField(for: speaker)
-        let secondaryText = text(secondaryField, in: draft)
-        let split = LiveConversationSegmenter.splitCompletedSegments(in: secondaryText)
-        var secondarySegments = split.completedSegments
-        var remainder = split.remainder
-
-        if force {
-            let trimmedRemainder = remainder.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedRemainder.isEmpty {
-                secondarySegments.append(trimmedRemainder)
-                remainder = ""
-            } else if secondarySegments.isEmpty,
-                      !secondaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                secondarySegments = [secondaryText.trimmingCharacters(in: .whitespacesAndNewlines)]
-                remainder = ""
-            }
-        }
-
-        let pendingIDs = attachablePendingSecondaryMessageIDs(
-            from: draft.pendingSecondaryMessageIDs,
-            speaker: speaker,
-            conversationIndex: conversationIndex
-        )
-        let attachments = secondaryAttachmentPlan(
-            pendingIDs: pendingIDs,
-            secondarySegments: secondarySegments,
-            force: force
-        )
-
-        guard !attachments.isEmpty else {
-            setDraft(draft, for: speaker)
-            return
-        }
-
-        var consumedSegmentCount = 0
-        var attachedIDs: Set<LiveConversationMessage.ID> = []
-
-        for attachment in attachments {
-            let targetID: LiveConversationMessage.ID?
-            if attachment.messageIDs.count > 1 {
-                targetID = mergeMessages(
-                    attachment.messageIDs,
-                    speaker: speaker,
-                    conversationIndex: conversationIndex
-                )
-            } else {
-                targetID = attachment.messageIDs.first
-            }
-
-            guard let targetID,
-                  let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == targetID }),
-                  conversations[conversationIndex].messages[messageIndex].speaker == speaker,
-                  isSecondaryTextEmpty(in: conversations[conversationIndex].messages[messageIndex])
-            else {
-                continue
-            }
-
-            setSecondaryText(attachment.text, in: &conversations[conversationIndex].messages[messageIndex])
-            if speaker == .me {
-                enqueueOutgoingKaraokeSegment(messageID: targetID, text: attachment.text)
-            }
-            appendConsumed(attachment.text, field: secondaryField, to: &draft)
-            consumedSegmentCount += attachment.segmentCount
-            attachedIDs.formUnion(attachment.messageIDs)
-        }
-
-        guard consumedSegmentCount > 0 else {
-            setDraft(draft, for: speaker)
-            return
-        }
-
-        draft.pendingSecondaryMessageIDs.removeAll { attachedIDs.contains($0) }
-        setText(
-            remainingText(
-                completedSegments: secondarySegments,
-                consumedCount: consumedSegmentCount,
-                remainder: remainder
-            ),
-            field: secondaryField,
-            in: &draft
-        )
-        conversations[conversationIndex].updatedAt = Date()
-        setDraft(draft, for: speaker)
-        persist(status: "대화를 기록했습니다.")
-    }
-
-    private func attachablePendingSecondaryMessageIDs(
-        from ids: [LiveConversationMessage.ID],
-        speaker: LiveConversationSpeaker,
-        conversationIndex: Int
-    ) -> [LiveConversationMessage.ID] {
-        ids.filter { id in
-            guard let message = conversations[conversationIndex].messages.first(where: { $0.id == id }) else {
-                return false
-            }
-            return message.speaker == speaker && isSecondaryTextEmpty(in: message)
-        }
-    }
-
-    private func secondaryAttachmentPlan(
-        pendingIDs: [LiveConversationMessage.ID],
-        secondarySegments: [String],
-        force: Bool
-    ) -> [SecondaryAttachment] {
-        let segments = secondarySegments
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        guard !pendingIDs.isEmpty, !segments.isEmpty else {
-            return []
-        }
-
-        guard force else {
-            let pairCount = min(pendingIDs.count, segments.count)
-            return (0..<pairCount).map { index in
-                SecondaryAttachment(
-                    messageIDs: [pendingIDs[index]],
-                    text: segments[index],
-                    segmentCount: 1
-                )
-            }
-        }
-
-        if pendingIDs.count == 1 {
-            return [
-                SecondaryAttachment(
-                    messageIDs: [pendingIDs[0]],
-                    text: joinedTranscript(segments),
-                    segmentCount: segments.count
-                )
-            ]
-        }
-
-        if segments.count == 1 {
-            return [
-                SecondaryAttachment(
-                    messageIDs: pendingIDs,
-                    text: segments[0],
-                    segmentCount: 1
-                )
-            ]
-        }
-
-        if segments.count >= pendingIDs.count {
-            var attachments: [SecondaryAttachment] = []
-            for index in pendingIDs.indices.dropLast() {
-                attachments.append(
-                    SecondaryAttachment(
-                        messageIDs: [pendingIDs[index]],
-                        text: segments[index],
-                        segmentCount: 1
-                    )
-                )
-            }
-
-            let lastIndex = pendingIDs.count - 1
-            attachments.append(
-                SecondaryAttachment(
-                    messageIDs: [pendingIDs[lastIndex]],
-                    text: joinedTranscript(Array(segments[lastIndex...])),
-                    segmentCount: segments.count - lastIndex
-                )
-            )
-            return attachments
-        }
-
-        var attachments: [SecondaryAttachment] = []
-        for index in 0..<(segments.count - 1) {
-            attachments.append(
-                SecondaryAttachment(
-                    messageIDs: [pendingIDs[index]],
-                    text: segments[index],
-                    segmentCount: 1
-                )
-            )
-        }
-
-        attachments.append(
-            SecondaryAttachment(
-                messageIDs: Array(pendingIDs[(segments.count - 1)...]),
-                text: segments[segments.count - 1],
-                segmentCount: 1
-            )
-        )
-        return attachments
-    }
-
-    private func mergeMessages(
-        _ ids: [LiveConversationMessage.ID],
-        speaker: LiveConversationSpeaker,
-        conversationIndex: Int
-    ) -> LiveConversationMessage.ID? {
-        let messageIndices = ids.compactMap { id in
-            conversations[conversationIndex].messages.firstIndex {
-                $0.id == id && $0.speaker == speaker
-            }
-        }.sorted()
-
-        guard let firstIndex = messageIndices.first else {
-            return nil
-        }
-
-        guard messageIndices.count > 1 else {
-            return conversations[conversationIndex].messages[firstIndex].id
-        }
-
-        let messages = messageIndices.map { conversations[conversationIndex].messages[$0] }
-        let firstMessage = conversations[conversationIndex].messages[firstIndex]
-        let mergedMessage = LiveConversationMessage(
-            id: firstMessage.id,
-            speaker: speaker,
-            originalText: joinedTranscript(messages.map(\.originalText)),
-            translatedText: joinedTranscript(messages.map(\.translatedText)),
-            timestamp: firstMessage.timestamp
-        )
-
-        conversations[conversationIndex].messages[firstIndex] = mergedMessage
-        for index in messageIndices.dropFirst().sorted(by: >) {
-            conversations[conversationIndex].messages.remove(at: index)
-        }
-
-        return mergedMessage.id
-    }
-
-    private func joinedTranscript(_ parts: [String]) -> String {
-        parts
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+        applyAssemblyChanges(changes)
     }
 
     private func finishDraft(direction: LiveTranslationAudioDirection) {
         let speaker: LiveConversationSpeaker = direction == .incoming ? .other : .me
-        attachCompletedSecondarySegments(for: speaker, force: true)
+        let changes: [LiveTranscriptAssemblyChange]
 
-        let updatedDraft = self.draft(for: speaker)
-        guard !updatedDraft.isEmpty,
-              let index = selectedConversationIndex
-        else {
-            resetDraft(for: speaker)
-            return
+        if speaker == .other {
+            changes = incomingAssembler.finish()
+            incomingDraft = LiveTranscriptDraft(incomingAssembler.draft)
+        } else {
+            changes = outgoingAssembler.finish()
+            outgoingDraft = LiveTranscriptDraft(outgoingAssembler.draft)
         }
 
-        conversations[index].messages.append(
-            LiveConversationMessage(
-                speaker: speaker,
-                originalText: updatedDraft.originalText,
-                translatedText: updatedDraft.translatedText
-            )
-        )
-        if speaker == .me,
-           let messageID = conversations[index].messages.last?.id {
-            enqueueOutgoingKaraokeSegment(messageID: messageID, text: updatedDraft.translatedText)
-        }
-        conversations[index].updatedAt = Date()
-
-        resetDraft(for: speaker)
-
-        persist(status: "대화를 기록했습니다.")
+        applyAssemblyChanges(changes)
     }
 
     private func resetDrafts() {
+        incomingAssembler.reset()
+        outgoingAssembler.reset()
         incomingDraft.reset()
         outgoingDraft.reset()
     }
 
-    private func mergedTranscript(current: String, incoming: String) -> String {
-        let current = current.trimmingCharacters(in: .whitespacesAndNewlines)
-        let incoming = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !incoming.isEmpty else {
-            return current
-        }
-        guard !current.isEmpty else {
-            return incoming
-        }
-        if incoming == current || current.hasSuffix(incoming) {
-            return current
-        }
-        if incoming.hasPrefix(current) {
-            return incoming
-        }
-
-        return "\(current) \(incoming)"
-    }
-
-    private func stripConsumedPrefix(_ incoming: String, consumed: String) -> String {
-        let consumed = consumed.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !consumed.isEmpty else {
-            return incoming
-        }
-
-        if incoming == consumed {
-            return ""
-        }
-
-        if incoming.hasPrefix(consumed) {
-            return incoming
-                .dropFirst(consumed.count)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return incoming
-    }
-
-    private func remainingText(completedSegments: [String], consumedCount: Int, remainder: String) -> String {
-        let unusedSegments = completedSegments.dropFirst(consumedCount)
-        return (Array(unusedSegments) + [remainder])
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-    }
-
-    private func draft(for speaker: LiveConversationSpeaker) -> LiveTranscriptDraft {
-        speaker == .other ? incomingDraft : outgoingDraft
-    }
-
-    private func setDraft(_ draft: LiveTranscriptDraft, for speaker: LiveConversationSpeaker) {
-        if speaker == .other {
-            incomingDraft = draft
-        } else {
-            outgoingDraft = draft
-        }
-    }
-
-    private func resetDraft(for speaker: LiveConversationSpeaker) {
-        if speaker == .other {
+    private func resetAssembler(for direction: LiveTranslationAudioDirection) {
+        if direction == .incoming {
+            incomingAssembler.reset()
             incomingDraft.reset()
         } else {
+            outgoingAssembler.reset()
             outgoingDraft.reset()
         }
     }
 
-    private func primaryField(for speaker: LiveConversationSpeaker) -> DraftField {
-        speaker == .me ? .original : .translation
-    }
-
-    private func secondaryField(for speaker: LiveConversationSpeaker) -> DraftField {
-        speaker == .me ? .translation : .original
-    }
-
-    private func text(_ field: DraftField, in draft: LiveTranscriptDraft) -> String {
+    private func assemblyField(for field: DraftField) -> LiveTranscriptAssemblyField {
         switch field {
         case .original:
-            draft.originalText
+            .original
         case .translation:
-            draft.translatedText
+            .translation
         }
     }
 
-    private func setText(_ text: String, field: DraftField, in draft: inout LiveTranscriptDraft) {
-        switch field {
-        case .original:
-            draft.originalText = text
-        case .translation:
-            draft.translatedText = text
+    private func applyAssemblyChanges(_ changes: [LiveTranscriptAssemblyChange]) {
+        guard !changes.isEmpty,
+              let conversationIndex = selectedConversationIndex
+        else {
+            return
         }
-        draft.updatedAt = Date()
+
+        for change in changes {
+            switch change {
+            case .append(let message):
+                conversations[conversationIndex].messages.append(message)
+                updateKaraokeTrackingIfNeeded(for: message)
+            case .update(let message):
+                if let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == message.id }) {
+                    conversations[conversationIndex].messages[messageIndex] = message
+                } else {
+                    conversations[conversationIndex].messages.append(message)
+                }
+                updateKaraokeTrackingIfNeeded(for: message)
+            }
+        }
+
+        conversations[conversationIndex].updatedAt = Date()
+        persist(status: "대화를 기록했습니다.")
     }
 
-    private func appendConsumed(_ text: String, field: DraftField, to draft: inout LiveTranscriptDraft) {
-        switch field {
-        case .original:
-            draft.consumedOriginalText = mergedTranscript(current: draft.consumedOriginalText, incoming: text)
-        case .translation:
-            draft.consumedTranslatedText = mergedTranscript(current: draft.consumedTranslatedText, incoming: text)
+    private func updateKaraokeTrackingIfNeeded(for message: LiveConversationMessage) {
+        guard message.speaker == .me else {
+            return
         }
-    }
-
-    private func appendMessage(
-        speaker: LiveConversationSpeaker,
-        primaryText: String,
-        secondaryText: String,
-        toConversationAt conversationIndex: Int
-    ) -> LiveConversationMessage.ID {
-        let message: LiveConversationMessage
-        switch speaker {
-        case .me:
-            message = LiveConversationMessage(
-                speaker: speaker,
-                originalText: primaryText,
-                translatedText: secondaryText
-            )
-        case .other:
-            message = LiveConversationMessage(
-                speaker: speaker,
-                originalText: secondaryText,
-                translatedText: primaryText
-            )
-        }
-
-        conversations[conversationIndex].messages.append(message)
-        if speaker == .me {
-            enqueueOutgoingKaraokeSegment(messageID: message.id, text: message.translatedText)
-        }
-        return message.id
-    }
-
-    private func isSecondaryTextEmpty(in message: LiveConversationMessage) -> Bool {
-        switch message.speaker {
-        case .me:
-            message.translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .other:
-            message.originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-    }
-
-    private func setSecondaryText(_ text: String, in message: inout LiveConversationMessage) {
-        switch message.speaker {
-        case .me:
-            message.translatedText = text
-        case .other:
-            message.originalText = text
-        }
+        enqueueOutgoingKaraokeSegment(messageID: message.id, text: message.translatedText)
     }
 
     private func handlePlaybackProgress(

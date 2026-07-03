@@ -327,6 +327,8 @@ private struct LiveConversationDetail: View {
         [
             conversation?.id.uuidString ?? "",
             conversation?.messages.last?.id.uuidString ?? "",
+            conversation?.messages.last?.originalText ?? "",
+            conversation?.messages.last?.translatedText ?? "",
             String(conversation?.messages.count ?? 0),
             incomingDraft.originalText,
             incomingDraft.translatedText,
