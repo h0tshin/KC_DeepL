@@ -41,6 +41,7 @@ struct LiveTranslationWorkspace: View {
                     incomingDraft: viewModel.incomingDraft,
                     outgoingDraft: viewModel.outgoingDraft,
                     karaokeHighlights: viewModel.karaokeHighlights,
+                    outgoingDraftKaraokeHighlightedCharacters: viewModel.outgoingDraftKaraokeHighlightedCharacters,
                     isMicrophoneTranslationEnabled: viewModel.isMicrophoneTranslationEnabled,
                     onToggleMicrophone: {
                         viewModel.setMicrophoneTranslationEnabled(!viewModel.isMicrophoneTranslationEnabled)
@@ -226,6 +227,7 @@ private struct LiveConversationDetail: View {
     let incomingDraft: LiveTranscriptDraft
     let outgoingDraft: LiveTranscriptDraft
     let karaokeHighlights: [LiveConversationMessage.ID: Int]
+    let outgoingDraftKaraokeHighlightedCharacters: Int?
     let isMicrophoneTranslationEnabled: Bool
     let onToggleMicrophone: () -> Void
     @State private var followsLatest = true
@@ -259,7 +261,10 @@ private struct LiveConversationDetail: View {
                                 }
 
                                 if !outgoingDraft.isEmpty {
-                                    LiveDraftBubble(draft: outgoingDraft)
+                                    LiveDraftBubble(
+                                        draft: outgoingDraft,
+                                        karaokeHighlightedCharacters: outgoingDraftKaraokeHighlightedCharacters
+                                    )
                                         .id("outgoing-draft")
                                 }
 
@@ -497,9 +502,13 @@ private struct LiveMessageBubble: View {
     }
 
     private var primaryBaseColor: Color {
-        message.speaker == .me
-            ? (isDraft ? Color.white : Color.black)
-            : Color.primary
+        if message.speaker == .me {
+            if isDraft && karaokeHighlightedCharacters == nil {
+                return Color.white
+            }
+            return Color.black
+        }
+        return Color.primary
     }
 
     private var primaryHighlightColor: Color {
@@ -512,7 +521,6 @@ private struct LiveMessageBubble: View {
 
     private var showsKaraokeProgress: Bool {
         guard message.speaker == .me,
-              !isDraft,
               !message.translatedText.isEmpty,
               karaokeHighlightedCharacters != nil
         else {
@@ -577,6 +585,7 @@ private struct LiveKaraokeProgressBar: View {
 
 private struct LiveDraftBubble: View {
     let draft: LiveTranscriptDraft
+    var karaokeHighlightedCharacters: Int? = nil
 
     var body: some View {
         LiveMessageBubble(
@@ -585,6 +594,7 @@ private struct LiveDraftBubble: View {
                 originalText: draft.originalText,
                 translatedText: draft.translatedText
             ),
+            karaokeHighlightedCharacters: karaokeHighlightedCharacters,
             isDraft: true
         )
     }
