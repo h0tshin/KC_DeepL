@@ -247,7 +247,7 @@ private struct LiveConversationDetail: View {
                                     ForEach(conversation.messages) { message in
                                         LiveMessageBubble(
                                             message: message,
-                                            karaokeHighlightedCharacters: karaokeHighlights[message.id] ?? 0
+                                            karaokeHighlightedCharacters: karaokeHighlights[message.id]
                                         )
                                             .id(message.id)
                                     }
@@ -394,7 +394,8 @@ private struct LiveScrollBottomPreferenceKey: PreferenceKey {
 
 private struct LiveMessageBubble: View {
     let message: LiveConversationMessage
-    var karaokeHighlightedCharacters: Int = 0
+    var karaokeHighlightedCharacters: Int? = nil
+    var isDraft = false
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 10) {
@@ -415,7 +416,7 @@ private struct LiveMessageBubble: View {
             LiveKaraokeText(
                 text: primaryText,
                 highlightedCharacters: primaryHighlightedCharacters,
-                font: .system(size: 24, weight: .bold),
+                font: primaryFont,
                 baseColor: primaryBaseColor,
                 highlightColor: primaryHighlightColor
             )
@@ -424,10 +425,15 @@ private struct LiveMessageBubble: View {
                 LiveKaraokeText(
                     text: secondaryText,
                     highlightedCharacters: secondaryHighlightedCharacters,
-                    font: .system(size: message.speaker == .me ? 14 : 15, weight: .semibold),
+                    font: secondaryFont,
                     baseColor: secondaryBaseColor,
                     highlightColor: primaryHighlightColor
                 )
+            }
+
+            if showsKaraokeProgress {
+                LiveKaraokeProgressBar(progress: karaokeProgress)
+                    .padding(.top, 2)
             }
         }
         .padding(.horizontal, 18)
@@ -471,15 +477,29 @@ private struct LiveMessageBubble: View {
         else {
             return 0
         }
-        return karaokeHighlightedCharacters
+        return karaokeHighlightedCharacters ?? 0
     }
 
     private var secondaryHighlightedCharacters: Int {
         0
     }
 
+    private var primaryFont: Font {
+        message.speaker == .me
+            ? .system(size: 20, weight: .bold)
+            : .system(size: 24, weight: .bold)
+    }
+
+    private var secondaryFont: Font {
+        message.speaker == .me
+            ? .system(size: 18, weight: .semibold)
+            : .system(size: 15, weight: .semibold)
+    }
+
     private var primaryBaseColor: Color {
-        message.speaker == .me ? Color.black : Color.primary
+        message.speaker == .me
+            ? (isDraft ? Color.white : Color.black)
+            : Color.primary
     }
 
     private var primaryHighlightColor: Color {
@@ -487,7 +507,25 @@ private struct LiveMessageBubble: View {
     }
 
     private var secondaryBaseColor: Color {
-        message.speaker == .me ? Color.white.opacity(0.86) : Color.secondary
+        message.speaker == .me ? Color.white : Color.secondary
+    }
+
+    private var showsKaraokeProgress: Bool {
+        guard message.speaker == .me,
+              !isDraft,
+              !message.translatedText.isEmpty,
+              karaokeHighlightedCharacters != nil
+        else {
+            return false
+        }
+        return primaryText.count > 0 && primaryHighlightedCharacters < primaryText.count
+    }
+
+    private var karaokeProgress: Double {
+        guard primaryText.count > 0 else {
+            return 0
+        }
+        return min(1.0, max(0.0, Double(primaryHighlightedCharacters) / Double(primaryText.count)))
     }
 }
 
@@ -518,6 +556,25 @@ private struct LiveKaraokeText: View {
     }
 }
 
+private struct LiveKaraokeProgressBar: View {
+    let progress: Double
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.black.opacity(0.36))
+
+                Capsule()
+                    .fill(Color.white.opacity(0.92))
+                    .frame(width: geometry.size.width * min(1.0, max(0.0, progress)))
+            }
+        }
+        .frame(height: 3)
+        .clipShape(Capsule())
+    }
+}
+
 private struct LiveDraftBubble: View {
     let draft: LiveTranscriptDraft
 
@@ -527,9 +584,9 @@ private struct LiveDraftBubble: View {
                 speaker: draft.speaker,
                 originalText: draft.originalText,
                 translatedText: draft.translatedText
-            )
+            ),
+            isDraft: true
         )
-        .opacity(0.72)
     }
 }
 
