@@ -33,4 +33,22 @@ final class LiveConversationSegmenterTests: XCTestCase {
         XCTAssertEqual(split.completedSegments, ["알았어"])
         XCTAssertEqual(split.remainder, "다음")
     }
+
+    func testDoesNotSplitDecimalNumbers() {
+        let split = LiveConversationSegmenter.splitCompletedSegments(
+            in: "We need version 4.0 today. Next"
+        )
+
+        XCTAssertEqual(split.completedSegments, ["We need version 4.0 today."])
+        XCTAssertEqual(split.remainder, "Next")
+    }
+
+    func testKeepsDecimalInsideKoreanSentence() {
+        let split = LiveConversationSegmenter.splitCompletedSegments(
+            in: "버전 4.0입니다 다음"
+        )
+
+        XCTAssertEqual(split.completedSegments, ["버전 4.0입니다"])
+        XCTAssertEqual(split.remainder, "다음")
+    }
 }

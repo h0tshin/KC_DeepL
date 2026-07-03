@@ -102,6 +102,10 @@ public enum LiveConversationSegmenter {
         }
 
         if character == "." {
+            if isDecimalSeparator(at: index, in: text) {
+                return nil
+            }
+
             if index > text.startIndex,
                text[text.index(before: index)] == "." {
                 return nil
@@ -115,6 +119,21 @@ public enum LiveConversationSegmenter {
         }
 
         return text.index(after: index)
+    }
+
+    private static func isDecimalSeparator(at index: String.Index, in text: String) -> Bool {
+        guard index > text.startIndex else {
+            return false
+        }
+
+        let nextIndex = text.index(after: index)
+        guard nextIndex < text.endIndex else {
+            return false
+        }
+
+        let previous = text[text.index(before: index)]
+        let next = text[nextIndex]
+        return previous.isNumber && next.isNumber
     }
 
     private static func isKoreanEndingBoundary(

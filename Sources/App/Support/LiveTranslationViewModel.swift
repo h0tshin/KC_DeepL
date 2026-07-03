@@ -286,6 +286,12 @@ final class LiveTranslationViewModel: ObservableObject {
         case translation
     }
 
+    private struct SecondaryAttachment {
+        let messageIDs: [LiveConversationMessage.ID]
+        let text: String
+        let segmentCount: Int
+    }
+
     private func updateDraft(direction: LiveTranslationAudioDirection, field: DraftField, text: String) {
         let speaker: LiveConversationSpeaker = direction == .incoming ? .other : .me
         if speaker == .other {
@@ -387,44 +393,73 @@ final class LiveTranslationViewModel: ObservableObject {
         var secondarySegments = split.completedSegments
         var remainder = split.remainder
 
-        if force,
-           secondarySegments.isEmpty,
-           !secondaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            secondarySegments = [secondaryText.trimmingCharacters(in: .whitespacesAndNewlines)]
-            remainder = ""
+        if force {
+            let trimmedRemainder = remainder.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedRemainder.isEmpty {
+                secondarySegments.append(trimmedRemainder)
+                remainder = ""
+            } else if secondarySegments.isEmpty,
+                      !secondaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                secondarySegments = [secondaryText.trimmingCharacters(in: .whitespacesAndNewlines)]
+                remainder = ""
+            }
         }
 
-        guard !secondarySegments.isEmpty else {
+        let pendingIDs = attachablePendingSecondaryMessageIDs(
+            from: draft.pendingSecondaryMessageIDs,
+            speaker: speaker,
+            conversationIndex: conversationIndex
+        )
+        let attachments = secondaryAttachmentPlan(
+            pendingIDs: pendingIDs,
+            secondarySegments: secondarySegments,
+            force: force
+        )
+
+        guard !attachments.isEmpty else {
             setDraft(draft, for: speaker)
             return
         }
 
-        var consumedCount = 0
-        for messageID in draft.pendingSecondaryMessageIDs {
-            guard consumedCount < secondarySegments.count,
-                  let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == messageID }),
+        var consumedSegmentCount = 0
+        var attachedIDs: Set<LiveConversationMessage.ID> = []
+
+        for attachment in attachments {
+            let targetID: LiveConversationMessage.ID?
+            if attachment.messageIDs.count > 1 {
+                targetID = mergeMessages(
+                    attachment.messageIDs,
+                    speaker: speaker,
+                    conversationIndex: conversationIndex
+                )
+            } else {
+                targetID = attachment.messageIDs.first
+            }
+
+            guard let targetID,
+                  let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == targetID }),
                   conversations[conversationIndex].messages[messageIndex].speaker == speaker,
                   isSecondaryTextEmpty(in: conversations[conversationIndex].messages[messageIndex])
             else {
                 continue
             }
 
-            let segment = secondarySegments[consumedCount]
-            setSecondaryText(segment, in: &conversations[conversationIndex].messages[messageIndex])
-            appendConsumed(segment, field: secondaryField, to: &draft)
-            consumedCount += 1
+            setSecondaryText(attachment.text, in: &conversations[conversationIndex].messages[messageIndex])
+            appendConsumed(attachment.text, field: secondaryField, to: &draft)
+            consumedSegmentCount += attachment.segmentCount
+            attachedIDs.formUnion(attachment.messageIDs)
         }
 
-        guard consumedCount > 0 else {
+        guard consumedSegmentCount > 0 else {
             setDraft(draft, for: speaker)
             return
         }
 
-        draft.pendingSecondaryMessageIDs.removeFirst(min(consumedCount, draft.pendingSecondaryMessageIDs.count))
+        draft.pendingSecondaryMessageIDs.removeAll { attachedIDs.contains($0) }
         setText(
             remainingText(
                 completedSegments: secondarySegments,
-                consumedCount: consumedCount,
+                consumedCount: consumedSegmentCount,
                 remainder: remainder
             ),
             field: secondaryField,
@@ -433,6 +468,151 @@ final class LiveTranslationViewModel: ObservableObject {
         conversations[conversationIndex].updatedAt = Date()
         setDraft(draft, for: speaker)
         persist(status: "대화를 기록했습니다.")
+    }
+
+    private func attachablePendingSecondaryMessageIDs(
+        from ids: [LiveConversationMessage.ID],
+        speaker: LiveConversationSpeaker,
+        conversationIndex: Int
+    ) -> [LiveConversationMessage.ID] {
+        ids.filter { id in
+            guard let message = conversations[conversationIndex].messages.first(where: { $0.id == id }) else {
+                return false
+            }
+            return message.speaker == speaker && isSecondaryTextEmpty(in: message)
+        }
+    }
+
+    private func secondaryAttachmentPlan(
+        pendingIDs: [LiveConversationMessage.ID],
+        secondarySegments: [String],
+        force: Bool
+    ) -> [SecondaryAttachment] {
+        let segments = secondarySegments
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !pendingIDs.isEmpty, !segments.isEmpty else {
+            return []
+        }
+
+        guard force else {
+            let pairCount = min(pendingIDs.count, segments.count)
+            return (0..<pairCount).map { index in
+                SecondaryAttachment(
+                    messageIDs: [pendingIDs[index]],
+                    text: segments[index],
+                    segmentCount: 1
+                )
+            }
+        }
+
+        if pendingIDs.count == 1 {
+            return [
+                SecondaryAttachment(
+                    messageIDs: [pendingIDs[0]],
+                    text: joinedTranscript(segments),
+                    segmentCount: segments.count
+                )
+            ]
+        }
+
+        if segments.count == 1 {
+            return [
+                SecondaryAttachment(
+                    messageIDs: pendingIDs,
+                    text: segments[0],
+                    segmentCount: 1
+                )
+            ]
+        }
+
+        if segments.count >= pendingIDs.count {
+            var attachments: [SecondaryAttachment] = []
+            for index in pendingIDs.indices.dropLast() {
+                attachments.append(
+                    SecondaryAttachment(
+                        messageIDs: [pendingIDs[index]],
+                        text: segments[index],
+                        segmentCount: 1
+                    )
+                )
+            }
+
+            let lastIndex = pendingIDs.count - 1
+            attachments.append(
+                SecondaryAttachment(
+                    messageIDs: [pendingIDs[lastIndex]],
+                    text: joinedTranscript(Array(segments[lastIndex...])),
+                    segmentCount: segments.count - lastIndex
+                )
+            )
+            return attachments
+        }
+
+        var attachments: [SecondaryAttachment] = []
+        for index in 0..<(segments.count - 1) {
+            attachments.append(
+                SecondaryAttachment(
+                    messageIDs: [pendingIDs[index]],
+                    text: segments[index],
+                    segmentCount: 1
+                )
+            )
+        }
+
+        attachments.append(
+            SecondaryAttachment(
+                messageIDs: Array(pendingIDs[(segments.count - 1)...]),
+                text: segments[segments.count - 1],
+                segmentCount: 1
+            )
+        )
+        return attachments
+    }
+
+    private func mergeMessages(
+        _ ids: [LiveConversationMessage.ID],
+        speaker: LiveConversationSpeaker,
+        conversationIndex: Int
+    ) -> LiveConversationMessage.ID? {
+        let messageIndices = ids.compactMap { id in
+            conversations[conversationIndex].messages.firstIndex {
+                $0.id == id && $0.speaker == speaker
+            }
+        }.sorted()
+
+        guard let firstIndex = messageIndices.first else {
+            return nil
+        }
+
+        guard messageIndices.count > 1 else {
+            return conversations[conversationIndex].messages[firstIndex].id
+        }
+
+        let messages = messageIndices.map { conversations[conversationIndex].messages[$0] }
+        let firstMessage = conversations[conversationIndex].messages[firstIndex]
+        let mergedMessage = LiveConversationMessage(
+            id: firstMessage.id,
+            speaker: speaker,
+            originalText: joinedTranscript(messages.map(\.originalText)),
+            translatedText: joinedTranscript(messages.map(\.translatedText)),
+            timestamp: firstMessage.timestamp
+        )
+
+        conversations[conversationIndex].messages[firstIndex] = mergedMessage
+        for index in messageIndices.dropFirst().sorted(by: >) {
+            conversations[conversationIndex].messages.remove(at: index)
+        }
+
+        return mergedMessage.id
+    }
+
+    private func joinedTranscript(_ parts: [String]) -> String {
+        parts
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private func finishDraft(direction: LiveTranslationAudioDirection) {
