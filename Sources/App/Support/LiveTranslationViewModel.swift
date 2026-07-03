@@ -5,6 +5,9 @@ struct LiveTranscriptDraft: Equatable {
     var speaker: LiveConversationSpeaker
     var originalText = ""
     var translatedText = ""
+    var consumedOriginalText = ""
+    var consumedTranslatedText = ""
+    var pendingSecondaryMessageIDs: [LiveConversationMessage.ID] = []
     var updatedAt = Date()
 
     var isEmpty: Bool {
@@ -12,9 +15,14 @@ struct LiveTranscriptDraft: Equatable {
             && translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    mutating func reset() {
+    mutating func reset(clearConsumedText: Bool = true) {
         originalText = ""
         translatedText = ""
+        if clearConsumedText {
+            consumedOriginalText = ""
+            consumedTranslatedText = ""
+            pendingSecondaryMessageIDs = []
+        }
         updatedAt = Date()
     }
 }
@@ -259,7 +267,7 @@ final class LiveTranslationViewModel: ObservableObject {
         case .outputTranscript(let text, _):
             updateDraft(direction: direction, field: .translation, text: text)
         case .turnComplete:
-            commitDraft(direction: direction)
+            finishDraft(direction: direction)
         case .interrupted:
             if direction == .incoming {
                 incomingDraft.reset()
@@ -282,8 +290,12 @@ final class LiveTranslationViewModel: ObservableObject {
         let speaker: LiveConversationSpeaker = direction == .incoming ? .other : .me
         if speaker == .other {
             update(&incomingDraft, field: field, text: text)
+            attachCompletedSecondarySegments(for: .other)
+            consumeCompletedPrimarySegments(for: .other)
         } else {
             update(&outgoingDraft, field: field, text: text)
+            attachCompletedSecondarySegments(for: .me)
+            consumeCompletedPrimarySegments(for: .me)
         }
     }
 
@@ -295,36 +307,156 @@ final class LiveTranslationViewModel: ObservableObject {
 
         switch field {
         case .original:
-            draft.originalText = mergedTranscript(current: draft.originalText, incoming: trimmed)
+            let incoming = stripConsumedPrefix(trimmed, consumed: draft.consumedOriginalText)
+            guard !incoming.isEmpty else {
+                return
+            }
+            draft.originalText = mergedTranscript(current: draft.originalText, incoming: incoming)
         case .translation:
-            draft.translatedText = mergedTranscript(current: draft.translatedText, incoming: trimmed)
+            let incoming = stripConsumedPrefix(trimmed, consumed: draft.consumedTranslatedText)
+            guard !incoming.isEmpty else {
+                return
+            }
+            draft.translatedText = mergedTranscript(current: draft.translatedText, incoming: incoming)
         }
         draft.updatedAt = Date()
     }
 
-    private func commitDraft(direction: LiveTranslationAudioDirection) {
+    private func consumeCompletedPrimarySegments(for speaker: LiveConversationSpeaker) {
+        guard let conversationIndex = selectedConversationIndex else {
+            return
+        }
+
+        var draft = draft(for: speaker)
+        let primaryField = primaryField(for: speaker)
+        let secondaryField = secondaryField(for: speaker)
+        let primaryText = text(primaryField, in: draft)
+        let primarySplit = LiveConversationSegmenter.splitCompletedSegments(in: primaryText)
+        guard !primarySplit.completedSegments.isEmpty else {
+            setDraft(draft, for: speaker)
+            return
+        }
+
+        let secondarySplit = LiveConversationSegmenter.splitCompletedSegments(in: text(secondaryField, in: draft))
+        var consumedSecondaryCount = 0
+
+        for (offset, primarySegment) in primarySplit.completedSegments.enumerated() {
+            let secondarySegment = offset < secondarySplit.completedSegments.count
+                ? secondarySplit.completedSegments[offset]
+                : ""
+            let messageID = appendMessage(
+                speaker: speaker,
+                primaryText: primarySegment,
+                secondaryText: secondarySegment,
+                toConversationAt: conversationIndex
+            )
+            appendConsumed(primarySegment, field: primaryField, to: &draft)
+
+            if !secondarySegment.isEmpty {
+                appendConsumed(secondarySegment, field: secondaryField, to: &draft)
+                consumedSecondaryCount += 1
+            } else {
+                draft.pendingSecondaryMessageIDs.append(messageID)
+            }
+        }
+
+        setText(primarySplit.remainder, field: primaryField, in: &draft)
+        setText(
+            remainingText(
+                completedSegments: secondarySplit.completedSegments,
+                consumedCount: consumedSecondaryCount,
+                remainder: secondarySplit.remainder
+            ),
+            field: secondaryField,
+            in: &draft
+        )
+        conversations[conversationIndex].updatedAt = Date()
+        setDraft(draft, for: speaker)
+        persist(status: "대화를 기록했습니다.")
+    }
+
+    private func attachCompletedSecondarySegments(for speaker: LiveConversationSpeaker, force: Bool = false) {
+        guard let conversationIndex = selectedConversationIndex else {
+            return
+        }
+
+        var draft = draft(for: speaker)
+        let secondaryField = secondaryField(for: speaker)
+        let secondaryText = text(secondaryField, in: draft)
+        let split = LiveConversationSegmenter.splitCompletedSegments(in: secondaryText)
+        var secondarySegments = split.completedSegments
+        var remainder = split.remainder
+
+        if force,
+           secondarySegments.isEmpty,
+           !secondaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            secondarySegments = [secondaryText.trimmingCharacters(in: .whitespacesAndNewlines)]
+            remainder = ""
+        }
+
+        guard !secondarySegments.isEmpty else {
+            setDraft(draft, for: speaker)
+            return
+        }
+
+        var consumedCount = 0
+        for messageID in draft.pendingSecondaryMessageIDs {
+            guard consumedCount < secondarySegments.count,
+                  let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == messageID }),
+                  conversations[conversationIndex].messages[messageIndex].speaker == speaker,
+                  isSecondaryTextEmpty(in: conversations[conversationIndex].messages[messageIndex])
+            else {
+                continue
+            }
+
+            let segment = secondarySegments[consumedCount]
+            setSecondaryText(segment, in: &conversations[conversationIndex].messages[messageIndex])
+            appendConsumed(segment, field: secondaryField, to: &draft)
+            consumedCount += 1
+        }
+
+        guard consumedCount > 0 else {
+            setDraft(draft, for: speaker)
+            return
+        }
+
+        draft.pendingSecondaryMessageIDs.removeFirst(min(consumedCount, draft.pendingSecondaryMessageIDs.count))
+        setText(
+            remainingText(
+                completedSegments: secondarySegments,
+                consumedCount: consumedCount,
+                remainder: remainder
+            ),
+            field: secondaryField,
+            in: &draft
+        )
+        conversations[conversationIndex].updatedAt = Date()
+        setDraft(draft, for: speaker)
+        persist(status: "대화를 기록했습니다.")
+    }
+
+    private func finishDraft(direction: LiveTranslationAudioDirection) {
         let speaker: LiveConversationSpeaker = direction == .incoming ? .other : .me
-        let draft = speaker == .other ? incomingDraft : outgoingDraft
-        guard !draft.isEmpty,
+        attachCompletedSecondarySegments(for: speaker, force: true)
+
+        let updatedDraft = self.draft(for: speaker)
+        guard !updatedDraft.isEmpty,
               let index = selectedConversationIndex
         else {
+            resetDraft(for: speaker)
             return
         }
 
         conversations[index].messages.append(
             LiveConversationMessage(
                 speaker: speaker,
-                originalText: draft.originalText,
-                translatedText: draft.translatedText
+                originalText: updatedDraft.originalText,
+                translatedText: updatedDraft.translatedText
             )
         )
         conversations[index].updatedAt = Date()
 
-        if speaker == .other {
-            incomingDraft.reset()
-        } else {
-            outgoingDraft.reset()
-        }
+        resetDraft(for: speaker)
 
         persist(status: "대화를 기록했습니다.")
     }
@@ -352,6 +484,133 @@ final class LiveTranslationViewModel: ObservableObject {
         }
 
         return "\(current) \(incoming)"
+    }
+
+    private func stripConsumedPrefix(_ incoming: String, consumed: String) -> String {
+        let consumed = consumed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !consumed.isEmpty else {
+            return incoming
+        }
+
+        if incoming == consumed {
+            return ""
+        }
+
+        if incoming.hasPrefix(consumed) {
+            return incoming
+                .dropFirst(consumed.count)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return incoming
+    }
+
+    private func remainingText(completedSegments: [String], consumedCount: Int, remainder: String) -> String {
+        let unusedSegments = completedSegments.dropFirst(consumedCount)
+        return (Array(unusedSegments) + [remainder])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func draft(for speaker: LiveConversationSpeaker) -> LiveTranscriptDraft {
+        speaker == .other ? incomingDraft : outgoingDraft
+    }
+
+    private func setDraft(_ draft: LiveTranscriptDraft, for speaker: LiveConversationSpeaker) {
+        if speaker == .other {
+            incomingDraft = draft
+        } else {
+            outgoingDraft = draft
+        }
+    }
+
+    private func resetDraft(for speaker: LiveConversationSpeaker) {
+        if speaker == .other {
+            incomingDraft.reset()
+        } else {
+            outgoingDraft.reset()
+        }
+    }
+
+    private func primaryField(for speaker: LiveConversationSpeaker) -> DraftField {
+        speaker == .me ? .original : .translation
+    }
+
+    private func secondaryField(for speaker: LiveConversationSpeaker) -> DraftField {
+        speaker == .me ? .translation : .original
+    }
+
+    private func text(_ field: DraftField, in draft: LiveTranscriptDraft) -> String {
+        switch field {
+        case .original:
+            draft.originalText
+        case .translation:
+            draft.translatedText
+        }
+    }
+
+    private func setText(_ text: String, field: DraftField, in draft: inout LiveTranscriptDraft) {
+        switch field {
+        case .original:
+            draft.originalText = text
+        case .translation:
+            draft.translatedText = text
+        }
+        draft.updatedAt = Date()
+    }
+
+    private func appendConsumed(_ text: String, field: DraftField, to draft: inout LiveTranscriptDraft) {
+        switch field {
+        case .original:
+            draft.consumedOriginalText = mergedTranscript(current: draft.consumedOriginalText, incoming: text)
+        case .translation:
+            draft.consumedTranslatedText = mergedTranscript(current: draft.consumedTranslatedText, incoming: text)
+        }
+    }
+
+    private func appendMessage(
+        speaker: LiveConversationSpeaker,
+        primaryText: String,
+        secondaryText: String,
+        toConversationAt conversationIndex: Int
+    ) -> LiveConversationMessage.ID {
+        let message: LiveConversationMessage
+        switch speaker {
+        case .me:
+            message = LiveConversationMessage(
+                speaker: speaker,
+                originalText: primaryText,
+                translatedText: secondaryText
+            )
+        case .other:
+            message = LiveConversationMessage(
+                speaker: speaker,
+                originalText: secondaryText,
+                translatedText: primaryText
+            )
+        }
+
+        conversations[conversationIndex].messages.append(message)
+        return message.id
+    }
+
+    private func isSecondaryTextEmpty(in message: LiveConversationMessage) -> Bool {
+        switch message.speaker {
+        case .me:
+            message.translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .other:
+            message.originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    private func setSecondaryText(_ text: String, in message: inout LiveConversationMessage) {
+        switch message.speaker {
+        case .me:
+            message.translatedText = text
+        case .other:
+            message.originalText = text
+        }
     }
 
     private func persist(status: String) {

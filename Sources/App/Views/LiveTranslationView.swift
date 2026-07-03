@@ -226,41 +226,86 @@ private struct LiveConversationDetail: View {
     let outgoingDraft: LiveTranscriptDraft
     let isMicrophoneTranslationEnabled: Bool
     let onToggleMicrophone: () -> Void
+    @State private var followsLatest = true
+    @State private var showsLatestButton = false
+    @State private var lastContentChange = Date.distantPast
+    @State private var isProgrammaticScroll = false
+
+    private let latestAnchorID = "live-latest-anchor"
+    private let scrollCoordinateSpace = "live-conversation-scroll"
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 18) {
-                        if let conversation {
-                            ForEach(conversation.messages) { message in
-                                LiveMessageBubble(message: message)
-                                    .id(message.id)
+            GeometryReader { geometry in
+                ScrollViewReader { proxy in
+                    ZStack(alignment: .bottom) {
+                        ScrollView {
+                            LazyVStack(spacing: 18) {
+                                if let conversation {
+                                    ForEach(conversation.messages) { message in
+                                        LiveMessageBubble(message: message)
+                                            .id(message.id)
+                                    }
+                                }
+
+                                if !incomingDraft.isEmpty {
+                                    LiveDraftBubble(draft: incomingDraft)
+                                        .id("incoming-draft")
+                                }
+
+                                if !outgoingDraft.isEmpty {
+                                    LiveDraftBubble(draft: outgoingDraft)
+                                        .id("outgoing-draft")
+                                }
+
+                                Color.clear
+                                    .frame(height: 1)
+                                    .id(latestAnchorID)
+                                    .background {
+                                        GeometryReader { anchorProxy in
+                                            Color.clear.preference(
+                                                key: LiveScrollBottomPreferenceKey.self,
+                                                value: anchorProxy.frame(in: .named(scrollCoordinateSpace)).maxY
+                                            )
+                                        }
+                                    }
                             }
+                            .padding(.horizontal, 26)
+                            .padding(.vertical, 24)
+                            .frame(maxWidth: .infinity)
+                        }
+                        .coordinateSpace(name: scrollCoordinateSpace)
+                        .onPreferenceChange(LiveScrollBottomPreferenceKey.self) { bottomY in
+                            updateLatestVisibility(
+                                bottomY: bottomY,
+                                viewportHeight: geometry.size.height
+                            )
+                        }
+                        .onChange(of: contentSignature) { _, _ in
+                            handleContentChange(proxy: proxy)
+                        }
+                        .onAppear {
+                            scrollToLatest(proxy: proxy, animated: false)
                         }
 
-                        if !incomingDraft.isEmpty {
-                            LiveDraftBubble(draft: incomingDraft)
-                                .id("incoming-draft")
-                        }
-
-                        if !outgoingDraft.isEmpty {
-                            LiveDraftBubble(draft: outgoingDraft)
-                                .id("outgoing-draft")
+                        if showsLatestButton {
+                            Button {
+                                followsLatest = true
+                                showsLatestButton = false
+                                scrollToLatest(proxy: proxy, animated: true)
+                            } label: {
+                                Label("최신 대화 보기", systemImage: "arrow.down.circle.fill")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .padding(.horizontal, 14)
+                                    .frame(height: 34)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.white)
+                            .background(AppTheme.accent, in: Capsule())
+                            .shadow(color: Color.black.opacity(0.22), radius: 8, y: 3)
+                            .padding(.bottom, 14)
                         }
                     }
-                    .padding(.horizontal, 26)
-                    .padding(.vertical, 24)
-                    .frame(maxWidth: .infinity)
-                }
-                .onChange(of: conversation?.messages.count ?? 0) { _, _ in
-                    scrollToBottom(proxy: proxy, conversation: conversation)
-                }
-                .onChange(of: incomingDraft) { _, _ in
-                    scrollToBottom(proxy: proxy, conversation: conversation)
-                }
-                .onChange(of: outgoingDraft) { _, _ in
-                    scrollToBottom(proxy: proxy, conversation: conversation)
                 }
             }
 
@@ -273,16 +318,70 @@ private struct LiveConversationDetail: View {
         .background(Color.black.opacity(0.08))
     }
 
-    private func scrollToBottom(proxy: ScrollViewProxy, conversation: LiveConversation?) {
-        withAnimation(.easeOut(duration: 0.18)) {
-            if !outgoingDraft.isEmpty {
-                proxy.scrollTo("outgoing-draft", anchor: .bottom)
-            } else if !incomingDraft.isEmpty {
-                proxy.scrollTo("incoming-draft", anchor: .bottom)
-            } else if let lastID = conversation?.messages.last?.id {
-                proxy.scrollTo(lastID, anchor: .bottom)
+    private var contentSignature: String {
+        [
+            conversation?.id.uuidString ?? "",
+            conversation?.messages.last?.id.uuidString ?? "",
+            String(conversation?.messages.count ?? 0),
+            incomingDraft.originalText,
+            incomingDraft.translatedText,
+            outgoingDraft.originalText,
+            outgoingDraft.translatedText
+        ].joined(separator: "|")
+    }
+
+    private func handleContentChange(proxy: ScrollViewProxy) {
+        lastContentChange = Date()
+        if followsLatest {
+            scrollToLatest(proxy: proxy, animated: true)
+        } else {
+            showsLatestButton = true
+        }
+    }
+
+    private func updateLatestVisibility(bottomY: CGFloat, viewportHeight: CGFloat) {
+        let isLatestVisible = bottomY <= viewportHeight + 56
+        if isLatestVisible {
+            followsLatest = true
+            showsLatestButton = false
+            return
+        }
+
+        let isFreshContentLayout = Date().timeIntervalSince(lastContentChange) < 0.45
+        guard !isProgrammaticScroll,
+              !isFreshContentLayout
+        else {
+            return
+        }
+
+        followsLatest = false
+        showsLatestButton = true
+    }
+
+    private func scrollToLatest(proxy: ScrollViewProxy, animated: Bool) {
+        isProgrammaticScroll = true
+
+        DispatchQueue.main.async {
+            if animated {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    proxy.scrollTo(latestAnchorID, anchor: .bottom)
+                }
+            } else {
+                proxy.scrollTo(latestAnchorID, anchor: .bottom)
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                isProgrammaticScroll = false
             }
         }
+    }
+}
+
+private struct LiveScrollBottomPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
