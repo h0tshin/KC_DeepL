@@ -21,6 +21,10 @@ struct LiveAudioPlaybackProgress: Equatable {
         TimeInterval(playedFrames) / TimeInterval(sampleRate)
     }
 
+    var enqueuedDuration: TimeInterval {
+        TimeInterval(enqueuedFrames) / TimeInterval(sampleRate)
+    }
+
     var bufferedDuration: TimeInterval {
         let bufferedFrames = max(0, enqueuedFrames - playedFrames)
         return TimeInterval(bufferedFrames) / TimeInterval(sampleRate)

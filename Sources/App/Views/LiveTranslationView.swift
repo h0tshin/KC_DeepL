@@ -416,15 +416,17 @@ private struct LiveMessageBubble: View {
                 text: primaryText,
                 highlightedCharacters: primaryHighlightedCharacters,
                 font: .system(size: 24, weight: .bold),
-                baseColor: message.speaker == .me ? Color.white : Color.primary
+                baseColor: primaryBaseColor,
+                highlightColor: primaryHighlightColor
             )
 
             if !secondaryText.isEmpty {
                 LiveKaraokeText(
                     text: secondaryText,
                     highlightedCharacters: secondaryHighlightedCharacters,
-                    font: .system(size: 15, weight: .semibold),
-                    baseColor: message.speaker == .me ? Color.white.opacity(0.78) : Color.secondary
+                    font: .system(size: message.speaker == .me ? 14 : 15, weight: .semibold),
+                    baseColor: secondaryBaseColor,
+                    highlightColor: primaryHighlightColor
                 )
             }
         }
@@ -448,7 +450,7 @@ private struct LiveMessageBubble: View {
     private var primaryText: String {
         switch message.speaker {
         case .me:
-            return message.originalText.isEmpty ? message.translatedText : message.originalText
+            return message.translatedText.isEmpty ? message.originalText : message.translatedText
         case .other:
             return message.translatedText.isEmpty ? message.originalText : message.translatedText
         }
@@ -457,7 +459,7 @@ private struct LiveMessageBubble: View {
     private var secondaryText: String {
         switch message.speaker {
         case .me:
-            return message.translatedText
+            return message.translatedText.isEmpty ? "" : message.originalText
         case .other:
             return message.originalText
         }
@@ -465,7 +467,7 @@ private struct LiveMessageBubble: View {
 
     private var primaryHighlightedCharacters: Int {
         guard message.speaker == .me,
-              secondaryText.isEmpty
+              !message.translatedText.isEmpty
         else {
             return 0
         }
@@ -473,12 +475,19 @@ private struct LiveMessageBubble: View {
     }
 
     private var secondaryHighlightedCharacters: Int {
-        guard message.speaker == .me,
-              !secondaryText.isEmpty
-        else {
-            return 0
-        }
-        return karaokeHighlightedCharacters
+        0
+    }
+
+    private var primaryBaseColor: Color {
+        message.speaker == .me ? Color.black : Color.primary
+    }
+
+    private var primaryHighlightColor: Color {
+        message.speaker == .me ? Color.white : Color.black
+    }
+
+    private var secondaryBaseColor: Color {
+        message.speaker == .me ? Color.white.opacity(0.86) : Color.secondary
     }
 }
 
@@ -487,6 +496,7 @@ private struct LiveKaraokeText: View {
     let highlightedCharacters: Int
     let font: Font
     let baseColor: Color
+    let highlightColor: Color
 
     var body: some View {
         renderedText
@@ -503,7 +513,7 @@ private struct LiveKaraokeText: View {
         let splitIndex = text.index(text.startIndex, offsetBy: clampedCount)
         let highlighted = String(text[..<splitIndex])
         let remaining = String(text[splitIndex...])
-        return Text(highlighted).foregroundColor(.black)
+        return Text(highlighted).foregroundColor(highlightColor)
             + Text(remaining).foregroundColor(baseColor)
     }
 }

@@ -34,6 +34,8 @@ private struct LiveKaraokeSegment: Equatable {
     let messageID: LiveConversationMessage.ID
     var text: String
     var highlightedCharacters: Int
+    var elapsedDuration: TimeInterval
+    var allocatedDuration: TimeInterval
 }
 
 @MainActor
@@ -66,7 +68,8 @@ final class LiveTranslationViewModel: ObservableObject {
     private var pendingOutgoingPlaybackDuration: TimeInterval = 0
     private var lastOutgoingPlaybackDuration: TimeInterval = 0
     private var lastOutgoingBufferedDuration: TimeInterval = 0
-    private var outgoingKaraokeCharacterCarry: Double = 0
+    private var lastOutgoingEnqueuedDuration: TimeInterval = 0
+    private var outgoingTurnPlaybackStartDuration: TimeInterval?
     private var outgoingTurnDidComplete = false
     private var outgoingTurnCompletionTask: Task<Void, Never>?
 
@@ -517,6 +520,7 @@ final class LiveTranslationViewModel: ObservableObject {
         }
 
         lastOutgoingBufferedDuration = progress.bufferedDuration
+        lastOutgoingEnqueuedDuration = progress.enqueuedDuration
         guard progress.enqueuedFrames > 0 || progress.playedFrames > 0 else {
             lastOutgoingPlaybackDuration = 0
             return
@@ -541,6 +545,9 @@ final class LiveTranslationViewModel: ObservableObject {
     }
 
     private func markOutgoingTurnActive() {
+        if outgoingTurnPlaybackStartDuration == nil {
+            outgoingTurnPlaybackStartDuration = max(0, lastOutgoingPlaybackDuration - pendingOutgoingPlaybackDuration)
+        }
         outgoingTurnDidComplete = false
         outgoingTurnCompletionTask?.cancel()
         outgoingTurnCompletionTask = nil
@@ -549,8 +556,9 @@ final class LiveTranslationViewModel: ObservableObject {
     private func markOutgoingTurnComplete() {
         outgoingTurnDidComplete = true
         outgoingTurnCompletionTask?.cancel()
+        retimeOutgoingKaraokeSegmentsToCurrentAudio()
 
-        let delay = max(0.35, lastOutgoingBufferedDuration + 0.35)
+        let delay = max(0.2, lastOutgoingBufferedDuration + 0.12)
         outgoingTurnCompletionTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self,
@@ -569,18 +577,25 @@ final class LiveTranslationViewModel: ObservableObject {
         }
 
         let existingHighlight = min(karaokeHighlights[messageID] ?? 0, trimmed.count)
+        let estimatedDuration = LiveKaraokeTimeline.estimatedSpeechDuration(for: trimmed)
         if let index = outgoingKaraokeSegments.firstIndex(where: { $0.messageID == messageID }) {
             outgoingKaraokeSegments[index].text = trimmed
             outgoingKaraokeSegments[index].highlightedCharacters = min(
                 outgoingKaraokeSegments[index].highlightedCharacters,
                 trimmed.count
             )
+            outgoingKaraokeSegments[index].allocatedDuration = max(
+                outgoingKaraokeSegments[index].elapsedDuration + 0.12,
+                estimatedDuration
+            )
         } else if existingHighlight < trimmed.count {
             outgoingKaraokeSegments.append(
                 LiveKaraokeSegment(
                     messageID: messageID,
                     text: trimmed,
-                    highlightedCharacters: existingHighlight
+                    highlightedCharacters: existingHighlight,
+                    elapsedDuration: 0,
+                    allocatedDuration: estimatedDuration
                 )
             )
         }
@@ -613,35 +628,71 @@ final class LiveTranslationViewModel: ObservableObject {
             guard remainingCharacters > 0 else {
                 karaokeHighlights[segment.messageID] = totalCharacters
                 outgoingKaraokeSegments.removeFirst()
-                outgoingKaraokeCharacterCarry = 0
                 continue
             }
 
-            let rate = karaokeCharactersPerSecond(for: segment.text)
-            let characterBudget = remainingDuration * rate + outgoingKaraokeCharacterCarry
-            let wholeCharacters = Int(characterBudget)
-            outgoingKaraokeCharacterCarry = characterBudget - Double(wholeCharacters)
-
-            guard wholeCharacters > 0 else {
-                return
-            }
-
-            let highlightedCharacters = min(wholeCharacters, remainingCharacters)
-            segment.highlightedCharacters += highlightedCharacters
-            karaokeHighlights[segment.messageID] = segment.highlightedCharacters
-            consumedTextInThisAdvance = true
-
-            let consumedDuration = Double(highlightedCharacters) / rate
-            remainingDuration = max(0, remainingDuration - consumedDuration)
-
-            if segment.highlightedCharacters >= totalCharacters {
+            let remainingSegmentDuration = max(0, segment.allocatedDuration - segment.elapsedDuration)
+            guard remainingSegmentDuration > 0 else {
+                segment.highlightedCharacters = totalCharacters
                 karaokeHighlights[segment.messageID] = totalCharacters
                 outgoingKaraokeSegments.removeFirst()
-                outgoingKaraokeCharacterCarry = 0
+                continue
+            }
+
+            let consumedDuration = min(remainingDuration, remainingSegmentDuration)
+            segment.elapsedDuration += consumedDuration
+            segment.highlightedCharacters = max(
+                segment.highlightedCharacters,
+                LiveKaraokeTimeline.highlightedCharacters(
+                    in: segment.text,
+                    elapsedDuration: segment.elapsedDuration,
+                    totalDuration: segment.allocatedDuration
+                )
+            )
+            karaokeHighlights[segment.messageID] = segment.highlightedCharacters
+            consumedTextInThisAdvance = true
+            remainingDuration = max(0, remainingDuration - consumedDuration)
+
+            if segment.highlightedCharacters >= totalCharacters
+                || segment.elapsedDuration >= segment.allocatedDuration {
+                karaokeHighlights[segment.messageID] = totalCharacters
+                outgoingKaraokeSegments.removeFirst()
             } else {
                 outgoingKaraokeSegments[0] = segment
                 return
             }
+        }
+    }
+
+    private func retimeOutgoingKaraokeSegmentsToCurrentAudio() {
+        guard !outgoingKaraokeSegments.isEmpty else {
+            return
+        }
+
+        let turnStart = outgoingTurnPlaybackStartDuration
+            ?? max(0, lastOutgoingPlaybackDuration - pendingOutgoingPlaybackDuration)
+        let totalAudioDuration = max(0, lastOutgoingEnqueuedDuration - turnStart)
+        let playedAudioDuration = max(0, lastOutgoingPlaybackDuration - turnStart)
+        let remainingAudioDuration = max(0, totalAudioDuration - playedAudioDuration)
+        guard remainingAudioDuration > 0.05 else {
+            return
+        }
+
+        let weights = outgoingKaraokeSegments.map { segment in
+            max(
+                1.0,
+                LiveKaraokeTimeline.speechWeight(for: String(segment.text.dropFirst(segment.highlightedCharacters)))
+            )
+        }
+        let totalWeight = weights.reduce(0, +)
+        guard totalWeight > 0 else {
+            return
+        }
+
+        for index in outgoingKaraokeSegments.indices {
+            let remainingSegmentDuration = max(0.08, remainingAudioDuration * weights[index] / totalWeight)
+            outgoingKaraokeSegments[index].allocatedDuration =
+                outgoingKaraokeSegments[index].elapsedDuration + remainingSegmentDuration
         }
     }
 
@@ -651,7 +702,7 @@ final class LiveTranslationViewModel: ObservableObject {
         }
         outgoingKaraokeSegments.removeAll()
         pendingOutgoingPlaybackDuration = 0
-        outgoingKaraokeCharacterCarry = 0
+        outgoingTurnPlaybackStartDuration = nil
         outgoingTurnDidComplete = false
         outgoingTurnCompletionTask?.cancel()
         outgoingTurnCompletionTask = nil
@@ -662,30 +713,14 @@ final class LiveTranslationViewModel: ObservableObject {
         pendingOutgoingPlaybackDuration = 0
         lastOutgoingPlaybackDuration = 0
         lastOutgoingBufferedDuration = 0
-        outgoingKaraokeCharacterCarry = 0
+        lastOutgoingEnqueuedDuration = 0
+        outgoingTurnPlaybackStartDuration = nil
         outgoingTurnDidComplete = false
         outgoingTurnCompletionTask?.cancel()
         outgoingTurnCompletionTask = nil
         if clearHighlights {
             karaokeHighlights = [:]
         }
-    }
-
-    private func karaokeCharactersPerSecond(for text: String) -> Double {
-        let characters = text.filter { !$0.isWhitespace && !$0.isNewline }
-        guard !characters.isEmpty else {
-            return 10.0
-        }
-
-        let cjkCount = characters.filter { character in
-            character.unicodeScalars.contains { scalar in
-                (0xAC00...0xD7AF).contains(Int(scalar.value))
-                    || (0x3040...0x30FF).contains(Int(scalar.value))
-                    || (0x4E00...0x9FFF).contains(Int(scalar.value))
-            }
-        }.count
-        let cjkRatio = Double(cjkCount) / Double(characters.count)
-        return (8.0 * cjkRatio) + (13.5 * (1.0 - cjkRatio))
     }
 
     private func persist(status: String) {
