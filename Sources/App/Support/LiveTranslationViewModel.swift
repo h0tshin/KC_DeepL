@@ -76,10 +76,11 @@ final class LiveTranslationViewModel: ObservableObject {
     private var lastOutgoingPlaybackDuration: TimeInterval = 0
     private var lastOutgoingBufferedDuration: TimeInterval = 0
     private var lastOutgoingEnqueuedDuration: TimeInterval = 0
+    private var lastPlaybackKaraokeAdvanceDate = Date.distantPast
     private var outgoingTurnPlaybackStartDuration: TimeInterval?
     private var outgoingKaraokeTrackedTexts: [LiveConversationMessage.ID: String] = [:]
     private var outgoingTurnDidComplete = false
-    private var outgoingTurnCompletionTask: Task<Void, Never>?
+    private var outgoingKaraokeFallbackTask: Task<Void, Never>?
 
     init(
         store: LiveConversationStoring = FileLiveConversationStore(),
@@ -411,6 +412,11 @@ final class LiveTranslationViewModel: ObservableObject {
         case translation
     }
 
+    private enum KaraokeAdvanceSource {
+        case playback
+        case fallback
+    }
+
     private func updateDraft(
         direction: LiveTranslationAudioDirection,
         field: DraftField,
@@ -608,11 +614,11 @@ final class LiveTranslationViewModel: ObservableObject {
         lastOutgoingPlaybackDuration = playedDuration
 
         if delta > 0 {
-            advanceOutgoingKaraoke(by: delta)
+            advanceOutgoingKaraoke(by: delta, source: .playback)
         }
 
         if progress.isDrained && outgoingTurnDidComplete {
-            completeOutgoingKaraokeQueue()
+            startOutgoingKaraokeFallbackIfNeeded()
         }
     }
 
@@ -621,25 +627,12 @@ final class LiveTranslationViewModel: ObservableObject {
             outgoingTurnPlaybackStartDuration = max(0, lastOutgoingPlaybackDuration - pendingOutgoingPlaybackDuration)
         }
         outgoingTurnDidComplete = false
-        outgoingTurnCompletionTask?.cancel()
-        outgoingTurnCompletionTask = nil
     }
 
     private func markOutgoingTurnComplete() {
         outgoingTurnDidComplete = true
-        outgoingTurnCompletionTask?.cancel()
         retimeOutgoingKaraokeSegmentsToCurrentAudio()
-
-        let delay = max(0.2, lastOutgoingBufferedDuration + 0.12)
-        outgoingTurnCompletionTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard let self,
-                  self.outgoingTurnDidComplete
-            else {
-                return
-            }
-            self.completeOutgoingKaraokeQueue()
-        }
+        startOutgoingKaraokeFallbackIfNeeded()
     }
 
     private func enqueueOutgoingKaraokeSegment(messageID: LiveConversationMessage.ID, text: String) {
@@ -677,11 +670,19 @@ final class LiveTranslationViewModel: ObservableObject {
         if pendingOutgoingPlaybackDuration > 0 {
             let pendingDuration = pendingOutgoingPlaybackDuration
             pendingOutgoingPlaybackDuration = 0
-            advanceOutgoingKaraoke(by: pendingDuration)
+            advanceOutgoingKaraoke(by: pendingDuration, source: .playback)
         }
+        startOutgoingKaraokeFallbackIfNeeded()
     }
 
-    private func advanceOutgoingKaraoke(by duration: TimeInterval) {
+    private func advanceOutgoingKaraoke(
+        by duration: TimeInterval,
+        source: KaraokeAdvanceSource
+    ) {
+        if source == .playback {
+            lastPlaybackKaraokeAdvanceDate = Date()
+        }
+
         var remainingDuration = max(0, duration)
         var consumedTextInThisAdvance = false
 
@@ -767,8 +768,45 @@ final class LiveTranslationViewModel: ObservableObject {
         for index in outgoingKaraokeSegments.indices {
             let remainingSegmentDuration = max(0.08, remainingAudioDuration * weights[index] / totalWeight)
             outgoingKaraokeSegments[index].allocatedDuration =
-                outgoingKaraokeSegments[index].elapsedDuration + remainingSegmentDuration
+            outgoingKaraokeSegments[index].elapsedDuration + remainingSegmentDuration
         }
+    }
+
+    private func startOutgoingKaraokeFallbackIfNeeded() {
+        guard outgoingKaraokeFallbackTask == nil,
+              !outgoingKaraokeSegments.isEmpty
+        else {
+            return
+        }
+
+        outgoingKaraokeFallbackTask = Task { @MainActor [weak self] in
+            var lastTick = Date()
+
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                guard let self,
+                      !Task.isCancelled,
+                      !self.outgoingKaraokeSegments.isEmpty
+                else {
+                    break
+                }
+
+                let now = Date()
+                let elapsed = min(0.12, max(0, now.timeIntervalSince(lastTick)))
+                lastTick = now
+
+                if now.timeIntervalSince(self.lastPlaybackKaraokeAdvanceDate) > 0.18 {
+                    self.advanceOutgoingKaraoke(by: elapsed, source: .fallback)
+                }
+            }
+
+            self?.outgoingKaraokeFallbackTask = nil
+        }
+    }
+
+    private func cancelOutgoingKaraokeFallback() {
+        outgoingKaraokeFallbackTask?.cancel()
+        outgoingKaraokeFallbackTask = nil
     }
 
     private func completeOutgoingKaraokeQueue() {
@@ -779,22 +817,21 @@ final class LiveTranslationViewModel: ObservableObject {
         pendingOutgoingPlaybackDuration = 0
         outgoingTurnPlaybackStartDuration = nil
         outgoingTurnDidComplete = false
-        outgoingTurnCompletionTask?.cancel()
-        outgoingTurnCompletionTask = nil
+        cancelOutgoingKaraokeFallback()
     }
 
     private func resetOutgoingKaraoke(clearHighlights: Bool) {
+        cancelOutgoingKaraokeFallback()
         outgoingKaraokeSegments.removeAll()
         pendingOutgoingPlaybackDuration = 0
         lastOutgoingPlaybackDuration = 0
         lastOutgoingBufferedDuration = 0
         lastOutgoingEnqueuedDuration = 0
+        lastPlaybackKaraokeAdvanceDate = Date.distantPast
         outgoingTurnPlaybackStartDuration = nil
         outgoingDraftKaraokeHighlightedCharacters = nil
         outgoingKaraokeTrackedTexts.removeAll()
         outgoingTurnDidComplete = false
-        outgoingTurnCompletionTask?.cancel()
-        outgoingTurnCompletionTask = nil
         if clearHighlights {
             karaokeHighlights = [:]
         }
