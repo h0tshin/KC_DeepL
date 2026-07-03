@@ -32,10 +32,15 @@ struct LiveTranscriptDraft: Equatable {
 
 private struct LiveKaraokeSegment: Equatable {
     let messageID: LiveConversationMessage.ID
+    let startCharacter: Int
     var text: String
     var highlightedCharacters: Int
     var elapsedDuration: TimeInterval
     var allocatedDuration: TimeInterval
+
+    var endCharacter: Int {
+        startCharacter + text.count
+    }
 }
 
 @MainActor
@@ -70,6 +75,7 @@ final class LiveTranslationViewModel: ObservableObject {
     private var lastOutgoingBufferedDuration: TimeInterval = 0
     private var lastOutgoingEnqueuedDuration: TimeInterval = 0
     private var outgoingTurnPlaybackStartDuration: TimeInterval?
+    private var outgoingKaraokeTrackedTexts: [LiveConversationMessage.ID: String] = [:]
     private var outgoingTurnDidComplete = false
     private var outgoingTurnCompletionTask: Task<Void, Never>?
 
@@ -576,31 +582,31 @@ final class LiveTranslationViewModel: ObservableObject {
             return
         }
 
-        let existingHighlight = min(karaokeHighlights[messageID] ?? 0, trimmed.count)
-        let estimatedDuration = LiveKaraokeTimeline.estimatedSpeechDuration(for: trimmed)
-        if let index = outgoingKaraokeSegments.firstIndex(where: { $0.messageID == messageID }) {
-            outgoingKaraokeSegments[index].text = trimmed
-            outgoingKaraokeSegments[index].highlightedCharacters = min(
-                outgoingKaraokeSegments[index].highlightedCharacters,
-                trimmed.count
-            )
-            outgoingKaraokeSegments[index].allocatedDuration = max(
-                outgoingKaraokeSegments[index].elapsedDuration + 0.12,
-                estimatedDuration
-            )
-        } else if existingHighlight < trimmed.count {
+        let plan = LiveKaraokeTimeline.cuePlan(
+            previousText: outgoingKaraokeTrackedTexts[messageID] ?? "",
+            updatedText: trimmed,
+            currentHighlight: karaokeHighlights[messageID] ?? 0
+        )
+
+        if plan.shouldResetQueuedCues {
+            outgoingKaraokeSegments.removeAll { $0.messageID == messageID }
+        }
+
+        outgoingKaraokeTrackedTexts[messageID] = plan.trackedText
+        karaokeHighlights[messageID] = plan.preservedHighlight
+
+        if let cue = plan.cue {
             outgoingKaraokeSegments.append(
                 LiveKaraokeSegment(
                     messageID: messageID,
-                    text: trimmed,
-                    highlightedCharacters: existingHighlight,
+                    startCharacter: cue.startCharacter,
+                    text: cue.text,
+                    highlightedCharacters: 0,
                     elapsedDuration: 0,
-                    allocatedDuration: estimatedDuration
+                    allocatedDuration: LiveKaraokeTimeline.estimatedSpeechDuration(for: cue.text)
                 )
             )
         }
-
-        karaokeHighlights[messageID] = existingHighlight
 
         if pendingOutgoingPlaybackDuration > 0 {
             let pendingDuration = pendingOutgoingPlaybackDuration
@@ -626,7 +632,7 @@ final class LiveTranslationViewModel: ObservableObject {
             let remainingCharacters = totalCharacters - segment.highlightedCharacters
 
             guard remainingCharacters > 0 else {
-                karaokeHighlights[segment.messageID] = totalCharacters
+                karaokeHighlights[segment.messageID] = segment.endCharacter
                 outgoingKaraokeSegments.removeFirst()
                 continue
             }
@@ -634,7 +640,7 @@ final class LiveTranslationViewModel: ObservableObject {
             let remainingSegmentDuration = max(0, segment.allocatedDuration - segment.elapsedDuration)
             guard remainingSegmentDuration > 0 else {
                 segment.highlightedCharacters = totalCharacters
-                karaokeHighlights[segment.messageID] = totalCharacters
+                karaokeHighlights[segment.messageID] = segment.endCharacter
                 outgoingKaraokeSegments.removeFirst()
                 continue
             }
@@ -649,13 +655,13 @@ final class LiveTranslationViewModel: ObservableObject {
                     totalDuration: segment.allocatedDuration
                 )
             )
-            karaokeHighlights[segment.messageID] = segment.highlightedCharacters
+            karaokeHighlights[segment.messageID] = segment.startCharacter + segment.highlightedCharacters
             consumedTextInThisAdvance = true
             remainingDuration = max(0, remainingDuration - consumedDuration)
 
             if segment.highlightedCharacters >= totalCharacters
                 || segment.elapsedDuration >= segment.allocatedDuration {
-                karaokeHighlights[segment.messageID] = totalCharacters
+                karaokeHighlights[segment.messageID] = segment.endCharacter
                 outgoingKaraokeSegments.removeFirst()
             } else {
                 outgoingKaraokeSegments[0] = segment
@@ -698,7 +704,7 @@ final class LiveTranslationViewModel: ObservableObject {
 
     private func completeOutgoingKaraokeQueue() {
         for segment in outgoingKaraokeSegments {
-            karaokeHighlights[segment.messageID] = segment.text.count
+            karaokeHighlights[segment.messageID] = segment.endCharacter
         }
         outgoingKaraokeSegments.removeAll()
         pendingOutgoingPlaybackDuration = 0
@@ -715,6 +721,7 @@ final class LiveTranslationViewModel: ObservableObject {
         lastOutgoingBufferedDuration = 0
         lastOutgoingEnqueuedDuration = 0
         outgoingTurnPlaybackStartDuration = nil
+        outgoingKaraokeTrackedTexts.removeAll()
         outgoingTurnDidComplete = false
         outgoingTurnCompletionTask?.cancel()
         outgoingTurnCompletionTask = nil
