@@ -18,10 +18,10 @@ final class GeminiLiveTranslationClientTests: XCTestCase {
 
         XCTAssertEqual(setup["model"] as? String, "models/gemini-3.5-live-translate-preview")
         XCTAssertEqual(generationConfig["responseModalities"] as? [String], ["AUDIO"])
-        XCTAssertNotNil(generationConfig["inputAudioTranscription"] as? [String: Any])
-        XCTAssertNotNil(generationConfig["outputAudioTranscription"] as? [String: Any])
-        XCTAssertNil(setup["inputAudioTranscription"])
-        XCTAssertNil(setup["outputAudioTranscription"])
+        XCTAssertNotNil(setup["inputAudioTranscription"] as? [String: Any])
+        XCTAssertNotNil(setup["outputAudioTranscription"] as? [String: Any])
+        XCTAssertNil(generationConfig["inputAudioTranscription"])
+        XCTAssertNil(generationConfig["outputAudioTranscription"])
         XCTAssertEqual(translationConfig["targetLanguageCode"] as? String, "ko")
         XCTAssertEqual(translationConfig["echoTargetLanguage"] as? Bool, true)
     }
@@ -82,6 +82,11 @@ final class GeminiLiveTranslationClientTests: XCTestCase {
         let events = try GeminiLiveTranslationResponseParser.events(from: json)
 
         XCTAssertEqual(events, [.setupComplete])
+    }
+
+    func testResponseParserIgnoresEmptyServerFrame() throws {
+        XCTAssertTrue(try GeminiLiveTranslationResponseParser.events(from: Data()).isEmpty)
+        XCTAssertTrue(try GeminiLiveTranslationResponseParser.events(from: Data(" \n\t".utf8)).isEmpty)
     }
 
     func testResponseParserIgnoresPartialLiveResponseChunks() throws {

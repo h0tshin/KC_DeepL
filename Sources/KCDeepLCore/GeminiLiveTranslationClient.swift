@@ -243,6 +243,12 @@ public final class GeminiLiveTranslationSession {
             }
 
             let events = try GeminiLiveTranslationResponseParser.events(from: data)
+            for event in events {
+                if case .error(let message) = event {
+                    throw GeminiLiveTranslationError.serverError(message)
+                }
+            }
+
             if events.contains(.setupComplete) {
                 return
             }
@@ -273,10 +279,10 @@ enum GeminiLiveTranslationMessageFactory {
         let message = SetupMessage(
             setup: Setup(
                 model: "models/\(configuration.modelID)",
+                inputAudioTranscription: EmptyObject(),
+                outputAudioTranscription: EmptyObject(),
                 generationConfig: GenerationConfig(
                     responseModalities: ["AUDIO"],
-                    inputAudioTranscription: EmptyObject(),
-                    outputAudioTranscription: EmptyObject(),
                     translationConfig: TranslationConfig(
                         targetLanguageCode: configuration.targetLanguageCode,
                         echoTargetLanguage: configuration.echoTargetLanguage
@@ -307,13 +313,13 @@ enum GeminiLiveTranslationMessageFactory {
 
     private struct Setup: Encodable {
         let model: String
+        let inputAudioTranscription: EmptyObject
+        let outputAudioTranscription: EmptyObject
         let generationConfig: GenerationConfig
     }
 
     private struct GenerationConfig: Encodable {
         let responseModalities: [String]
-        let inputAudioTranscription: EmptyObject
-        let outputAudioTranscription: EmptyObject
         let translationConfig: TranslationConfig
     }
 
@@ -348,6 +354,10 @@ enum GeminiLiveTranslationMessageFactory {
 
 enum GeminiLiveTranslationResponseParser {
     static func events(from data: Data) throws -> [GeminiLiveTranslationEvent] {
+        guard data.contains(where: { !Self.isASCIIWhitespace($0) }) else {
+            return []
+        }
+
         let response = try JSONDecoder().decode(ServerMessage.self, from: data)
         var events: [GeminiLiveTranslationEvent] = []
 
@@ -396,6 +406,10 @@ enum GeminiLiveTranslationResponseParser {
         }
 
         return events
+    }
+
+    private static func isASCIIWhitespace(_ byte: UInt8) -> Bool {
+        byte == 0x09 || byte == 0x0A || byte == 0x0D || byte == 0x20
     }
 
     private struct ServerMessage: Decodable {

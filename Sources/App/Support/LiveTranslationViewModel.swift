@@ -211,21 +211,27 @@ final class LiveTranslationViewModel: ObservableObject {
         startMicBypass()
     }
 
-    private func startSpeakerBypass() {
+    private func startSpeakerBypass(
+        statusOnSuccess: String = "스피커 By Pass",
+        failurePrefix: String = "스피커 By Pass 실패"
+    ) {
         do {
             try audioCoordinator.startSpeakerBypass(settings: settingsSnapshot())
-            statusMessage = "스피커 By Pass"
+            statusMessage = statusOnSuccess
         } catch {
-            statusMessage = "스피커 By Pass 실패: \(error.localizedDescription)"
+            statusMessage = "\(failurePrefix): \(Self.userFacingErrorMessage(error))"
         }
     }
 
-    private func startMicBypass() {
+    private func startMicBypass(
+        statusOnSuccess: String = "마이크 By Pass",
+        failurePrefix: String = "마이크 By Pass 실패"
+    ) {
         do {
             try audioCoordinator.startMicBypass(settings: settingsSnapshot())
-            statusMessage = "마이크 By Pass"
+            statusMessage = statusOnSuccess
         } catch {
-            statusMessage = "마이크 By Pass 실패: \(error.localizedDescription)"
+            statusMessage = "\(failurePrefix): \(Self.userFacingErrorMessage(error))"
         }
     }
 
@@ -245,8 +251,11 @@ final class LiveTranslationViewModel: ObservableObject {
             statusMessage = "On Air"
         } catch {
             isOnAir = false
-            statusMessage = "On Air 실패: \(error.localizedDescription)"
-            startSpeakerBypass()
+            let failureMessage = "On Air 실패: \(Self.userFacingErrorMessage(error))"
+            startSpeakerBypass(
+                statusOnSuccess: "\(failureMessage) · 스피커 By Pass로 복귀",
+                failurePrefix: "\(failureMessage) · 스피커 By Pass 실패"
+            )
         }
     }
 
@@ -268,10 +277,22 @@ final class LiveTranslationViewModel: ObservableObject {
             statusMessage = "마이크 통역 중"
         } catch {
             isMicrophoneTranslationEnabled = false
-            statusMessage = "마이크 통역 실패: \(error.localizedDescription)"
-            startMicBypass()
+            let failureMessage = "마이크 통역 실패: \(Self.userFacingErrorMessage(error))"
+            startMicBypass(
+                statusOnSuccess: "\(failureMessage) · 마이크 By Pass로 복귀",
+                failurePrefix: "\(failureMessage) · 마이크 By Pass 실패"
+            )
             resumeIncomingAfterOutgoingIfNeeded()
         }
+    }
+
+    private static func userFacingErrorMessage(_ error: Error) -> String {
+        if let localizedError = error as? LocalizedError,
+           let description = localizedError.errorDescription,
+           !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return description
+        }
+        return error.localizedDescription
     }
 
     private func settingsSnapshot() -> LiveTranslationAudioSettings {
