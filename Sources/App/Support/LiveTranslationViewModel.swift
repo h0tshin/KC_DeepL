@@ -59,6 +59,9 @@ final class LiveTranslationViewModel: ObservableObject {
     private var hasStartedBypass = false
     private var incomingAssembler = LiveTranscriptTurnAssembler(speaker: .other)
     private var outgoingAssembler = LiveTranscriptTurnAssembler(speaker: .me)
+    private var incomingTranscriptRoute = LiveTranscriptLanguageRoute(sourceLanguageCode: "en", targetLanguageCode: "ko")
+    private var outgoingTranscriptRoute = LiveTranscriptLanguageRoute(sourceLanguageCode: "ko", targetLanguageCode: "en")
+    private var shouldResumeIncomingAfterOutgoing = false
     private var outgoingKaraokeSegments: [LiveKaraokeSegment] = []
     private var pendingOutgoingPlaybackDuration: TimeInterval = 0
     private var lastOutgoingPlaybackDuration: TimeInterval = 0
@@ -75,6 +78,7 @@ final class LiveTranslationViewModel: ObservableObject {
         self.audioCoordinator = audioCoordinator ?? LiveTranslationAudioCoordinator()
         self.listenerVolume = UserDefaults.standard.object(forKey: PreferenceKeys.liveListenerVolume) as? Double ?? 1.0
         configureCoordinator()
+        updateTranscriptRoutes(settings: settingsSnapshot())
         loadConversations()
     }
 
@@ -139,6 +143,7 @@ final class LiveTranslationViewModel: ObservableObject {
             }
         } else {
             isOnAir = false
+            shouldResumeIncomingAfterOutgoing = false
             audioCoordinator.stopIncomingTranslation()
             startSpeakerBypass()
         }
@@ -154,6 +159,7 @@ final class LiveTranslationViewModel: ObservableObject {
             audioCoordinator.stopOutgoingTranslation()
             resetOutgoingKaraoke(clearHighlights: false)
             startMicBypass()
+            resumeIncomingAfterOutgoingIfNeeded()
         }
     }
 
@@ -232,6 +238,8 @@ final class LiveTranslationViewModel: ObservableObject {
 
         do {
             statusMessage = "On Air 연결 중"
+            updateTranscriptRoutes(settings: settings)
+            resetAssembler(for: .incoming)
             try await audioCoordinator.startIncomingTranslation(settings: settings)
             isOnAir = true
             statusMessage = "On Air"
@@ -251,7 +259,10 @@ final class LiveTranslationViewModel: ObservableObject {
 
         do {
             statusMessage = "마이크 통역 연결 중"
+            updateTranscriptRoutes(settings: settings)
+            resetAssembler(for: .outgoing)
             resetOutgoingKaraoke(clearHighlights: false)
+            pauseIncomingForOutgoingIfNeeded(settings: settings)
             try await audioCoordinator.startOutgoingTranslation(settings: settings)
             isMicrophoneTranslationEnabled = true
             statusMessage = "마이크 통역 중"
@@ -259,6 +270,7 @@ final class LiveTranslationViewModel: ObservableObject {
             isMicrophoneTranslationEnabled = false
             statusMessage = "마이크 통역 실패: \(error.localizedDescription)"
             startMicBypass()
+            resumeIncomingAfterOutgoingIfNeeded()
         }
     }
 
@@ -276,9 +288,33 @@ final class LiveTranslationViewModel: ObservableObject {
             remoteTargetLanguage: normalizedLanguageCode(settings.remoteTargetLanguage, fallback: "ko"),
             localTargetEcho: settings.localTargetEcho,
             remoteTargetEcho: settings.remoteTargetEcho,
+            pauseRemoteInputOnStart: settings.pauseRemoteInputOnStart,
             listenerVolume: listenerVolume
         )
         return settings
+    }
+
+    private func pauseIncomingForOutgoingIfNeeded(settings: LiveTranslationAudioSettings) {
+        guard settings.pauseRemoteInputOnStart,
+              isOnAir
+        else {
+            return
+        }
+
+        audioCoordinator.stopIncomingTranslation()
+        isOnAir = false
+        shouldResumeIncomingAfterOutgoing = true
+    }
+
+    private func resumeIncomingAfterOutgoingIfNeeded() {
+        guard shouldResumeIncomingAfterOutgoing else {
+            return
+        }
+
+        shouldResumeIncomingAfterOutgoing = false
+        Task {
+            await startIncomingTranslation()
+        }
     }
 
     private func normalizedLanguageCode(_ code: String, fallback: String) -> String {
@@ -286,18 +322,39 @@ final class LiveTranslationViewModel: ObservableObject {
         return trimmed.isEmpty ? fallback : trimmed
     }
 
+    private func updateTranscriptRoutes(settings: LiveTranslationAudioSettings) {
+        incomingTranscriptRoute = LiveTranscriptLanguageRoute(
+            sourceLanguageCode: settings.localTargetLanguage,
+            targetLanguageCode: settings.remoteTargetLanguage
+        )
+        outgoingTranscriptRoute = LiveTranscriptLanguageRoute(
+            sourceLanguageCode: settings.remoteTargetLanguage,
+            targetLanguageCode: settings.localTargetLanguage
+        )
+    }
+
     private func handle(event: GeminiLiveTranslationEvent, direction: LiveTranslationAudioDirection) {
         switch event {
-        case .inputTranscript(let text, _):
+        case .inputTranscript(let text, let languageCode):
             if direction == .outgoing {
                 markOutgoingTurnActive()
             }
-            updateDraft(direction: direction, field: .original, text: text)
-        case .outputTranscript(let text, _):
+            updateDraft(
+                direction: direction,
+                field: .original,
+                text: text,
+                languageCode: languageCode
+            )
+        case .outputTranscript(let text, let languageCode):
             if direction == .outgoing {
                 markOutgoingTurnActive()
             }
-            updateDraft(direction: direction, field: .translation, text: text)
+            updateDraft(
+                direction: direction,
+                field: .translation,
+                text: text,
+                languageCode: languageCode
+            )
         case .turnComplete:
             finishDraft(direction: direction)
             if direction == .outgoing {
@@ -322,9 +379,23 @@ final class LiveTranslationViewModel: ObservableObject {
         case translation
     }
 
-    private func updateDraft(direction: LiveTranslationAudioDirection, field: DraftField, text: String) {
+    private func updateDraft(
+        direction: LiveTranslationAudioDirection,
+        field: DraftField,
+        text: String,
+        languageCode: String?
+    ) {
         let speaker: LiveConversationSpeaker = direction == .incoming ? .other : .me
         let assemblyField = assemblyField(for: field)
+        guard LiveTranscriptLanguageFilter.accepts(
+            field: assemblyField,
+            text: text,
+            languageCode: languageCode,
+            route: transcriptRoute(for: direction)
+        ) else {
+            return
+        }
+
         let changes: [LiveTranscriptAssemblyChange]
 
         if speaker == .other {
@@ -336,6 +407,10 @@ final class LiveTranslationViewModel: ObservableObject {
         }
 
         applyAssemblyChanges(changes)
+    }
+
+    private func transcriptRoute(for direction: LiveTranslationAudioDirection) -> LiveTranscriptLanguageRoute {
+        direction == .incoming ? incomingTranscriptRoute : outgoingTranscriptRoute
     }
 
     private func finishDraft(direction: LiveTranslationAudioDirection) {

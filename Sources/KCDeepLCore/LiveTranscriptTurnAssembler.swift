@@ -89,6 +89,19 @@ public struct LiveTranscriptTurnAssembler {
             return changes
         }
 
+        guard !remainingOriginal.isEmpty else {
+            if var lastMessageInTurn,
+               !remainingTranslation.isEmpty {
+                lastMessageInTurn.translatedText = Self.joinedTranscript([
+                    lastMessageInTurn.translatedText,
+                    remainingTranslation
+                ])
+                self.lastMessageInTurn = lastMessageInTurn
+                changes.append(.update(lastMessageInTurn))
+            }
+            return changes
+        }
+
         if var lastMessageInTurn {
             lastMessageInTurn.originalText = Self.joinedTranscript([
                 lastMessageInTurn.originalText,

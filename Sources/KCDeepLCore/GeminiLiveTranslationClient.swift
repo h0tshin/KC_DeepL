@@ -275,13 +275,13 @@ enum GeminiLiveTranslationMessageFactory {
                 model: "models/\(configuration.modelID)",
                 generationConfig: GenerationConfig(
                     responseModalities: ["AUDIO"],
+                    inputAudioTranscription: EmptyObject(),
+                    outputAudioTranscription: EmptyObject(),
                     translationConfig: TranslationConfig(
                         targetLanguageCode: configuration.targetLanguageCode,
                         echoTargetLanguage: configuration.echoTargetLanguage
                     )
-                ),
-                inputAudioTranscription: EmptyObject(),
-                outputAudioTranscription: EmptyObject()
+                )
             )
         )
         return try encoder.encode(message)
@@ -308,12 +308,12 @@ enum GeminiLiveTranslationMessageFactory {
     private struct Setup: Encodable {
         let model: String
         let generationConfig: GenerationConfig
-        let inputAudioTranscription: EmptyObject
-        let outputAudioTranscription: EmptyObject
     }
 
     private struct GenerationConfig: Encodable {
         let responseModalities: [String]
+        let inputAudioTranscription: EmptyObject
+        let outputAudioTranscription: EmptyObject
         let translationConfig: TranslationConfig
     }
 

@@ -132,4 +132,46 @@ final class LiveTranscriptTurnAssemblerTests: XCTestCase {
         XCTAssertEqual(secondMessage.originalText, "다음 단계입니다")
         XCTAssertEqual(secondMessage.translatedText, "This is the next step.")
     }
+
+    func testDiscardsOrphanTranslationOnlyTurn() {
+        var assembler = LiveTranscriptTurnAssembler(speaker: .me)
+
+        XCTAssertTrue(
+            assembler.update(
+                field: .translation,
+                text: "The pattern is in the speech bubble."
+            ).isEmpty
+        )
+
+        XCTAssertTrue(assembler.finish().isEmpty)
+        XCTAssertTrue(assembler.draft.isEmpty)
+    }
+
+    func testAppendsLateTranslationOnlyTextToExistingTurnMessage() {
+        var assembler = LiveTranscriptTurnAssembler(speaker: .me)
+
+        let changes = assembler.update(field: .original, text: "이거 뭐야?")
+            + assembler.update(field: .translation, text: "What is this?")
+
+        XCTAssertEqual(changes.count, 1)
+        guard case .append(let firstMessage) = changes[0] else {
+            return XCTFail("Expected initial paired message")
+        }
+
+        XCTAssertTrue(
+            assembler.update(
+                field: .translation,
+                text: "What is this? Please check it."
+            ).isEmpty
+        )
+        let finalChanges = assembler.finish()
+
+        XCTAssertEqual(finalChanges.count, 1)
+        guard case .update(let updatedMessage) = finalChanges[0] else {
+            return XCTFail("Expected update on the existing message")
+        }
+        XCTAssertEqual(updatedMessage.id, firstMessage.id)
+        XCTAssertEqual(updatedMessage.originalText, "이거 뭐야?")
+        XCTAssertEqual(updatedMessage.translatedText, "What is this? Please check it.")
+    }
 }

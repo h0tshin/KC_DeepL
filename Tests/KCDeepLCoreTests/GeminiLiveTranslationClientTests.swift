@@ -18,10 +18,10 @@ final class GeminiLiveTranslationClientTests: XCTestCase {
 
         XCTAssertEqual(setup["model"] as? String, "models/gemini-3.5-live-translate-preview")
         XCTAssertEqual(generationConfig["responseModalities"] as? [String], ["AUDIO"])
-        XCTAssertNil(generationConfig["inputAudioTranscription"])
-        XCTAssertNil(generationConfig["outputAudioTranscription"])
-        XCTAssertNotNil(setup["inputAudioTranscription"] as? [String: Any])
-        XCTAssertNotNil(setup["outputAudioTranscription"] as? [String: Any])
+        XCTAssertNotNil(generationConfig["inputAudioTranscription"] as? [String: Any])
+        XCTAssertNotNil(generationConfig["outputAudioTranscription"] as? [String: Any])
+        XCTAssertNil(setup["inputAudioTranscription"])
+        XCTAssertNil(setup["outputAudioTranscription"])
         XCTAssertEqual(translationConfig["targetLanguageCode"] as? String, "ko")
         XCTAssertEqual(translationConfig["echoTargetLanguage"] as? Bool, true)
     }

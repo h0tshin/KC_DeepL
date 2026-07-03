@@ -18,6 +18,7 @@ struct LiveTranslationAudioSettings {
     let remoteTargetLanguage: String
     let localTargetEcho: Bool
     let remoteTargetEcho: Bool
+    let pauseRemoteInputOnStart: Bool
     let listenerVolume: Double
 
     static func fromDefaults(_ defaults: UserDefaults = .standard) -> LiveTranslationAudioSettings {
@@ -33,6 +34,7 @@ struct LiveTranslationAudioSettings {
             remoteTargetLanguage: defaults.string(forKey: PreferenceKeys.liveRemoteTargetLanguage) ?? "ko",
             localTargetEcho: defaults.bool(forKey: PreferenceKeys.liveLocalTargetEcho),
             remoteTargetEcho: defaults.bool(forKey: PreferenceKeys.liveRemoteTargetEcho),
+            pauseRemoteInputOnStart: defaults.bool(forKey: PreferenceKeys.livePauseRemoteInputOnStart),
             listenerVolume: defaults.object(forKey: PreferenceKeys.liveListenerVolume) as? Double ?? 1.0
         )
     }
