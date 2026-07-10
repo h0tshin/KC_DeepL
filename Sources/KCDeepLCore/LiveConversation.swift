@@ -1,6 +1,6 @@
 import Foundation
 
-public enum LiveConversationSpeaker: String, Codable, Equatable, CaseIterable {
+public enum LiveConversationSpeaker: String, Codable, Equatable, CaseIterable, Sendable {
     case me
     case other
 
@@ -14,7 +14,7 @@ public enum LiveConversationSpeaker: String, Codable, Equatable, CaseIterable {
     }
 }
 
-public struct LiveConversationMessage: Codable, Equatable, Identifiable {
+public struct LiveConversationMessage: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public let speaker: LiveConversationSpeaker
     public var originalText: String
@@ -36,7 +36,7 @@ public struct LiveConversationMessage: Codable, Equatable, Identifiable {
     }
 }
 
-public struct LiveConversation: Codable, Equatable, Identifiable {
+public struct LiveConversation: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public var title: String
     public let createdAt: Date
@@ -58,7 +58,7 @@ public struct LiveConversation: Codable, Equatable, Identifiable {
     }
 }
 
-public struct LiveConversationSnapshot: Codable, Equatable {
+public struct LiveConversationSnapshot: Codable, Equatable, Sendable {
     public var conversations: [LiveConversation]
     public var selectedConversationID: LiveConversation.ID?
 
@@ -71,12 +71,12 @@ public struct LiveConversationSnapshot: Codable, Equatable {
     }
 }
 
-public protocol LiveConversationStoring {
+public protocol LiveConversationStoring: Sendable {
     func load() throws -> LiveConversationSnapshot
     func save(_ snapshot: LiveConversationSnapshot) throws
 }
 
-public final class FileLiveConversationStore: LiveConversationStoring {
+public final class FileLiveConversationStore: LiveConversationStoring, @unchecked Sendable {
     private let fileURL: URL
     private let fileManager: FileManager
 

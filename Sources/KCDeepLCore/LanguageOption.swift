@@ -1,6 +1,6 @@
 import Foundation
 
-public struct LanguageOption: Codable, Hashable, Identifiable {
+public struct LanguageOption: Codable, Hashable, Identifiable, Sendable {
     public let code: String
     public let displayName: String
 

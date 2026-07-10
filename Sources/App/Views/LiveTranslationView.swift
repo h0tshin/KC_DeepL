@@ -3,7 +3,7 @@ import KCDeepLCore
 
 struct LiveTranslationWorkspace: View {
     @Binding var showTools: Bool
-    @StateObject private var viewModel = LiveTranslationViewModel()
+    @ObservedObject var viewModel: LiveTranslationViewModel
     @State private var showsVolumePopover = false
     @State private var editableTitle = ""
 
@@ -20,7 +20,7 @@ struct LiveTranslationWorkspace: View {
                     viewModel.updateSelectedTitle(editableTitle)
                 },
                 onToggleOnAir: {
-                    viewModel.setOnAir(!viewModel.isOnAir)
+                    viewModel.toggleIncomingTranslation()
                 }
             )
 
@@ -44,7 +44,7 @@ struct LiveTranslationWorkspace: View {
                     outgoingDraftKaraokeHighlightedCharacters: viewModel.outgoingDraftKaraokeHighlightedCharacters,
                     isMicrophoneTranslationEnabled: viewModel.isMicrophoneTranslationEnabled,
                     onToggleMicrophone: {
-                        viewModel.setMicrophoneTranslationEnabled(!viewModel.isMicrophoneTranslationEnabled)
+                        viewModel.toggleOutgoingTranslation()
                     }
                 )
             }
@@ -55,6 +55,9 @@ struct LiveTranslationWorkspace: View {
         .onAppear {
             viewModel.appear()
             editableTitle = viewModel.selectedConversationTitle
+        }
+        .onDisappear {
+            viewModel.disappear()
         }
         .onChange(of: viewModel.selectedConversationID) { _, _ in
             editableTitle = viewModel.selectedConversationTitle
@@ -137,6 +140,8 @@ private struct LiveTranslationTopBar: View {
                 .padding(14)
             }
             .help("볼륨")
+            .accessibilityLabel("볼륨 조절")
+            .accessibilityValue("\(Int(volume * 100))퍼센트")
 
             if !showTools {
                 Button {
@@ -152,6 +157,7 @@ private struct LiveTranslationTopBar: View {
                 }
                 .buttonStyle(.plain)
                 .help("툴바")
+                .accessibilityLabel("도구 패널 열기")
             }
         }
         .padding(.horizontal, 18)
@@ -234,6 +240,7 @@ private struct LiveConversationDetail: View {
     @State private var showsLatestButton = false
     @State private var lastContentChange = Date.distantPast
     @State private var isProgrammaticScroll = false
+    @State private var scrollTask: Task<Void, Never>?
 
     private let latestAnchorID = "live-latest-anchor"
     private let scrollCoordinateSpace = "live-conversation-scroll"
@@ -291,8 +298,12 @@ private struct LiveConversationDetail: View {
                                 viewportHeight: geometry.size.height
                             )
                         }
-                        .onChange(of: contentSignature) { _, _ in
-                            handleContentChange(proxy: proxy)
+                        .onChange(of: contentRevision) { oldRevision, newRevision in
+                            handleContentRevisionChange(
+                                from: oldRevision,
+                                to: newRevision,
+                                proxy: proxy
+                            )
                         }
                         .onAppear {
                             scrollToLatest(proxy: proxy, animated: false)
@@ -326,20 +337,33 @@ private struct LiveConversationDetail: View {
             )
         }
         .background(Color.black.opacity(0.08))
+        .onDisappear(perform: cancelScrollTask)
     }
 
-    private var contentSignature: String {
-        [
-            conversation?.id.uuidString ?? "",
-            conversation?.messages.last?.id.uuidString ?? "",
-            conversation?.messages.last?.originalText ?? "",
-            conversation?.messages.last?.translatedText ?? "",
-            String(conversation?.messages.count ?? 0),
-            incomingDraft.originalText,
-            incomingDraft.translatedText,
-            outgoingDraft.originalText,
-            outgoingDraft.translatedText
-        ].joined(separator: "|")
+    private var contentRevision: LiveConversationContentRevision {
+        LiveConversationContentRevision(
+            conversationID: conversation?.id,
+            conversationUpdatedAt: conversation?.updatedAt,
+            messageCount: conversation?.messages.count ?? 0,
+            incomingDraftUpdatedAt: incomingDraft.updatedAt,
+            outgoingDraftUpdatedAt: outgoingDraft.updatedAt
+        )
+    }
+
+    private func handleContentRevisionChange(
+        from oldRevision: LiveConversationContentRevision,
+        to newRevision: LiveConversationContentRevision,
+        proxy: ScrollViewProxy
+    ) {
+        guard oldRevision.conversationID == newRevision.conversationID else {
+            followsLatest = true
+            showsLatestButton = false
+            lastContentChange = Date()
+            scrollToLatest(proxy: proxy, animated: false)
+            return
+        }
+
+        handleContentChange(proxy: proxy)
     }
 
     private func handleContentChange(proxy: ScrollViewProxy) {
@@ -371,9 +395,15 @@ private struct LiveConversationDetail: View {
     }
 
     private func scrollToLatest(proxy: ScrollViewProxy, animated: Bool) {
+        scrollTask?.cancel()
         isProgrammaticScroll = true
 
-        DispatchQueue.main.async {
+        scrollTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled else {
+                return
+            }
+
             if animated {
                 withAnimation(.easeOut(duration: 0.18)) {
                     proxy.scrollTo(latestAnchorID, anchor: .bottom)
@@ -382,15 +412,38 @@ private struct LiveConversationDetail: View {
                 proxy.scrollTo(latestAnchorID, anchor: .bottom)
             }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                isProgrammaticScroll = false
+            do {
+                try await Task.sleep(nanoseconds: 350_000_000)
+            } catch {
+                return
             }
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            isProgrammaticScroll = false
+            scrollTask = nil
         }
+    }
+
+    private func cancelScrollTask() {
+        scrollTask?.cancel()
+        scrollTask = nil
+        isProgrammaticScroll = false
     }
 }
 
+private struct LiveConversationContentRevision: Equatable {
+    let conversationID: LiveConversation.ID?
+    let conversationUpdatedAt: Date?
+    let messageCount: Int
+    let incomingDraftUpdatedAt: Date
+    let outgoingDraftUpdatedAt: Date
+}
+
 private struct LiveScrollBottomPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
@@ -398,13 +451,40 @@ private struct LiveScrollBottomPreferenceKey: PreferenceKey {
 }
 
 private struct LiveMessageBubble: View {
-    let message: LiveConversationMessage
-    var karaokeHighlightedCharacters: Int? = nil
-    var isDraft = false
+    private let speaker: LiveConversationSpeaker
+    private let originalText: String
+    private let translatedText: String
+    private let messageTimestamp: Date
+    private let karaokeHighlightedCharacters: Int?
+    private let isDraft: Bool
+
+    init(
+        message: LiveConversationMessage,
+        karaokeHighlightedCharacters: Int? = nil
+    ) {
+        self.speaker = message.speaker
+        self.originalText = message.originalText
+        self.translatedText = message.translatedText
+        self.messageTimestamp = message.timestamp
+        self.karaokeHighlightedCharacters = karaokeHighlightedCharacters
+        self.isDraft = false
+    }
+
+    init(
+        draft: LiveTranscriptDraft,
+        karaokeHighlightedCharacters: Int? = nil
+    ) {
+        self.speaker = draft.speaker
+        self.originalText = draft.originalText
+        self.translatedText = draft.translatedText
+        self.messageTimestamp = draft.updatedAt
+        self.karaokeHighlightedCharacters = karaokeHighlightedCharacters
+        self.isDraft = true
+    }
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 10) {
-            if message.speaker == .me {
+            if speaker == .me {
                 Spacer(minLength: 80)
                 timestamp
                 bubble
@@ -445,13 +525,13 @@ private struct LiveMessageBubble: View {
         .padding(.vertical, 14)
         .frame(maxWidth: 440, alignment: .leading)
         .background(
-            message.speaker == .me ? AppTheme.accent : AppTheme.controlBackground,
+            speaker == .me ? AppTheme.accent : AppTheme.controlBackground,
             in: RoundedRectangle(cornerRadius: 8)
         )
     }
 
     private var timestamp: some View {
-        Text(message.timestamp.formatted(date: .omitted, time: .standard))
+        Text(messageTimestamp.formatted(date: .omitted, time: .standard))
             .font(.system(size: 12, weight: .bold))
             .foregroundStyle(.secondary)
             .monospacedDigit()
@@ -459,26 +539,26 @@ private struct LiveMessageBubble: View {
     }
 
     private var primaryText: String {
-        switch message.speaker {
+        switch speaker {
         case .me:
-            return message.translatedText.isEmpty ? message.originalText : message.translatedText
+            return translatedText.isEmpty ? originalText : translatedText
         case .other:
-            return message.translatedText.isEmpty ? message.originalText : message.translatedText
+            return translatedText.isEmpty ? originalText : translatedText
         }
     }
 
     private var secondaryText: String {
-        switch message.speaker {
+        switch speaker {
         case .me:
-            return message.translatedText.isEmpty ? "" : message.originalText
+            return translatedText.isEmpty ? "" : originalText
         case .other:
-            return message.originalText
+            return originalText
         }
     }
 
     private var primaryHighlightedCharacters: Int {
-        guard message.speaker == .me,
-              !message.translatedText.isEmpty
+        guard speaker == .me,
+              !translatedText.isEmpty
         else {
             return 0
         }
@@ -490,19 +570,19 @@ private struct LiveMessageBubble: View {
     }
 
     private var primaryFont: Font {
-        message.speaker == .me
+        speaker == .me
             ? .system(size: 20, weight: .bold)
             : .system(size: 24, weight: .bold)
     }
 
     private var secondaryFont: Font {
-        message.speaker == .me
+        speaker == .me
             ? .system(size: 18, weight: .semibold)
             : .system(size: 15, weight: .semibold)
     }
 
     private var primaryBaseColor: Color {
-        if message.speaker == .me {
+        if speaker == .me {
             if isDraft && karaokeHighlightedCharacters == nil {
                 return Color.white
             }
@@ -512,16 +592,16 @@ private struct LiveMessageBubble: View {
     }
 
     private var primaryHighlightColor: Color {
-        message.speaker == .me ? Color.white : Color.black
+        speaker == .me ? Color.white : Color.black
     }
 
     private var secondaryBaseColor: Color {
-        message.speaker == .me ? Color.white : Color.secondary
+        speaker == .me ? Color.white : Color.secondary
     }
 
     private var showsKaraokeProgress: Bool {
-        guard message.speaker == .me,
-              !message.translatedText.isEmpty,
+        guard speaker == .me,
+              !translatedText.isEmpty,
               karaokeHighlightedCharacters != nil
         else {
             return false
@@ -589,13 +669,8 @@ private struct LiveDraftBubble: View {
 
     var body: some View {
         LiveMessageBubble(
-            message: LiveConversationMessage(
-                speaker: draft.speaker,
-                originalText: draft.originalText,
-                translatedText: draft.translatedText
-            ),
-            karaokeHighlightedCharacters: karaokeHighlightedCharacters,
-            isDraft: true
+            draft: draft,
+            karaokeHighlightedCharacters: karaokeHighlightedCharacters
         )
     }
 }
@@ -635,6 +710,7 @@ private struct LiveComposerBar: View {
             }
             .buttonStyle(.plain)
             .help(isMicrophoneTranslationEnabled ? "마이크 통역 끄기" : "마이크 통역 켜기")
+            .accessibilityLabel(isMicrophoneTranslationEnabled ? "마이크 통역 끄기" : "마이크 통역 켜기")
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)

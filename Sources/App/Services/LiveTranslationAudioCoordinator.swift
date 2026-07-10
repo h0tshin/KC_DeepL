@@ -24,8 +24,8 @@ struct LiveTranslationAudioSettings {
     static func fromDefaults(_ defaults: UserDefaults = .standard) -> LiveTranslationAudioSettings {
         LiveTranslationAudioSettings(
             modelID: defaults.string(forKey: PreferenceKeys.liveModelID) ?? AppDefaults.defaultLiveModelID,
-            listeningCredential: defaults.string(forKey: PreferenceKeys.liveListeningAPIKey) ?? AppDefaults.defaultLiveListeningAPIKey,
-            speakingCredential: defaults.string(forKey: PreferenceKeys.liveSpeakingAPIKey) ?? AppDefaults.defaultGeminiAPIKey,
+            listeningCredential: defaults.string(forKey: PreferenceKeys.liveListeningAPIKey) ?? "",
+            speakingCredential: defaults.string(forKey: PreferenceKeys.liveSpeakingAPIKey) ?? "",
             remoteMicInput: defaults.string(forKey: PreferenceKeys.liveRemoteMicInput) ?? "",
             remoteSpeakerOutput: defaults.string(forKey: PreferenceKeys.liveRemoteSpeakerOutput) ?? "",
             localMicInput: defaults.string(forKey: PreferenceKeys.liveLocalMicInput) ?? "",
@@ -40,33 +40,59 @@ struct LiveTranslationAudioSettings {
     }
 }
 
-actor LiveAudioChunkSender {
-    private let session: GeminiLiveTranslationSession
-    private var isClosed = false
+private final class LiveAudioChunkSender: @unchecked Sendable {
+    /// Translation capture currently emits one chunk every 100 ms. Keeping the
+    /// newest ten chunks bounds queued audio to roughly one second. When the
+    /// network is slower than capture, the oldest unsent chunk is dropped so a
+    /// recovered connection resumes with current speech instead of stale audio.
+    private static let maximumBufferedChunks = 10
 
-    init(session: GeminiLiveTranslationSession) {
-        self.session = session
+    private let continuation: AsyncStream<Data>.Continuation
+    private let pumpTask: Task<Void, Never>
+
+    init(
+        session: GeminiLiveTranslationSession,
+        onFailure: @escaping @Sendable (Error) -> Void
+    ) {
+        var capturedContinuation: AsyncStream<Data>.Continuation?
+        let stream = AsyncStream<Data>(
+            bufferingPolicy: .bufferingNewest(Self.maximumBufferedChunks)
+        ) { continuation in
+            capturedContinuation = continuation
+        }
+        let continuation = capturedContinuation!
+
+        self.continuation = continuation
+        self.pumpTask = Task {
+            do {
+                for await data in stream {
+                    try Task.checkCancellation()
+                    try await session.sendAudioChunk(data)
+                }
+            } catch {
+                continuation.finish()
+                if !Task.isCancelled {
+                    onFailure(error)
+                }
+            }
+        }
     }
 
-    func send(_ data: Data) async {
-        guard !isClosed else {
-            return
-        }
-
-        do {
-            try await session.sendAudioChunk(data)
-        } catch {
-            isClosed = true
+    @discardableResult
+    func enqueue(_ data: Data) -> Bool {
+        switch continuation.yield(data) {
+        case .enqueued:
+            return true
+        case .dropped, .terminated:
+            return false
+        @unknown default:
+            return false
         }
     }
 
-    func finish() async {
-        guard !isClosed else {
-            return
-        }
-
-        isClosed = true
-        try? await session.sendAudioStreamEnd()
+    func cancel() {
+        continuation.finish()
+        pumpTask.cancel()
     }
 }
 
@@ -89,6 +115,8 @@ final class LiveTranslationAudioCoordinator {
     private var outgoingReceiveTask: Task<Void, Never>?
     private var incomingSender: LiveAudioChunkSender?
     private var outgoingSender: LiveAudioChunkSender?
+    private var incomingGeneration: UInt64 = 0
+    private var outgoingGeneration: UInt64 = 0
 
     init(client: GeminiLiveTranslationConnecting = GeminiLiveTranslationWebSocketClient()) {
         self.client = client
@@ -155,6 +183,7 @@ final class LiveTranslationAudioCoordinator {
     func startIncomingTranslation(settings: LiveTranslationAudioSettings) async throws {
         stopSpeakerBypass()
         stopIncomingTranslation()
+        let generation = incomingGeneration
 
         let inputDevice = LiveAudioDeviceRegistry.resolveDevice(
             selection: settings.remoteMicInput,
@@ -175,43 +204,87 @@ final class LiveTranslationAudioCoordinator {
                 echoTargetLanguage: settings.remoteTargetEcho
             )
         )
-        let output = LivePCMOutputQueue(
+
+        var output: LivePCMOutputQueue?
+        var input: LivePCMInputStream?
+        var sender: LiveAudioChunkSender?
+        var committed = false
+        defer {
+            if !committed {
+                input?.stop()
+                sender?.cancel()
+                output?.stop()
+                session.close()
+            }
+        }
+
+        guard generation == incomingGeneration,
+              !Task.isCancelled
+        else {
+            throw CancellationError()
+        }
+
+        let createdOutput = LivePCMOutputQueue(
             device: outputDevice,
             sampleRate: 24_000,
             channelCount: 1,
             gain: settings.listenerVolume
         )
-        output.onPlaybackProgress = { [weak self] progress in
+        output = createdOutput
+        createdOutput.onPlaybackProgress = { [weak self] progress in
             Task { @MainActor [weak self] in
-                self?.onPlaybackProgress?(.incoming, progress)
+                guard let self,
+                      self.incomingGeneration == generation
+                else {
+                    return
+                }
+                self.onPlaybackProgress?(.incoming, progress)
             }
         }
-        try output.start()
+        try createdOutput.start()
 
-        let sender = LiveAudioChunkSender(session: session)
-        let input = LivePCMInputStream(device: inputDevice, sampleRate: 16_000, channelCount: 1) { data in
-            Task {
-                await sender.send(data)
+        let createdSender = LiveAudioChunkSender(session: session) { [weak self] error in
+            Task { @MainActor [weak self] in
+                self?.handleTerminalFailure(
+                    direction: .incoming,
+                    generation: generation,
+                    message: Self.userFacingErrorMessage(error)
+                )
             }
         }
-        try input.start()
+        sender = createdSender
+        let createdInput = LivePCMInputStream(device: inputDevice, sampleRate: 16_000, channelCount: 1) { data in
+            _ = createdSender.enqueue(data)
+        }
+        input = createdInput
+        try createdInput.start()
+
+        guard generation == incomingGeneration,
+              !Task.isCancelled
+        else {
+            throw CancellationError()
+        }
 
         incomingSession = session
-        incomingOutput = output
-        incomingInput = input
-        incomingSender = sender
-        incomingReceiveTask = receiveEvents(from: session, output: output, direction: .incoming)
+        incomingOutput = createdOutput
+        incomingInput = createdInput
+        incomingSender = createdSender
+        incomingReceiveTask = receiveEvents(
+            from: session,
+            output: createdOutput,
+            direction: .incoming,
+            generation: generation
+        )
+        committed = true
         onLog?("On Air 수신: \(inputDevice.name) -> \(outputDevice.name)")
     }
 
     func stopIncomingTranslation() {
+        incomingGeneration &+= 1
         incomingInput?.stop()
         incomingInput = nil
-        let sender = incomingSender
+        incomingSender?.cancel()
         incomingSender = nil
-        Task {
-            await sender?.finish()
-        }
         incomingReceiveTask?.cancel()
         incomingReceiveTask = nil
         incomingSession?.close()
@@ -223,6 +296,7 @@ final class LiveTranslationAudioCoordinator {
     func startOutgoingTranslation(settings: LiveTranslationAudioSettings) async throws {
         stopMicBypass()
         stopOutgoingTranslation()
+        let generation = outgoingGeneration
 
         let inputDevice = LiveAudioDeviceRegistry.resolveDevice(
             selection: settings.localMicInput,
@@ -243,38 +317,82 @@ final class LiveTranslationAudioCoordinator {
                 echoTargetLanguage: settings.localTargetEcho
             )
         )
-        let output = LivePCMOutputQueue(device: outputDevice, sampleRate: 24_000, channelCount: 1)
-        output.onPlaybackProgress = { [weak self] progress in
-            Task { @MainActor [weak self] in
-                self?.onPlaybackProgress?(.outgoing, progress)
-            }
-        }
-        try output.start()
 
-        let sender = LiveAudioChunkSender(session: session)
-        let input = LivePCMInputStream(device: inputDevice, sampleRate: 16_000, channelCount: 1) { data in
-            Task {
-                await sender.send(data)
+        var output: LivePCMOutputQueue?
+        var input: LivePCMInputStream?
+        var sender: LiveAudioChunkSender?
+        var committed = false
+        defer {
+            if !committed {
+                input?.stop()
+                sender?.cancel()
+                output?.stop()
+                session.close()
             }
         }
-        try input.start()
+
+        guard generation == outgoingGeneration,
+              !Task.isCancelled
+        else {
+            throw CancellationError()
+        }
+
+        let createdOutput = LivePCMOutputQueue(device: outputDevice, sampleRate: 24_000, channelCount: 1)
+        output = createdOutput
+        createdOutput.onPlaybackProgress = { [weak self] progress in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.outgoingGeneration == generation
+                else {
+                    return
+                }
+                self.onPlaybackProgress?(.outgoing, progress)
+            }
+        }
+        try createdOutput.start()
+
+        let createdSender = LiveAudioChunkSender(session: session) { [weak self] error in
+            Task { @MainActor [weak self] in
+                self?.handleTerminalFailure(
+                    direction: .outgoing,
+                    generation: generation,
+                    message: Self.userFacingErrorMessage(error)
+                )
+            }
+        }
+        sender = createdSender
+        let createdInput = LivePCMInputStream(device: inputDevice, sampleRate: 16_000, channelCount: 1) { data in
+            _ = createdSender.enqueue(data)
+        }
+        input = createdInput
+        try createdInput.start()
+
+        guard generation == outgoingGeneration,
+              !Task.isCancelled
+        else {
+            throw CancellationError()
+        }
 
         outgoingSession = session
-        outgoingOutput = output
-        outgoingInput = input
-        outgoingSender = sender
-        outgoingReceiveTask = receiveEvents(from: session, output: output, direction: .outgoing)
+        outgoingOutput = createdOutput
+        outgoingInput = createdInput
+        outgoingSender = createdSender
+        outgoingReceiveTask = receiveEvents(
+            from: session,
+            output: createdOutput,
+            direction: .outgoing,
+            generation: generation
+        )
+        committed = true
         onLog?("마이크 통역: \(inputDevice.name) -> \(outputDevice.name)")
     }
 
     func stopOutgoingTranslation() {
+        outgoingGeneration &+= 1
         outgoingInput?.stop()
         outgoingInput = nil
-        let sender = outgoingSender
+        outgoingSender?.cancel()
         outgoingSender = nil
-        Task {
-            await sender?.finish()
-        }
         outgoingReceiveTask?.cancel()
         outgoingReceiveTask = nil
         outgoingSession?.close()
@@ -298,21 +416,45 @@ final class LiveTranslationAudioCoordinator {
     private func receiveEvents(
         from session: GeminiLiveTranslationSession,
         output: LivePCMOutputQueue,
-        direction: LiveTranslationAudioDirection
+        direction: LiveTranslationAudioDirection,
+        generation: UInt64
     ) -> Task<Void, Never> {
-        Task { [weak self] in
+        Task { @MainActor [weak self] in
             do {
                 for try await event in session.events {
-                    if case .audio(let data) = event {
+                    guard let self,
+                          self.isCurrent(generation: generation, direction: direction)
+                    else {
+                        return
+                    }
+
+                    if case .error(let message) = event {
+                        self.handleTerminalFailure(
+                            direction: direction,
+                            generation: generation,
+                            message: message
+                        )
+                        return
+                    } else if case .audio(let data) = event {
                         output.enqueue(data)
                     } else if case .interrupted = event {
                         output.reset()
                     }
 
-                    await MainActor.run {
-                        self?.onEvent?(direction, event)
-                    }
+                    self.onEvent?(direction, event)
                 }
+
+                guard !Task.isCancelled,
+                      let self,
+                      self.isCurrent(generation: generation, direction: direction)
+                else {
+                    return
+                }
+                self.handleTerminalFailure(
+                    direction: direction,
+                    generation: generation,
+                    message: "Live API 연결이 종료되었습니다."
+                )
             } catch {
                 guard !Task.isCancelled,
                       !Self.isCancellation(error)
@@ -320,10 +462,57 @@ final class LiveTranslationAudioCoordinator {
                     return
                 }
 
-                await MainActor.run {
-                    self?.onLog?("Live API 연결 실패: \(Self.userFacingErrorMessage(error))")
+                guard let self,
+                      self.isCurrent(generation: generation, direction: direction)
+                else {
+                    return
                 }
+                self.handleTerminalFailure(
+                    direction: direction,
+                    generation: generation,
+                    message: Self.userFacingErrorMessage(error)
+                )
             }
+        }
+    }
+
+    private func handleTerminalFailure(
+        direction: LiveTranslationAudioDirection,
+        generation: UInt64,
+        message: String
+    ) {
+        guard isCurrent(generation: generation, direction: direction) else {
+            return
+        }
+
+        onEvent?(direction, .error(message))
+        guard isCurrent(generation: generation, direction: direction) else {
+            return
+        }
+        onLog?("Live API 연결 실패: \(message)")
+
+        // Remove the currently executing receive task before teardown so the
+        // stop path does not cancel itself. A concurrent sender failure uses
+        // the same generation guard and becomes a no-op after teardown.
+        switch direction {
+        case .incoming:
+            incomingReceiveTask = nil
+            stopIncomingTranslation()
+        case .outgoing:
+            outgoingReceiveTask = nil
+            stopOutgoingTranslation()
+        }
+    }
+
+    private func isCurrent(
+        generation: UInt64,
+        direction: LiveTranslationAudioDirection
+    ) -> Bool {
+        switch direction {
+        case .incoming:
+            generation == incomingGeneration
+        case .outgoing:
+            generation == outgoingGeneration
         }
     }
 

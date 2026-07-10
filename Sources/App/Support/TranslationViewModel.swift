@@ -13,21 +13,37 @@ final class TranslationViewModel: ObservableObject {
     @Published private(set) var history: [TranslationHistoryItem] = []
 
     private let client: TranslationClient
-    private let historyStore: TranslationHistoryStoring
+    private let historyRepository: TranslationHistoryRepository
     private var debouncedTranslationTask: Task<Void, Never>?
+    private var historyLoadTask: Task<Void, Never>?
+    private var historyPersistenceTask: Task<Void, Never>?
+    private var historyPersistenceGeneration: UInt = 0
+    private var isHistoryLoaded = false
+    private var historyMutatedBeforeLoad = false
+    private var historyClearedBeforeLoad = false
+    private var historyDeletedBeforeLoad: Set<TranslationHistoryItem.ID> = []
+    private var historyNeedsPersistence = false
+    private var historyPreferenceEnabled = true
+    private var requestGeneration: UInt = 0
 
     init(
         client: TranslationClient = GeminiTranslationClient(),
         historyStore: TranslationHistoryStoring = FileTranslationHistoryStore()
     ) {
         self.client = client
-        self.historyStore = historyStore
+        self.historyRepository = TranslationHistoryRepository(store: historyStore)
         loadHistory()
-        runStartupChecks()
+        PendingPersistenceRegistry.shared.registerPreparation { [weak self] in
+            self?.prepareForTermination()
+        }
+        PendingPersistenceRegistry.shared.register { [weak self] in
+            await self?.flushPendingHistoryPersistence()
+        }
     }
 
     deinit {
         debouncedTranslationTask?.cancel()
+        historyLoadTask?.cancel()
     }
 
     func translate(
@@ -39,6 +55,8 @@ final class TranslationViewModel: ObservableObject {
         temperature: Double,
         historyEnabled: Bool
     ) async {
+        historyPreferenceEnabled = historyEnabled
+        let generation = nextRequestGeneration()
         let translationText = RichTextFormatting.markdown(
             from: sourceAttributedText,
             fallback: sourceText
@@ -52,7 +70,8 @@ final class TranslationViewModel: ObservableObject {
             modelID: modelID,
             apiKey: apiKey,
             temperature: temperature,
-            historyEnabled: historyEnabled
+            historyEnabled: historyEnabled,
+            generation: generation
         )
     }
 
@@ -66,18 +85,15 @@ final class TranslationViewModel: ObservableObject {
         historyEnabled: Bool,
         autoTranslate: Bool
     ) {
-        debouncedTranslationTask?.cancel()
+        historyPreferenceEnabled = historyEnabled
+        let generation = nextRequestGeneration()
         isTranslating = false
 
         let expectedSourceText = sourceText
-        let pendingText = RichTextFormatting.markdown(
-            from: sourceAttributedText,
-            fallback: expectedSourceText
-        )
         guard !expectedSourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             translatedText = ""
             errorMessage = nil
-            runStartupChecks()
+            runStartupChecks(apiKey: apiKey)
             return
         }
 
@@ -95,7 +111,16 @@ final class TranslationViewModel: ObservableObject {
                 return
             }
 
-            await self?.translateSnapshot(
+            guard let self,
+                  self.isCurrentRequest(generation, expectedSourceText: expectedSourceText)
+            else {
+                return
+            }
+            let pendingText = RichTextFormatting.markdown(
+                from: self.sourceAttributedText,
+                fallback: expectedSourceText
+            )
+            await self.translateSnapshot(
                 pendingText,
                 expectedSourceText: expectedSourceText,
                 sourceLanguage: sourceLanguage,
@@ -104,16 +129,16 @@ final class TranslationViewModel: ObservableObject {
                 modelID: modelID,
                 apiKey: apiKey,
                 temperature: temperature,
-                historyEnabled: historyEnabled
+                historyEnabled: historyEnabled,
+                generation: generation
             )
         }
     }
 
-    func runStartupChecks() {
+    func runStartupChecks(apiKey: String) {
         let defaults = UserDefaults.standard
         let provider = LLMProvider(rawValue: defaults.string(forKey: PreferenceKeys.provider) ?? "") ?? .gemini
         let modelID = defaults.string(forKey: PreferenceKeys.modelID) ?? AppDefaults.defaultModelID
-        let apiKey = defaults.string(forKey: PreferenceKeys.geminiAPIKey) ?? AppDefaults.defaultGeminiAPIKey
 
         if provider == .gemini && apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             statusMessage = "Gemini API 키를 설정해 주세요."
@@ -133,20 +158,23 @@ final class TranslationViewModel: ObservableObject {
         modelID: String,
         apiKey: String,
         temperature: Double,
-        historyEnabled: Bool
+        historyEnabled: Bool,
+        generation: UInt
     ) async {
-        guard sourceText == expectedSourceText else {
+        guard isCurrentRequest(generation, expectedSourceText: expectedSourceText) else {
             return
         }
 
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             translatedText = ""
             errorMessage = nil
-            runStartupChecks()
+            runStartupChecks(apiKey: apiKey)
             return
         }
 
         guard provider == .gemini else {
+            errorMessage = nil
+            isTranslating = false
             translatedText = "현재 목업에서는 Gemini 번역 호출만 연결되어 있습니다. \(provider.displayName) 연동은 고급 설정 설계 범위에 포함되어 있습니다."
             statusMessage = "선택한 공급자의 실제 호출은 다음 구현 단계에서 연결됩니다."
             return
@@ -168,14 +196,16 @@ final class TranslationViewModel: ObservableObject {
 
         do {
             let output = try await client.translate(request)
-            guard sourceText == expectedSourceText, !Task.isCancelled else {
+            guard isCurrentRequest(generation, expectedSourceText: expectedSourceText),
+                  !Task.isCancelled
+            else {
                 return
             }
 
             translatedText = output
             statusMessage = "번역 완료: \(modelID)"
 
-            if historyEnabled {
+            if historyPreferenceEnabled {
                 appendHistoryItem(
                     TranslationHistoryItem(
                         sourceText: text,
@@ -187,11 +217,11 @@ final class TranslationViewModel: ObservableObject {
                 )
             }
         } catch is CancellationError {
-            if sourceText == expectedSourceText {
+            if isCurrentRequest(generation, expectedSourceText: expectedSourceText) {
                 statusMessage = "입력 중입니다. 1초 후 자동 번역합니다."
             }
         } catch {
-            guard sourceText == expectedSourceText else {
+            guard isCurrentRequest(generation, expectedSourceText: expectedSourceText) else {
                 return
             }
 
@@ -200,9 +230,27 @@ final class TranslationViewModel: ObservableObject {
             statusMessage = "번역 실패"
         }
 
-        if sourceText == expectedSourceText {
+        if isCurrentRequest(generation, expectedSourceText: expectedSourceText) {
             isTranslating = false
         }
+    }
+
+    private func nextRequestGeneration() -> UInt {
+        debouncedTranslationTask?.cancel()
+        debouncedTranslationTask = nil
+        requestGeneration &+= 1
+        return requestGeneration
+    }
+
+    private func prepareForTermination() {
+        debouncedTranslationTask?.cancel()
+        debouncedTranslationTask = nil
+        requestGeneration &+= 1
+        isTranslating = false
+    }
+
+    private func isCurrentRequest(_ generation: UInt, expectedSourceText: String) -> Bool {
+        generation == requestGeneration && sourceText == expectedSourceText
     }
 
     func setSourceText(_ text: String) {
@@ -234,6 +282,10 @@ final class TranslationViewModel: ObservableObject {
 
     func clearSourceText() {
         setSourceText("")
+    }
+
+    func setHistoryEnabled(_ enabled: Bool) {
+        historyPreferenceEnabled = enabled
     }
 
     func swapLanguages(sourceLanguage: inout LanguageOption, targetLanguage: inout LanguageOption) {
@@ -274,36 +326,153 @@ final class TranslationViewModel: ObservableObject {
     }
 
     func deleteHistoryItem(id: TranslationHistoryItem.ID) {
+        if !isHistoryLoaded {
+            historyMutatedBeforeLoad = true
+            historyDeletedBeforeLoad.insert(id)
+        }
         history.removeAll { $0.id == id }
+        historyNeedsPersistence = true
         persistHistory(successMessage: "선택한 번역 기록을 삭제했습니다.")
     }
 
     func clearHistory() {
+        if !isHistoryLoaded {
+            historyMutatedBeforeLoad = true
+            historyClearedBeforeLoad = true
+            historyDeletedBeforeLoad.removeAll()
+        }
         history.removeAll()
+        historyNeedsPersistence = true
         persistHistory(successMessage: "번역 기록을 모두 삭제했습니다.")
     }
 
     private func loadHistory() {
-        do {
-            history = try historyStore.load()
-        } catch {
-            history = []
-            statusMessage = "번역 기록을 불러오지 못했습니다: \(error.localizedDescription)"
+        historyLoadTask?.cancel()
+        historyLoadTask = Task { @MainActor [weak self, historyRepository] in
+            do {
+                let loadedHistory = try await historyRepository.load()
+                guard let self, !Task.isCancelled else {
+                    return
+                }
+                if self.historyMutatedBeforeLoad {
+                    if !self.historyClearedBeforeLoad {
+                        let localIDs = Set(self.history.map(\.id))
+                        self.history.append(contentsOf: loadedHistory.filter {
+                            !localIDs.contains($0.id)
+                                && !self.historyDeletedBeforeLoad.contains($0.id)
+                        })
+                    }
+                    self.isHistoryLoaded = true
+                    self.persistHistory(successMessage: "")
+                } else {
+                    self.history = loadedHistory
+                    self.isHistoryLoaded = true
+                }
+                self.historyLoadTask = nil
+            } catch {
+                guard let self, !Task.isCancelled else {
+                    return
+                }
+                self.isHistoryLoaded = true
+                if self.historyMutatedBeforeLoad {
+                    self.persistHistory(successMessage: "")
+                } else {
+                    self.history = []
+                }
+                self.statusMessage = "번역 기록을 불러오지 못했습니다: \(error.localizedDescription)"
+                self.historyLoadTask = nil
+            }
         }
     }
 
     private func appendHistoryItem(_ item: TranslationHistoryItem) {
+        if !isHistoryLoaded {
+            historyMutatedBeforeLoad = true
+        }
         history.insert(item, at: 0)
+        historyNeedsPersistence = true
         persistHistory(successMessage: "번역 완료: \(item.modelID)")
     }
 
-    private func persistHistory(successMessage: String) {
-        do {
-            try historyStore.save(history)
-            statusMessage = successMessage
-        } catch {
-            statusMessage = "번역 기록 저장 실패: \(error.localizedDescription)"
+    private func persistHistory(successMessage _: String) {
+        guard isHistoryLoaded else {
+            return
         }
+        historyPersistenceGeneration &+= 1
+        let generation = historyPersistenceGeneration
+        let snapshot = history
+
+        historyPersistenceTask?.cancel()
+        historyPersistenceTask = Task { @MainActor [weak self, historyRepository] in
+            do {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                try Task.checkCancellation()
+                try await historyRepository.save(snapshot)
+                guard let self,
+                      !Task.isCancelled,
+                      self.historyPersistenceGeneration == generation
+                else {
+                    return
+                }
+                self.historyNeedsPersistence = false
+                self.historyPersistenceTask = nil
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self,
+                      self.historyPersistenceGeneration == generation
+                else {
+                    return
+                }
+                self.statusMessage = "번역 기록 저장 실패: \(error.localizedDescription)"
+                self.historyPersistenceTask = nil
+            }
+        }
+    }
+
+    private func flushPendingHistoryPersistence() async {
+        if let historyLoadTask {
+            await historyLoadTask.value
+        }
+
+        while historyNeedsPersistence {
+            let generation = historyPersistenceGeneration
+            let pendingTask = historyPersistenceTask
+            pendingTask?.cancel()
+            if let pendingTask {
+                await pendingTask.value
+            }
+
+            let snapshot = history
+            do {
+                try await historyRepository.save(snapshot)
+            } catch {
+                statusMessage = "번역 기록 저장 실패: \(error.localizedDescription)"
+                return
+            }
+
+            guard historyPersistenceGeneration == generation else {
+                continue
+            }
+            historyNeedsPersistence = false
+            historyPersistenceTask = nil
+        }
+    }
+}
+
+private actor TranslationHistoryRepository {
+    private let store: any TranslationHistoryStoring
+
+    init(store: any TranslationHistoryStoring) {
+        self.store = store
+    }
+
+    func load() throws -> [TranslationHistoryItem] {
+        try store.load()
+    }
+
+    func save(_ items: [TranslationHistoryItem]) throws {
+        try store.save(items)
     }
 }
 

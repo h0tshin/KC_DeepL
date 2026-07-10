@@ -80,6 +80,12 @@ final class LivePCMInputStream {
         guard let newQueue else {
             throw LiveAudioQueueError.coreAudio("AudioQueueNewInput", -1)
         }
+        var ownsNewQueue = true
+        defer {
+            if ownsNewQueue {
+                AudioQueueDispose(newQueue, true)
+            }
+        }
 
         try Self.setCurrentDevice(device, on: newQueue)
 
@@ -104,6 +110,7 @@ final class LivePCMInputStream {
         buffers = allocatedBuffers
         isRunning = true
         stateLock.unlock()
+        ownsNewQueue = false
 
         do {
             status = AudioQueueStart(newQueue, nil)
@@ -130,10 +137,8 @@ final class LivePCMInputStream {
 
     private func handleInputBuffer(_ queue: AudioQueueRef, buffer: AudioQueueBufferRef) {
         stateLock.lock()
-        let shouldContinue = isRunning
-        stateLock.unlock()
-
-        guard shouldContinue else {
+        guard isRunning, self.queue == queue else {
+            stateLock.unlock()
             return
         }
 
@@ -144,6 +149,7 @@ final class LivePCMInputStream {
         }
 
         AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+        stateLock.unlock()
     }
 
     private static let inputCallback: AudioQueueInputCallback = { userData, queue, buffer, _, _, _ in
@@ -195,24 +201,43 @@ final class LivePCMInputStream {
 }
 
 final class LivePCMOutputQueue {
+    private struct BufferMetadata {
+        let generation: UInt64
+        let frameCount: Int64
+    }
+
     private let device: LiveAudioDevice
     private let sampleRate: Int
     private let channelCount: Int
     private let bytesPerFrame: Int
+    private let maximumBufferedFrames: Int64
     var onPlaybackProgress: ((LiveAudioPlaybackProgress) -> Void)?
     private var queue: AudioQueueRef?
     private var isRunning = false
     private var gain: Double
     private var enqueuedFrames: Int64 = 0
     private var playedFrames: Int64 = 0
+    private var playbackGeneration: UInt64 = 0
+    private var bufferMetadata: [UInt: BufferMetadata] = [:]
     private let stateLock = NSLock()
+    private let queueOperationLock = NSLock()
 
-    init(device: LiveAudioDevice, sampleRate: Int, channelCount: Int = 1, gain: Double = 1.0) {
+    init(
+        device: LiveAudioDevice,
+        sampleRate: Int,
+        channelCount: Int = 1,
+        gain: Double = 1.0,
+        maximumBufferedDuration: TimeInterval = 2.0
+    ) {
         self.device = device
-        self.sampleRate = sampleRate
+        self.sampleRate = max(1, sampleRate)
         self.channelCount = max(1, channelCount)
         self.bytesPerFrame = max(1, self.channelCount * MemoryLayout<Int16>.size)
         self.gain = Self.clampedGain(gain)
+        self.maximumBufferedFrames = max(
+            1,
+            Int64(Double(self.sampleRate) * max(0.1, maximumBufferedDuration))
+        )
     }
 
     deinit {
@@ -235,6 +260,12 @@ final class LivePCMOutputQueue {
         guard let newQueue else {
             throw LiveAudioQueueError.coreAudio("AudioQueueNewOutput", -1)
         }
+        var ownsNewQueue = true
+        defer {
+            if ownsNewQueue {
+                AudioQueueDispose(newQueue, true)
+            }
+        }
 
         try LivePCMInputStream.setCurrentDevice(device, on: newQueue)
         status = AudioQueueSetParameter(newQueue, kAudioQueueParam_Volume, Float32(gain))
@@ -245,7 +276,10 @@ final class LivePCMOutputQueue {
         isRunning = true
         enqueuedFrames = 0
         playedFrames = 0
+        playbackGeneration &+= 1
+        bufferMetadata.removeAll()
         stateLock.unlock()
+        ownsNewQueue = false
 
         do {
             status = AudioQueueStart(newQueue, nil)
@@ -256,25 +290,38 @@ final class LivePCMOutputQueue {
         }
     }
 
-    func enqueue(_ data: Data) {
-        guard !data.isEmpty else {
-            return
+    @discardableResult
+    func enqueue(_ data: Data) -> Bool {
+        guard !data.isEmpty,
+              data.count.isMultiple(of: bytesPerFrame),
+              data.count <= Int(UInt32.max)
+        else {
+            return false
         }
+
+        let frameCount = Int64(data.count / bytesPerFrame)
+        queueOperationLock.lock()
+        defer { queueOperationLock.unlock() }
 
         stateLock.lock()
         let currentQueue = queue
         let shouldPlay = isRunning
+        let generation = playbackGeneration
+        let bufferedFrames = max(0, enqueuedFrames - playedFrames)
+        let hasCapacity = bufferedFrames + frameCount <= maximumBufferedFrames
         stateLock.unlock()
 
-        guard shouldPlay, let currentQueue else {
-            return
+        // Preserve already queued, contiguous speech and reject the newest
+        // chunk when the latency/memory ceiling is reached.
+        guard shouldPlay, hasCapacity, let currentQueue else {
+            return false
         }
 
         var buffer: AudioQueueBufferRef?
         guard AudioQueueAllocateBuffer(currentQueue, UInt32(data.count), &buffer) == noErr,
               let buffer
         else {
-            return
+            return false
         }
 
         data.withUnsafeBytes { rawBuffer in
@@ -284,22 +331,42 @@ final class LivePCMOutputQueue {
             memcpy(buffer.pointee.mAudioData, baseAddress, data.count)
         }
         buffer.pointee.mAudioDataByteSize = UInt32(data.count)
-        let status = AudioQueueEnqueueBuffer(currentQueue, buffer, 0, nil)
-        guard status == noErr else {
+
+        let bufferID = Self.bufferID(buffer)
+        stateLock.lock()
+        guard isRunning,
+              queue == currentQueue,
+              playbackGeneration == generation
+        else {
+            stateLock.unlock()
             AudioQueueFreeBuffer(currentQueue, buffer)
-            return
+            return false
         }
 
-        let frameCount = Int64(data.count / bytesPerFrame)
-        stateLock.lock()
+        bufferMetadata[bufferID] = BufferMetadata(
+            generation: generation,
+            frameCount: frameCount
+        )
+        let status = AudioQueueEnqueueBuffer(currentQueue, buffer, 0, nil)
+        guard status == noErr else {
+            bufferMetadata.removeValue(forKey: bufferID)
+            stateLock.unlock()
+            AudioQueueFreeBuffer(currentQueue, buffer)
+            return false
+        }
+
         enqueuedFrames += frameCount
         let progress = progressSnapshot()
         let callback = onPlaybackProgress
         stateLock.unlock()
         callback?(progress)
+        return true
     }
 
     func setGain(_ gain: Double) {
+        queueOperationLock.lock()
+        defer { queueOperationLock.unlock() }
+
         let clamped = Self.clampedGain(gain)
         stateLock.lock()
         self.gain = clamped
@@ -312,8 +379,12 @@ final class LivePCMOutputQueue {
     }
 
     func reset() {
+        queueOperationLock.lock()
+        defer { queueOperationLock.unlock() }
+
         stateLock.lock()
         let currentQueue = queue
+        playbackGeneration &+= 1
         enqueuedFrames = 0
         playedFrames = 0
         let progress = progressSnapshot()
@@ -327,10 +398,14 @@ final class LivePCMOutputQueue {
     }
 
     func stop() {
+        queueOperationLock.lock()
+        defer { queueOperationLock.unlock() }
+
         stateLock.lock()
         let currentQueue = queue
         queue = nil
         isRunning = false
+        playbackGeneration &+= 1
         enqueuedFrames = 0
         playedFrames = 0
         stateLock.unlock()
@@ -339,20 +414,29 @@ final class LivePCMOutputQueue {
             AudioQueueStop(currentQueue, true)
             AudioQueueDispose(currentQueue, true)
         }
+
+        stateLock.lock()
+        bufferMetadata.removeAll()
+        stateLock.unlock()
     }
 
     private func handleOutputBuffer(_ queue: AudioQueueRef, buffer: AudioQueueBufferRef) {
-        let byteSize = Int(buffer.pointee.mAudioDataByteSize)
-        let frameCount = Int64(byteSize / bytesPerFrame)
-
+        let bufferID = Self.bufferID(buffer)
         stateLock.lock()
-        playedFrames += frameCount
-        let progress = progressSnapshot()
-        let callback = onPlaybackProgress
+        let metadata = bufferMetadata.removeValue(forKey: bufferID)
+        let isCurrentBuffer = isRunning
+            && metadata?.generation == playbackGeneration
+        if let metadata, isCurrentBuffer {
+            playedFrames += metadata.frameCount
+        }
+        let progress = isCurrentBuffer ? progressSnapshot() : nil
+        let callback = isCurrentBuffer ? onPlaybackProgress : nil
         stateLock.unlock()
 
         AudioQueueFreeBuffer(queue, buffer)
-        callback?(progress)
+        if let progress {
+            callback?(progress)
+        }
     }
 
     private func progressSnapshot() -> LiveAudioPlaybackProgress {
@@ -375,6 +459,10 @@ final class LivePCMOutputQueue {
     private static func clampedGain(_ gain: Double) -> Double {
         min(1.0, max(0.0, gain))
     }
+
+    private static func bufferID(_ buffer: AudioQueueBufferRef) -> UInt {
+        UInt(bitPattern: UnsafeRawPointer(buffer))
+    }
 }
 
 final class LiveBypassAudioStream {
@@ -387,10 +475,21 @@ final class LiveBypassAudioStream {
         gain: Double = 1.0
     ) {
         let sampleRate = max(8_000, inputDevice.sampleRate)
-        let output = LivePCMOutputQueue(device: outputDevice, sampleRate: sampleRate, channelCount: 1, gain: gain)
+        let output = LivePCMOutputQueue(
+            device: outputDevice,
+            sampleRate: sampleRate,
+            channelCount: 1,
+            gain: gain,
+            maximumBufferedDuration: 0.5
+        )
         self.output = output
-        self.input = LivePCMInputStream(device: inputDevice, sampleRate: sampleRate, channelCount: 1) { data in
-            output.enqueue(data)
+        self.input = LivePCMInputStream(
+            device: inputDevice,
+            sampleRate: sampleRate,
+            channelCount: 1,
+            chunkMilliseconds: 20
+        ) { data in
+            _ = output.enqueue(data)
         }
     }
 

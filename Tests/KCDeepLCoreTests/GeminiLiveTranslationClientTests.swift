@@ -28,13 +28,21 @@ final class GeminiLiveTranslationClientTests: XCTestCase {
 
     func testAudioMessageUsesSixteenKilohertzPcmMimeType() throws {
         let pcm = Data([0x00, 0x01, 0x02, 0x03])
-        let data = GeminiLiveTranslationMessageFactory.audioMessageData(pcm)
+        let data = try GeminiLiveTranslationMessageFactory.audioMessageData(pcm)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let realtimeInput = try XCTUnwrap(object["realtimeInput"] as? [String: Any])
         let audio = try XCTUnwrap(realtimeInput["audio"] as? [String: Any])
 
         XCTAssertEqual(audio["mimeType"] as? String, "audio/pcm;rate=16000")
         XCTAssertEqual(audio["data"] as? String, pcm.base64EncodedString())
+    }
+
+    func testAudioStreamEndMessageMatchesLiveContract() throws {
+        let data = try GeminiLiveTranslationMessageFactory.audioStreamEndMessageData()
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let realtimeInput = try XCTUnwrap(object["realtimeInput"] as? [String: Any])
+
+        XCTAssertEqual(realtimeInput["audioStreamEnd"] as? Bool, true)
     }
 
     func testResponseParserExtractsTranscriptAudioAndTurnComplete() throws {
@@ -127,6 +135,31 @@ final class GeminiLiveTranslationClientTests: XCTestCase {
 
     func testCredentialInfersEphemeralTokenEndpointMode() {
         XCTAssertEqual(GeminiLiveCredential(rawValue: "AQ.token"), .ephemeralToken("AQ.token"))
+        XCTAssertEqual(
+            GeminiLiveCredential(rawValue: "auth_tokens/session-token"),
+            .ephemeralToken("auth_tokens/session-token")
+        )
         XCTAssertEqual(GeminiLiveCredential(rawValue: "AIza-test"), .apiKey("AIza-test"))
+    }
+
+    func testBoundedEventChannelFailsInsteadOfSilentlyDroppingControlEvent() async throws {
+        let channel = GeminiLiveEventChannel(capacity: 1)
+        let audioEvent = GeminiLiveTranslationEvent.audio(Data([0x01]))
+        try channel.yield(audioEvent)
+
+        XCTAssertThrowsError(try channel.yield(.turnComplete)) { error in
+            XCTAssertEqual(error as? GeminiLiveTranslationError, .eventBufferOverflow)
+        }
+
+        var iterator = channel.stream.makeAsyncIterator()
+        let nextEvent = try await iterator.next()
+        XCTAssertEqual(nextEvent, audioEvent)
+
+        do {
+            _ = try await iterator.next()
+            XCTFail("A full event channel must terminate with an explicit overflow error.")
+        } catch {
+            XCTAssertEqual(error as? GeminiLiveTranslationError, .eventBufferOverflow)
+        }
     }
 }

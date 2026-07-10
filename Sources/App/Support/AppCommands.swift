@@ -1,5 +1,5 @@
 import AppKit
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import Carbon
 import SwiftUI
 
@@ -31,6 +31,7 @@ struct AppCommandPayload {
     let pasteBackTarget: PasteBackTarget?
 }
 
+@MainActor
 final class AppActionDispatcher {
     static let shared = AppActionDispatcher()
 
@@ -45,19 +46,21 @@ final class AppActionDispatcher {
         statusMessage: String? = nil,
         pasteBackTarget: PasteBackTarget? = nil
     ) {
-        DispatchQueue.main.async {
-            self.showMainWindow()
+        showMainWindow()
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                let payload = AppCommandPayload(
-                    action: action,
-                    capturedText: capturedText,
-                    capturedAttributedText: capturedAttributedText,
-                    statusMessage: statusMessage,
-                    pasteBackTarget: pasteBackTarget
-                )
-                NotificationCenter.default.post(name: .kcDeepLPerformAction, object: payload)
+        let payload = AppCommandPayload(
+            action: action,
+            capturedText: capturedText,
+            capturedAttributedText: capturedAttributedText,
+            statusMessage: statusMessage,
+            pasteBackTarget: pasteBackTarget
+        )
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else {
+                return
             }
+            NotificationCenter.default.post(name: .kcDeepLPerformAction, object: payload)
         }
     }
 
@@ -91,6 +94,7 @@ struct AppCommandBridge: View {
     }
 }
 
+@MainActor
 final class GlobalHotKeyManager {
     private struct HotKeyRegistration {
         let action: AppCommandAction
@@ -103,6 +107,7 @@ final class GlobalHotKeyManager {
     private var hotKeyRefs: [EventHotKeyRef] = []
     private var actionsByID: [UInt32: AppCommandAction] = [:]
     private var isRunning = false
+    private var captureTask: Task<Void, Never>?
 
     private let registrations: [HotKeyRegistration] = [
         HotKeyRegistration(action: .textTranslation, keyCode: UInt32(kVK_ANSI_1), id: 1),
@@ -121,6 +126,8 @@ final class GlobalHotKeyManager {
     }
 
     func stop() {
+        captureTask?.cancel()
+        captureTask = nil
         for hotKeyRef in hotKeyRefs {
             UnregisterEventHotKey(hotKeyRef)
         }
@@ -133,10 +140,6 @@ final class GlobalHotKeyManager {
         }
 
         isRunning = false
-    }
-
-    deinit {
-        stop()
     }
 
     private func installEventHandler() {
@@ -170,7 +173,9 @@ final class GlobalHotKeyManager {
                 let manager = Unmanaged<GlobalHotKeyManager>
                     .fromOpaque(userData)
                     .takeUnretainedValue()
-                manager.handleHotKey(id: hotKeyID.id)
+                Task { @MainActor in
+                    manager.handleHotKey(id: hotKeyID.id)
+                }
                 return noErr
             },
             1,
@@ -218,8 +223,19 @@ final class GlobalHotKeyManager {
             return
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
-            let result = SelectedTextCaptureService.captureSelectedText()
+        guard captureTask == nil else {
+            return
+        }
+        captureTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(140))
+            guard let self, !Task.isCancelled else {
+                return
+            }
+
+            let result = await SelectedTextCaptureService.captureSelectedText()
+            guard !Task.isCancelled else {
+                return
+            }
             AppActionDispatcher.shared.perform(
                 action,
                 capturedText: result.text,
@@ -227,6 +243,7 @@ final class GlobalHotKeyManager {
                 statusMessage: result.statusMessage,
                 pasteBackTarget: result.pasteBackTarget
             )
+            self.captureTask = nil
         }
     }
 }
@@ -238,8 +255,9 @@ private struct SelectedTextCaptureResult {
     let pasteBackTarget: PasteBackTarget?
 }
 
+@MainActor
 private enum SelectedTextCaptureService {
-    static func captureSelectedText() -> SelectedTextCaptureResult {
+    static func captureSelectedText() async -> SelectedTextCaptureResult {
         guard isAccessibilityTrusted() else {
             return SelectedTextCaptureResult(
                 text: nil,
@@ -249,12 +267,32 @@ private enum SelectedTextCaptureService {
             )
         }
 
+        guard PasteboardTransactionCoordinator.shared.begin() else {
+            return SelectedTextCaptureResult(
+                text: nil,
+                attributedText: nil,
+                statusMessage: "다른 클립보드 작업이 진행 중입니다. 잠시 후 다시 시도해 주세요.",
+                pasteBackTarget: nil
+            )
+        }
+        defer {
+            PasteboardTransactionCoordinator.shared.end()
+        }
+
         let pasteBackTarget = PasteBackTarget.captureCurrentFocusIfInputCapable()
         let pasteboard = NSPasteboard.general
         let snapshot = PasteboardSnapshot.capture(from: pasteboard)
         let changeCount = pasteboard.changeCount
+        var ownedChangeCount: Int?
 
-        guard postCopyShortcut() else {
+        defer {
+            if let ownedChangeCount,
+               pasteboard.changeCount == ownedChangeCount {
+                snapshot.restore(to: pasteboard)
+            }
+        }
+
+        guard await postCopyShortcut() else {
             return SelectedTextCaptureResult(
                 text: nil,
                 attributedText: nil,
@@ -263,14 +301,39 @@ private enum SelectedTextCaptureService {
             )
         }
 
-        let copiedText = PasteboardPolling.waitForCopiedText(
+        guard let copyResult = await PasteboardPolling.waitForCopiedText(
             on: pasteboard,
             originalChangeCount: changeCount
-        )
-        let copiedAttributedText = RichTextFormatting.attributedString(from: pasteboard)
-        snapshot.restore(to: pasteboard)
+        ) else {
+            return SelectedTextCaptureResult(
+                text: nil,
+                attributedText: nil,
+                statusMessage: "선택된 텍스트를 읽지 못했습니다. 텍스트를 블럭 지정한 뒤 다시 눌러 주세요.",
+                pasteBackTarget: nil
+            )
+        }
 
-        guard let copiedText,
+        guard pasteboard.changeCount == copyResult.changeCount else {
+            return SelectedTextCaptureResult(
+                text: nil,
+                attributedText: nil,
+                statusMessage: "복사 중 클립보드가 변경되어 작업을 취소했습니다.",
+                pasteBackTarget: nil
+            )
+        }
+        ownedChangeCount = copyResult.changeCount
+
+        let copiedAttributedText = RichTextFormatting.attributedString(from: pasteboard)
+        guard pasteboard.changeCount == copyResult.changeCount else {
+            return SelectedTextCaptureResult(
+                text: nil,
+                attributedText: nil,
+                statusMessage: "복사 중 클립보드가 변경되어 작업을 취소했습니다.",
+                pasteBackTarget: nil
+            )
+        }
+
+        guard let copiedText = copyResult.text,
               !copiedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
             return SelectedTextCaptureResult(
@@ -297,11 +360,12 @@ private enum SelectedTextCaptureService {
         return AXIsProcessTrustedWithOptions(options)
     }
 
-    private static func postCopyShortcut() -> Bool {
-        KeyboardShortcutPoster.postCommandKey(CGKeyCode(kVK_ANSI_C))
+    private static func postCopyShortcut() async -> Bool {
+        await KeyboardShortcutPoster.postCommandKey(CGKeyCode(kVK_ANSI_C))
     }
 }
 
+@MainActor
 final class PasteBackTarget {
     private let processIdentifier: pid_t
     private let focusedElement: AXUIElement
@@ -329,7 +393,7 @@ final class PasteBackTarget {
         )
     }
 
-    func paste(_ text: String) -> String {
+    func paste(_ text: String) async -> String {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return "붙여넣을 번역 결과가 없습니다."
         }
@@ -338,22 +402,42 @@ final class PasteBackTarget {
             return "\(appName)을 다시 찾을 수 없습니다."
         }
 
+        guard PasteboardTransactionCoordinator.shared.begin() else {
+            return "다른 붙여넣기 작업이 진행 중입니다. 잠시 후 다시 시도해 주세요."
+        }
+        defer {
+            PasteboardTransactionCoordinator.shared.end()
+        }
+
         let pasteboard = NSPasteboard.general
         let snapshot = PasteboardSnapshot.capture(from: pasteboard)
         RichTextFormatting.writeMarkdown(text, to: pasteboard)
-
-        app.activate()
-        AXUIElementSetAttributeValue(focusedElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        Thread.sleep(forTimeInterval: 0.12)
-
-        if KeyboardShortcutPoster.postCommandKey(CGKeyCode(kVK_ANSI_V)) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+        let temporaryChangeCount = pasteboard.changeCount
+        defer {
+            if pasteboard.changeCount == temporaryChangeCount {
                 snapshot.restore(to: pasteboard)
             }
+        }
+
+        guard app.activate() else {
+            return "\(appName)을 활성화할 수 없습니다."
+        }
+        _ = AXUIElementSetAttributeValue(
+            focusedElement,
+            kAXFocusedAttribute as CFString,
+            kCFBooleanTrue
+        )
+        try? await Task.sleep(for: .milliseconds(120))
+
+        guard pasteboard.changeCount == temporaryChangeCount else {
+            return "클립보드가 변경되어 붙여넣기를 취소했습니다."
+        }
+
+        if await KeyboardShortcutPoster.postCommandKey(CGKeyCode(kVK_ANSI_V)) {
+            try? await Task.sleep(for: .milliseconds(450))
             return "\(appName)에 번역 결과를 붙여넣었습니다."
         }
 
-        snapshot.restore(to: pasteboard)
         return "\(appName)에 붙여넣기 이벤트를 보낼 수 없습니다."
     }
 
@@ -411,8 +495,30 @@ final class PasteBackTarget {
     }
 }
 
+@MainActor
+private final class PasteboardTransactionCoordinator {
+    static let shared = PasteboardTransactionCoordinator()
+
+    private var isBusy = false
+
+    private init() {}
+
+    func begin() -> Bool {
+        guard !isBusy else {
+            return false
+        }
+        isBusy = true
+        return true
+    }
+
+    func end() {
+        isBusy = false
+    }
+}
+
+@MainActor
 private enum KeyboardShortcutPoster {
-    static func postCommandKey(_ keyCode: CGKeyCode) -> Bool {
+    static func postCommandKey(_ keyCode: CGKeyCode) async -> Bool {
         guard let source = CGEventSource(stateID: .hidSystemState),
               let keyDown = CGEvent(
                 keyboardEventSource: source,
@@ -431,29 +537,44 @@ private enum KeyboardShortcutPoster {
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
         keyDown.post(tap: .cghidEventTap)
-        Thread.sleep(forTimeInterval: 0.025)
+        try? await Task.sleep(for: .milliseconds(25))
         keyUp.post(tap: .cghidEventTap)
         return true
     }
 }
 
+private struct PasteboardCopyResult {
+    let text: String?
+    let changeCount: Int
+}
+
+@MainActor
 private enum PasteboardPolling {
     static func waitForCopiedText(
         on pasteboard: NSPasteboard,
         originalChangeCount: Int
-    ) -> String? {
-        let deadline = Date().addingTimeInterval(0.75)
+    ) async -> PasteboardCopyResult? {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .milliseconds(750))
 
-        while Date() < deadline {
-            if pasteboard.changeCount != originalChangeCount,
-               let text = pasteboard.string(forType: .string) {
-                return text
+        while clock.now < deadline, !Task.isCancelled {
+            if pasteboard.changeCount != originalChangeCount {
+                return PasteboardCopyResult(
+                    text: pasteboard.string(forType: .string),
+                    changeCount: pasteboard.changeCount
+                )
             }
 
-            Thread.sleep(forTimeInterval: 0.035)
+            try? await Task.sleep(for: .milliseconds(35))
         }
 
-        return nil
+        guard pasteboard.changeCount != originalChangeCount else {
+            return nil
+        }
+        return PasteboardCopyResult(
+            text: pasteboard.string(forType: .string),
+            changeCount: pasteboard.changeCount
+        )
     }
 }
 

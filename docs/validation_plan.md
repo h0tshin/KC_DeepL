@@ -4,6 +4,8 @@
 
 - `swift test`
 - `swift build`
+- `swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warn-concurrency`
+- `swift build -Xswiftc -swift-version -Xswiftc 6`
 - `git status --short`로 의도한 파일만 변경되었는지 확인
 
 ## 2. 앱 실행 검증
@@ -55,12 +57,18 @@
 기본 단위 테스트:
 
 - `TranslationPromptBuilderTests`
+- `GeminiTranslationClientTests`
+- `GeminiLiveTranslationClientTests`
 - `GeminiResponseParserTests`
 - `TranslationHistoryStoreTests`
+- `LiveTranscriptLanguageFilterTests`
+- `LiveTranscriptTurnAssemblerTests`
+- `LiveConversationSegmenterTests`
+- `TranslationViewModelTests`
+- `LiveTranslationViewModelPersistenceTests`
 
-추가해야 할 테스트:
+추가 권장 테스트:
 
-- mock URLSession을 통한 네트워크 성공/실패 테스트
 - 설정 공급자 변경 시 모델 초기화 테스트
 - 캡처 상태 전이 테스트
 - 기록 저장 정책 테스트

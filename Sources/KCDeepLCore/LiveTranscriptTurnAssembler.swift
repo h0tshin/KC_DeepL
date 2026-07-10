@@ -43,13 +43,27 @@ public struct LiveTranscriptTurnAssembler {
         field: LiveTranscriptAssemblyField,
         text: String
     ) -> [LiveTranscriptAssemblyChange] {
+        let previouslyQueuedSegmentCount: Int
+        let didChange: Bool
+
         switch field {
         case .original:
-            original.update(text)
+            previouslyQueuedSegmentCount = original.queuedSegmentCount
+            didChange = original.update(text)
         case .translation:
-            translation.update(text)
+            previouslyQueuedSegmentCount = translation.queuedSegmentCount
+            didChange = translation.update(text)
         }
-        return flushPairedSegments(force: false)
+
+        var changes: [LiveTranscriptAssemblyChange] = []
+        if didChange, previouslyQueuedSegmentCount > 0 {
+            changes.append(contentsOf: settlePreviouslyQueuedSegments(
+                field: field,
+                count: previouslyQueuedSegmentCount
+            ))
+        }
+        changes.append(contentsOf: flushPairedSegments(force: false))
+        return changes
     }
 
     public mutating func finish() -> [LiveTranscriptAssemblyChange] {
@@ -64,6 +78,38 @@ public struct LiveTranscriptTurnAssembler {
         original.reset()
         translation.reset()
         lastMessageInTurn = nil
+    }
+
+    private mutating func settlePreviouslyQueuedSegments(
+        field: LiveTranscriptAssemblyField,
+        count: Int
+    ) -> [LiveTranscriptAssemblyChange] {
+        guard var lastMessageInTurn else {
+            return []
+        }
+
+        let queuedText: String
+        switch field {
+        case .original:
+            queuedText = original.removeFirstQueuedSegments(count: count)
+            lastMessageInTurn.originalText = Self.joinedTranscript([
+                lastMessageInTurn.originalText,
+                queuedText
+            ])
+        case .translation:
+            queuedText = translation.removeFirstQueuedSegments(count: count)
+            lastMessageInTurn.translatedText = Self.joinedTranscript([
+                lastMessageInTurn.translatedText,
+                queuedText
+            ])
+        }
+
+        guard !queuedText.isEmpty else {
+            return []
+        }
+
+        self.lastMessageInTurn = lastMessageInTurn
+        return [.update(lastMessageInTurn)]
     }
 
     private mutating func flushPairedSegments(force: Bool) -> [LiveTranscriptAssemblyChange] {
@@ -149,23 +195,30 @@ private struct TranscriptStreamState {
         !queuedSegments.isEmpty
     }
 
+    var queuedSegmentCount: Int {
+        queuedSegments.count
+    }
+
     var visibleText: String {
         Self.joinedTranscript(queuedSegments + [buffer])
     }
 
-    mutating func update(_ text: String) {
+    @discardableResult
+    mutating func update(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return
+            return false
         }
 
         let incoming = Self.stripConsumedPrefix(trimmed, consumed: consumedText)
         guard !incoming.isEmpty else {
-            return
+            return false
         }
 
+        let previousVisibleText = visibleText
         buffer = Self.mergedTranscript(current: buffer, incoming: incoming)
         drainCompletedSegments(allowTrailingEndings: false)
+        return visibleText != previousVisibleText
     }
 
     mutating func finish() {
@@ -186,6 +239,17 @@ private struct TranscriptStreamState {
 
     mutating func removeFirstQueuedSegment() -> String {
         queuedSegments.removeFirst()
+    }
+
+    mutating func removeFirstQueuedSegments(count: Int) -> String {
+        let removalCount = min(max(0, count), queuedSegments.count)
+        guard removalCount > 0 else {
+            return ""
+        }
+
+        let text = Self.joinedTranscript(Array(queuedSegments.prefix(removalCount)))
+        queuedSegments.removeFirst(removalCount)
+        return text
     }
 
     mutating func removeAllQueuedSegments() -> String {
@@ -250,7 +314,72 @@ private struct TranscriptStreamState {
             return incoming
         }
 
+        if isLikelyRevision(of: current, with: incoming) {
+            return incoming
+        }
+
+        let overlap = suffixPrefixOverlapCount(current, incoming)
+        if overlap >= 2 {
+            return current + String(incoming.dropFirst(overlap))
+        }
+
         return "\(current) \(incoming)"
+    }
+
+    private static func isLikelyRevision(of current: String, with incoming: String) -> Bool {
+        let shorterCount = min(current.count, incoming.count)
+        guard shorterCount >= 5 else {
+            return false
+        }
+
+        let prefixCount = commonPrefixCount(current, incoming)
+        let suffixCount = commonSuffixCount(
+            current,
+            incoming,
+            excludingLeadingCharacters: prefixCount
+        )
+        let sharedEdgeCount = prefixCount + suffixCount
+        guard sharedEdgeCount >= 3 else {
+            return false
+        }
+
+        return Double(sharedEdgeCount) / Double(shorterCount) >= 0.6
+    }
+
+    private static func commonPrefixCount(_ lhs: String, _ rhs: String) -> Int {
+        zip(lhs, rhs).prefix { $0.0 == $0.1 }.count
+    }
+
+    private static func commonSuffixCount(
+        _ lhs: String,
+        _ rhs: String,
+        excludingLeadingCharacters prefixCount: Int
+    ) -> Int {
+        let maximumCount = min(lhs.count, rhs.count) - prefixCount
+        guard maximumCount > 0 else {
+            return 0
+        }
+
+        return zip(lhs.reversed(), rhs.reversed())
+            .prefix(maximumCount)
+            .prefix { $0.0 == $0.1 }
+            .count
+    }
+
+    private static func suffixPrefixOverlapCount(_ current: String, _ incoming: String) -> Int {
+        // Live transcript overlaps are short; bounding the search avoids quadratic
+        // work if a provider sends an unexpectedly large snapshot.
+        let maximumCount = min(min(current.count, incoming.count), 256)
+        guard maximumCount > 1 else {
+            return 0
+        }
+
+        for count in stride(from: maximumCount, through: 2, by: -1) {
+            if current.suffix(count).elementsEqual(incoming.prefix(count)) {
+                return count
+            }
+        }
+        return 0
     }
 
     private static func joinedTranscript(_ parts: [String]) -> String {

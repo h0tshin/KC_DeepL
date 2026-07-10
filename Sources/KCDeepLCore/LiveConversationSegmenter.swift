@@ -15,9 +15,16 @@ public enum LiveConversationSegmenter {
         "군요",
         "네요",
         "지요",
-        "죠",
-        "임"
+        "죠"
     ].sorted { $0.count > $1.count }
+
+    // "임" is also a common suffix inside nouns such as "게임". Treat it as
+    // an ending only at the logical end of a transcript, where it is unambiguous.
+    private static let trailingOnlyKoreanEndings = ["임"]
+
+    private static let koreanEndingFinalCharacters: Set<Character> = [
+        "다", "요", "죠", "어", "아", "임"
+    ]
 
     private static let weakKoreanEndings = [
         "다",
@@ -33,6 +40,14 @@ public enum LiveConversationSegmenter {
         "！",
         "？",
         "…"
+    ]
+
+    private static let trailingClosers: Set<Character> = [
+        "\"", "'", ")", "]", "}", "”", "’", "»", "」", "』", "】", "〉", "》"
+    ]
+
+    private static let periodAbbreviations: Set<String> = [
+        "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st"
     ]
 
     public static func splitCompletedSegments(
@@ -85,8 +100,13 @@ public enum LiveConversationSegmenter {
             }
 
             let nextIndex = text.index(after: index)
-            if isKoreanEndingBoundary(endingAt: nextIndex, in: text, allowTrailingEndings: allowTrailingEndings) {
-                boundaries.append(nextIndex)
+            if koreanEndingFinalCharacters.contains(text[index]),
+               isKoreanEndingBoundary(
+                   endingAt: nextIndex,
+                   in: text,
+                   allowTrailingEndings: allowTrailingEndings
+               ) {
+                boundaries.append(boundaryIncludingTrailingClosers(from: nextIndex, in: text))
             }
 
             index = nextIndex
@@ -111,14 +131,18 @@ public enum LiveConversationSegmenter {
                 return nil
             }
 
+            if isAbbreviationPeriod(at: index, in: text) {
+                return nil
+            }
+
             var boundary = text.index(after: index)
             while boundary < text.endIndex, text[boundary] == "." {
                 boundary = text.index(after: boundary)
             }
-            return boundary
+            return boundaryIncludingTrailingClosers(from: boundary, in: text)
         }
 
-        return text.index(after: index)
+        return boundaryIncludingTrailingClosers(from: text.index(after: index), in: text)
     }
 
     private static func isDecimalSeparator(at index: String.Index, in text: String) -> Bool {
@@ -141,17 +165,75 @@ public enum LiveConversationSegmenter {
         in text: String,
         allowTrailingEndings: Bool
     ) -> Bool {
-        let prefix = String(text[..<boundary])
-
-        if strongKoreanEndings.contains(where: { prefix.hasSuffix($0) }) {
-            return isBoundaryFollowedBySeparator(boundary, in: text) || (boundary == text.endIndex && allowTrailingEndings)
+        if strongKoreanEndings.contains(where: {
+            textHasSuffix($0, endingAt: boundary, in: text)
+        }) {
+            return isBoundaryFollowedBySeparator(boundary, in: text)
+                || (boundary == text.endIndex && allowTrailingEndings)
         }
 
-        guard weakKoreanEndings.contains(where: { prefix.hasSuffix($0) }) else {
+        if trailingOnlyKoreanEndings.contains(where: {
+            textHasSuffix($0, endingAt: boundary, in: text)
+        }) {
+            return allowTrailingEndings && isLogicalEnd(boundary, in: text)
+        }
+
+        return weakKoreanEndings.contains(where: {
+            textHasSuffix($0, endingAt: boundary, in: text)
+        })
+            && isBoundaryFollowedBySeparator(boundary, in: text)
+    }
+
+    private static func textHasSuffix(
+        _ suffix: String,
+        endingAt boundary: String.Index,
+        in text: String
+    ) -> Bool {
+        guard let start = text.index(
+            boundary,
+            offsetBy: -suffix.count,
+            limitedBy: text.startIndex
+        ) else {
+            return false
+        }
+        return text[start..<boundary].elementsEqual(suffix)
+    }
+
+    private static func isLogicalEnd(_ boundary: String.Index, in text: String) -> Bool {
+        var index = boundary
+        while index < text.endIndex, trailingClosers.contains(text[index]) {
+            index = text.index(after: index)
+        }
+        return index == text.endIndex
+    }
+
+    private static func boundaryIncludingTrailingClosers(
+        from boundary: String.Index,
+        in text: String
+    ) -> String.Index {
+        var boundary = boundary
+        while boundary < text.endIndex, trailingClosers.contains(text[boundary]) {
+            boundary = text.index(after: boundary)
+        }
+        return boundary
+    }
+
+    private static func isAbbreviationPeriod(at index: String.Index, in text: String) -> Bool {
+        var tokenStart = index
+        while tokenStart > text.startIndex {
+            let previousIndex = text.index(before: tokenStart)
+            guard text[previousIndex].isLetter else {
+                break
+            }
+            tokenStart = previousIndex
+        }
+
+        let token = text[tokenStart..<index]
+        guard !token.isEmpty else {
             return false
         }
 
-        return isBoundaryFollowedBySeparator(boundary, in: text)
+        return periodAbbreviations.contains(token.lowercased())
     }
 
     private static func isBoundaryFollowedBySeparator(_ boundary: String.Index, in text: String) -> Bool {

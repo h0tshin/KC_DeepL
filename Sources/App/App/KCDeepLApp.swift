@@ -4,19 +4,29 @@ import KCDeepLCore
 @main
 struct KCDeepLApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @StateObject private var translationViewModel: TranslationViewModel
+    @StateObject private var liveTranslationViewModel: LiveTranslationViewModel
 
     init() {
         UserDefaults.standard.registerKCDeepLDefaults()
+        _translationViewModel = StateObject(wrappedValue: TranslationViewModel())
+        _liveTranslationViewModel = StateObject(wrappedValue: LiveTranslationViewModel())
     }
 
     var body: some Scene {
         WindowGroup("KC DeepL", id: "main") {
-            ContentView()
+            ContentView(
+                viewModel: translationViewModel,
+                liveTranslationViewModel: liveTranslationViewModel
+            )
                 .frame(minWidth: 980, minHeight: 600)
                 .background(AppCommandBridge())
+                .preferredColorScheme(.dark)
         }
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
+            CommandGroup(replacing: .newItem) {}
+
             CommandMenu("KC DeepL") {
                 Button("텍스트 번역") {
                     AppActionDispatcher.shared.perform(.textTranslation)
@@ -37,6 +47,7 @@ struct KCDeepLApp: App {
 
         Settings {
             SettingsView()
+                .preferredColorScheme(.dark)
         }
     }
 }

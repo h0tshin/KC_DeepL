@@ -78,7 +78,7 @@
 
 ## Phase 6. 배포 준비
 
-- Keychain 기반 API 키 저장
+- UserDefaults 기반 API 키 저장
 - 앱 아이콘과 번들 메타데이터 정리
 - Notarization 준비
 - 개인정보 안내 작성

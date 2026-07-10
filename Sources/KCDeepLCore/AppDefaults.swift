@@ -1,6 +1,8 @@
 import Foundation
 
 public enum PreferenceKeys {
+    public static let mainSourceLanguage = "kc.main.sourceLanguage"
+    public static let mainTargetLanguage = "kc.main.targetLanguage"
     public static let launchAtLogin = "kc.general.launchAtLogin"
     public static let quickAccessMode = "kc.general.quickAccessMode"
     public static let closeBehavior = "kc.general.closeBehavior"
@@ -35,11 +37,10 @@ public enum PreferenceKeys {
 public enum AppDefaults {
     public static let defaultProvider = LLMProvider.gemini
     public static let defaultModelID = "gemini-2.5-flash-lite"
-    public static let defaultGeminiAPIKey = "[REDACTED-REMOVED]"
+    public static let defaultGeminiAPIKey = ""
     public static let defaultLiveModelID = "gemini-3.5-live-translate-preview"
-    public static let defaultLiveListeningAPIKey = defaultGeminiAPIKey
+    public static let defaultLiveListeningAPIKey = ""
 
-    fileprivate static let legacyDefaultLiveListeningAPIKey = "[REDACTED-REMOVED]"
     fileprivate static let legacyLiveAudioDeviceSelections = [
         "1: BlackHole 16ch (16ch, 48000Hz)",
         "2: BlackHole 2ch (2ch, 48000Hz)",
@@ -51,6 +52,8 @@ public enum AppDefaults {
 public extension UserDefaults {
     func registerKCDeepLDefaults() {
         register(defaults: [
+            PreferenceKeys.mainSourceLanguage: LanguageOption.english.code,
+            PreferenceKeys.mainTargetLanguage: LanguageOption.korean.code,
             PreferenceKeys.launchAtLogin: true,
             PreferenceKeys.quickAccessMode: "floating",
             PreferenceKeys.closeBehavior: "background",
@@ -63,13 +66,10 @@ public extension UserDefaults {
             PreferenceKeys.historyEnabled: true,
             PreferenceKeys.provider: AppDefaults.defaultProvider.rawValue,
             PreferenceKeys.modelID: AppDefaults.defaultModelID,
-            PreferenceKeys.geminiAPIKey: AppDefaults.defaultGeminiAPIKey,
             PreferenceKeys.autoTranslate: true,
             PreferenceKeys.temperature: 0.2,
             PreferenceKeys.liveProvider: AppDefaults.defaultProvider.rawValue,
             PreferenceKeys.liveModelID: AppDefaults.defaultLiveModelID,
-            PreferenceKeys.liveListeningAPIKey: AppDefaults.defaultLiveListeningAPIKey,
-            PreferenceKeys.liveSpeakingAPIKey: AppDefaults.defaultGeminiAPIKey,
             PreferenceKeys.liveRemoteMicInput: "",
             PreferenceKeys.liveRemoteSpeakerOutput: "",
             PreferenceKeys.liveLocalMicInput: "",
@@ -86,10 +86,6 @@ public extension UserDefaults {
     }
 
     private func migrateLegacyLiveDefaults() {
-        if string(forKey: PreferenceKeys.liveListeningAPIKey) == AppDefaults.legacyDefaultLiveListeningAPIKey {
-            set(AppDefaults.defaultLiveListeningAPIKey, forKey: PreferenceKeys.liveListeningAPIKey)
-        }
-
         [
             PreferenceKeys.liveRemoteMicInput,
             PreferenceKeys.liveRemoteSpeakerOutput,

@@ -1,6 +1,6 @@
 import Foundation
 
-public struct TranslationHistoryItem: Codable, Equatable, Identifiable {
+public struct TranslationHistoryItem: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public let sourceText: String
     public let translatedText: String

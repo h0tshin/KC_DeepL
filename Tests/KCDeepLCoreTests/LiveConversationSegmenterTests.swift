@@ -51,4 +51,45 @@ final class LiveConversationSegmenterTests: XCTestCase {
         XCTAssertEqual(split.completedSegments, ["버전 4.0입니다"])
         XCTAssertEqual(split.remainder, "다음")
     }
+
+    func testDoesNotTreatImInsideGameAsSentenceEnding() {
+        let text = "그는 게임 아이템을 샀다"
+        let split = LiveConversationSegmenter.splitCompletedSegments(in: text)
+
+        XCTAssertTrue(split.completedSegments.isEmpty)
+        XCTAssertEqual(split.remainder, text)
+    }
+
+    func testKeepsTrailingImAsAnUnambiguousEnding() {
+        let split = LiveConversationSegmenter.splitCompletedSegments(in: "오늘 휴무임")
+
+        XCTAssertEqual(split.completedSegments, ["오늘 휴무임"])
+        XCTAssertEqual(split.remainder, "")
+    }
+
+    func testIncludesClosingQuoteInCompletedSegment() {
+        let split = LiveConversationSegmenter.splitCompletedSegments(
+            in: "그가 \"확인했습니다\" 다음"
+        )
+
+        XCTAssertEqual(split.completedSegments, ["그가 \"확인했습니다\""])
+        XCTAssertEqual(split.remainder, "다음")
+    }
+
+    func testDoesNotSplitCommonTitleAbbreviation() {
+        let split = LiveConversationSegmenter.splitCompletedSegments(
+            in: "Mr. Smith arrived. Next"
+        )
+
+        XCTAssertEqual(split.completedSegments, ["Mr. Smith arrived."])
+        XCTAssertEqual(split.remainder, "Next")
+    }
+
+    func testHandlesLargeUnpunctuatedTranscript() {
+        let text = String(repeating: "가", count: 50_000)
+        let split = LiveConversationSegmenter.splitCompletedSegments(in: text)
+
+        XCTAssertTrue(split.completedSegments.isEmpty)
+        XCTAssertEqual(split.remainder, text)
+    }
 }

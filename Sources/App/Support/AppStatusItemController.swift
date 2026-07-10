@@ -1,5 +1,6 @@
 import AppKit
 
+@MainActor
 final class AppStatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 

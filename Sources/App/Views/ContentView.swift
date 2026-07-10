@@ -3,22 +3,49 @@ import SwiftUI
 import KCDeepLCore
 
 struct ContentView: View {
-    @StateObject private var viewModel = TranslationViewModel()
+    @ObservedObject var viewModel: TranslationViewModel
+    @ObservedObject var liveTranslationViewModel: LiveTranslationViewModel
     @SceneStorage("kc.main.showTools") private var showTools = false
-    @State private var sourceLanguage = LanguageOption.english
-    @State private var targetLanguage = LanguageOption.korean
+    @AppStorage(PreferenceKeys.mainSourceLanguage) private var sourceLanguageCode = LanguageOption.english.code
+    @AppStorage(PreferenceKeys.mainTargetLanguage) private var targetLanguageCode = LanguageOption.korean.code
     @State private var selectedMode: TranslationMode = .text
     @State private var pasteBackTarget: PasteBackTarget?
 
     @AppStorage(PreferenceKeys.provider) private var providerRaw = AppDefaults.defaultProvider.rawValue
     @AppStorage(PreferenceKeys.modelID) private var modelID = AppDefaults.defaultModelID
-    @AppStorage(PreferenceKeys.geminiAPIKey) private var apiKey = AppDefaults.defaultGeminiAPIKey
+    @AppStorage(PreferenceKeys.geminiAPIKey) private var apiKey = ""
     @AppStorage(PreferenceKeys.temperature) private var temperature = 0.2
     @AppStorage(PreferenceKeys.historyEnabled) private var historyEnabled = true
     @AppStorage(PreferenceKeys.autoTranslate) private var autoTranslate = true
 
     private var provider: LLMProvider {
         LLMProvider(rawValue: providerRaw) ?? .gemini
+    }
+
+    private var sourceLanguage: LanguageOption {
+        get {
+            LanguageOption.sourceLanguages.first { $0.code == sourceLanguageCode } ?? .english
+        }
+        nonmutating set {
+            sourceLanguageCode = newValue.code
+        }
+    }
+
+    private var targetLanguage: LanguageOption {
+        get {
+            LanguageOption.targetLanguages.first { $0.code == targetLanguageCode } ?? .korean
+        }
+        nonmutating set {
+            targetLanguageCode = newValue.code
+        }
+    }
+
+    private var sourceLanguageBinding: Binding<LanguageOption> {
+        Binding(get: { sourceLanguage }, set: { sourceLanguage = $0 })
+    }
+
+    private var targetLanguageBinding: Binding<LanguageOption> {
+        Binding(get: { targetLanguage }, set: { targetLanguage = $0 })
     }
 
     var body: some View {
@@ -33,19 +60,24 @@ struct ContentView: View {
                         )
                     } else if selectedMode == .write {
                         LiveTranslationWorkspace(
-                            showTools: $showTools
+                            showTools: $showTools,
+                            viewModel: liveTranslationViewModel
                         )
                     } else {
                         LanguageBar(
-                            sourceLanguage: $sourceLanguage,
-                            targetLanguage: $targetLanguage,
+                            sourceLanguage: sourceLanguageBinding,
+                            targetLanguage: targetLanguageBinding,
                             showTools: $showTools,
                             onPaste: pasteClipboardIntoSource,
                             onSwap: {
+                                var sourceLanguage = sourceLanguage
+                                var targetLanguage = targetLanguage
                                 viewModel.swapLanguages(
                                     sourceLanguage: &sourceLanguage,
                                     targetLanguage: &targetLanguage
                                 )
+                                self.sourceLanguage = sourceLanguage
+                                self.targetLanguage = targetLanguage
                             }
                         )
 
@@ -94,7 +126,8 @@ struct ContentView: View {
         .toolbarBackground(AppTheme.titlebarBackground, for: .windowToolbar)
         .toolbarBackground(.visible, for: .windowToolbar)
         .onAppear {
-            viewModel.runStartupChecks()
+            viewModel.setHistoryEnabled(historyEnabled)
+            viewModel.runStartupChecks(apiKey: apiKey)
         }
         .onChange(of: viewModel.sourceText) { _, _ in
             if viewModel.sourceText.isEmpty {
@@ -115,8 +148,17 @@ struct ContentView: View {
         .onChange(of: modelID) { _, _ in
             scheduleAutoTranslation()
         }
+        .onChange(of: temperature) { _, _ in
+            scheduleAutoTranslation()
+        }
+        .onChange(of: autoTranslate) { _, _ in
+            scheduleAutoTranslation()
+        }
+        .onChange(of: historyEnabled) { _, enabled in
+            viewModel.setHistoryEnabled(enabled)
+        }
         .onChange(of: apiKey) { _, _ in
-            viewModel.runStartupChecks()
+            viewModel.runStartupChecks(apiKey: apiKey)
             scheduleAutoTranslation()
         }
         .onReceive(NotificationCenter.default.publisher(for: .kcDeepLPerformAction)) { notification in
@@ -224,7 +266,10 @@ struct ContentView: View {
             return
         }
 
-        viewModel.statusMessage = pasteBackTarget.paste(viewModel.translatedText)
+        let translatedText = viewModel.translatedText
+        Task { @MainActor in
+            viewModel.statusMessage = await pasteBackTarget.paste(translatedText)
+        }
     }
 }
 
@@ -317,6 +362,7 @@ private struct TitlebarMenuAccessory: NSViewRepresentable {
         }
     }
 
+    @MainActor
     final class Coordinator {
         private let identifier = NSUserInterfaceItemIdentifier("KCDeepLTitlebarMainMenuAccessory")
 
@@ -715,6 +761,7 @@ private struct RichTextEditor: NSViewRepresentable {
         ]
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         @Binding private var text: String
         @Binding private var attributedText: NSAttributedString
@@ -790,47 +837,6 @@ private enum MarkdownFormatting {
         }
 
         return stripped
-    }
-}
-
-private enum MarkdownStyler {
-    static func apply(to textView: NSTextView) {
-        let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
-        guard fullRange.length > 0 else {
-            return
-        }
-
-        let selectedRanges = textView.selectedRanges
-        let storage = textView.textStorage
-        storage?.beginEditing()
-        storage?.setAttributes(
-            [
-                .font: NSFont.systemFont(ofSize: 26),
-                .foregroundColor: NSColor.labelColor
-            ],
-            range: fullRange
-        )
-
-        apply(pattern: #"(?m)^#{1,3}\s+(.+)$"#, to: textView, font: .boldSystemFont(ofSize: 28))
-        apply(pattern: #"\*\*(.*?)\*\*"#, to: textView, font: .boldSystemFont(ofSize: 26))
-        apply(pattern: #"__(.*?)__"#, to: textView, font: .boldSystemFont(ofSize: 26))
-        apply(pattern: #"`([^`]+)`"#, to: textView, font: .monospacedSystemFont(ofSize: 24, weight: .regular))
-        storage?.endEditing()
-        textView.selectedRanges = selectedRanges
-    }
-
-    private static func apply(pattern: String, to textView: NSTextView, font: NSFont) {
-        guard let expression = try? NSRegularExpression(pattern: pattern) else {
-            return
-        }
-
-        let text = textView.string as NSString
-        let range = NSRange(location: 0, length: text.length)
-        let matches = expression.matches(in: textView.string, range: range)
-
-        for match in matches {
-            textView.textStorage?.addAttribute(.font, value: font, range: match.range)
-        }
     }
 }
 

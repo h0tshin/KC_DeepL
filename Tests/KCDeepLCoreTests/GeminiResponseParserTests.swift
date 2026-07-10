@@ -37,4 +37,52 @@ final class GeminiResponseParserTests: XCTestCase {
             XCTAssertEqual(error as? TranslationClientError, .emptyResponse)
         }
     }
+
+    func testRejectsTruncatedCandidateEvenWhenPartialTextExists() {
+        let json = """
+        {
+          "candidates": [
+            {
+              "content": { "parts": [{ "text": "부분 번역" }] },
+              "finishReason": "MAX_TOKENS"
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try GeminiResponseParser.extractText(from: json)) { error in
+            XCTAssertEqual(error as? TranslationClientError, .responseTruncated)
+        }
+    }
+
+    func testRejectsCandidateBlockedForSafety() {
+        let json = """
+        {
+          "candidates": [
+            { "finishReason": "SAFETY" }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try GeminiResponseParser.extractText(from: json)) { error in
+            XCTAssertEqual(error as? TranslationClientError, .responseBlocked("SAFETY"))
+        }
+    }
+
+    func testRejectsPromptFeedbackBlockReason() {
+        let json = """
+        {
+          "promptFeedback": {
+            "blockReason": "PROHIBITED_CONTENT"
+          }
+        }
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try GeminiResponseParser.extractText(from: json)) { error in
+            XCTAssertEqual(
+                error as? TranslationClientError,
+                .responseBlocked("PROHIBITED_CONTENT")
+            )
+        }
+    }
 }

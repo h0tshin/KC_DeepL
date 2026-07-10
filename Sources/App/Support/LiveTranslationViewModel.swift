@@ -56,14 +56,32 @@ final class LiveTranslationViewModel: ObservableObject {
     @Published private(set) var statusMessage = "Live 번역 준비 중"
     @Published var listenerVolume: Double {
         didSet {
-            listenerVolume = min(1.0, max(0.0, listenerVolume))
-            UserDefaults.standard.set(listenerVolume, forKey: PreferenceKeys.liveListenerVolume)
+            let clamped = min(1.0, max(0.0, listenerVolume))
+            guard listenerVolume == clamped else {
+                listenerVolume = clamped
+                return
+            }
             audioCoordinator.setListenerVolume(listenerVolume)
+            scheduleListenerVolumePersistence()
         }
     }
 
-    private let store: LiveConversationStoring
+    private let repository: LiveConversationRepository
     private let audioCoordinator: LiveTranslationAudioCoordinator
+    private var loadTask: Task<Void, Never>?
+    private var persistenceTask: Task<Void, Never>?
+    private var volumePersistenceTask: Task<Void, Never>?
+    private var persistenceGeneration: UInt = 0
+    private var volumePersistenceGeneration: UInt = 0
+    private var hasLocalChanges = false
+    private var persistenceNeedsFlush = false
+    private var provisionalConversationID: LiveConversation.ID?
+    private var incomingStartTask: Task<Void, Never>?
+    private var outgoingStartTask: Task<Void, Never>?
+    private var incomingStartGeneration: UInt = 0
+    private var outgoingStartGeneration: UInt = 0
+    private var wantsIncomingTranslation = false
+    private var wantsOutgoingTranslation = false
     private var hasStartedBypass = false
     private var incomingAssembler = LiveTranscriptTurnAssembler(speaker: .other)
     private var outgoingAssembler = LiveTranscriptTurnAssembler(speaker: .me)
@@ -86,15 +104,28 @@ final class LiveTranslationViewModel: ObservableObject {
         store: LiveConversationStoring = FileLiveConversationStore(),
         audioCoordinator: LiveTranslationAudioCoordinator? = nil
     ) {
-        self.store = store
+        self.repository = LiveConversationRepository(store: store)
         self.audioCoordinator = audioCoordinator ?? LiveTranslationAudioCoordinator()
         self.listenerVolume = UserDefaults.standard.object(forKey: PreferenceKeys.liveListenerVolume) as? Double ?? 1.0
+        let provisionalConversation = LiveConversation(title: "Teams 회의")
+        self.conversations = [provisionalConversation]
+        self.selectedConversationID = provisionalConversation.id
+        self.provisionalConversationID = provisionalConversation.id
         configureCoordinator()
         updateTranscriptRoutes(settings: settingsSnapshot())
         loadConversations()
+        PendingPersistenceRegistry.shared.registerPreparation { [weak self] in
+            self?.stopLiveActivity()
+        }
+        PendingPersistenceRegistry.shared.register { [weak self] in
+            await self?.flushPendingPersistence()
+        }
     }
 
     deinit {
+        loadTask?.cancel()
+        incomingStartTask?.cancel()
+        outgoingStartTask?.cancel()
         Task { @MainActor [audioCoordinator] in
             audioCoordinator.stopAll()
         }
@@ -120,7 +151,12 @@ final class LiveTranslationViewModel: ObservableObject {
         startDefaultBypass()
     }
 
+    func disappear() {
+        stopLiveActivity()
+    }
+
     func newConversation() {
+        discardUnusedProvisionalConversation()
         let nextIndex = conversations.count + 1
         let conversation = LiveConversation(title: "새 대화 \(nextIndex)")
         conversations.insert(conversation, at: 0)
@@ -128,6 +164,31 @@ final class LiveTranslationViewModel: ObservableObject {
         resetDrafts()
         resetOutgoingKaraoke(clearHighlights: true)
         persist(status: "새 대화를 만들었습니다.")
+    }
+
+    private func stopLiveActivity() {
+        if !incomingDraft.isEmpty {
+            finishDraft(direction: .incoming)
+        }
+        if !outgoingDraft.isEmpty {
+            finishDraft(direction: .outgoing)
+        }
+
+        hasStartedBypass = false
+        wantsIncomingTranslation = false
+        wantsOutgoingTranslation = false
+        shouldResumeIncomingAfterOutgoing = false
+        incomingStartTask?.cancel()
+        incomingStartTask = nil
+        outgoingStartTask?.cancel()
+        outgoingStartTask = nil
+        incomingStartGeneration &+= 1
+        outgoingStartGeneration &+= 1
+        isOnAir = false
+        isMicrophoneTranslationEnabled = false
+        audioCoordinator.stopAll()
+        resetOutgoingKaraoke(clearHighlights: false)
+        statusMessage = "Live 번역 대기 중"
     }
 
     func selectConversation(_ id: LiveConversation.ID?) {
@@ -145,15 +206,17 @@ final class LiveTranslationViewModel: ObservableObject {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         conversations[index].title = trimmed.isEmpty ? "새 대화" : trimmed
         conversations[index].updatedAt = Date()
-        persist(status: "대화방 이름을 저장했습니다.")
+        persist(status: "대화방 이름을 저장했습니다.", delayNanoseconds: 350_000_000)
     }
 
     func setOnAir(_ enabled: Bool) {
+        wantsIncomingTranslation = enabled
         if enabled {
-            Task {
-                await startIncomingTranslation()
-            }
+            beginIncomingTranslation()
         } else {
+            incomingStartTask?.cancel()
+            incomingStartTask = nil
+            incomingStartGeneration &+= 1
             isOnAir = false
             shouldResumeIncomingAfterOutgoing = false
             audioCoordinator.stopIncomingTranslation()
@@ -161,18 +224,28 @@ final class LiveTranslationViewModel: ObservableObject {
         }
     }
 
+    func toggleIncomingTranslation() {
+        setOnAir(!wantsIncomingTranslation)
+    }
+
     func setMicrophoneTranslationEnabled(_ enabled: Bool) {
+        wantsOutgoingTranslation = enabled
         if enabled {
-            Task {
-                await startOutgoingTranslation()
-            }
+            beginOutgoingTranslation()
         } else {
+            outgoingStartTask?.cancel()
+            outgoingStartTask = nil
+            outgoingStartGeneration &+= 1
             isMicrophoneTranslationEnabled = false
             audioCoordinator.stopOutgoingTranslation()
             resetOutgoingKaraoke(clearHighlights: false)
             startMicBypass()
             resumeIncomingAfterOutgoingIfNeeded()
         }
+    }
+
+    func toggleOutgoingTranslation() {
+        setMicrophoneTranslationEnabled(!wantsOutgoingTranslation)
     }
 
     func refreshBypassRoutes() {
@@ -204,18 +277,79 @@ final class LiveTranslationViewModel: ObservableObject {
     }
 
     private func loadConversations() {
-        do {
-            let snapshot = try store.load()
-            conversations = snapshot.conversations.isEmpty
-                ? [LiveConversation(title: "Teams 회의")]
-                : snapshot.conversations
-            selectedConversationID = snapshot.selectedConversationID ?? conversations.first?.id
-            persist(status: "Live 번역 준비 완료")
-        } catch {
-            conversations = [LiveConversation(title: "Teams 회의")]
-            selectedConversationID = conversations.first?.id
-            statusMessage = "Live 대화 기록을 불러오지 못했습니다: \(error.localizedDescription)"
+        loadTask?.cancel()
+        loadTask = Task { @MainActor [weak self, repository] in
+            do {
+                let snapshot = try await repository.load()
+                guard let self,
+                      !Task.isCancelled
+                else {
+                    return
+                }
+
+                if self.hasLocalChanges {
+                    self.discardUnusedProvisionalConversation()
+                    let localIDs = Set(self.conversations.map(\.id))
+                    self.conversations.append(
+                        contentsOf: snapshot.conversations.filter { !localIDs.contains($0.id) }
+                    )
+                    if self.selectedConversationID == nil {
+                        self.selectedConversationID = snapshot.selectedConversationID ?? self.conversations.first?.id
+                    }
+                    self.provisionalConversationID = nil
+                    self.persist(status: "Live 번역 준비 완료")
+                } else if snapshot.conversations.isEmpty {
+                    if self.conversations.isEmpty {
+                        self.conversations = [LiveConversation(title: "Teams 회의")]
+                    }
+                    self.selectedConversationID = self.conversations.first?.id
+                    self.provisionalConversationID = nil
+                    self.persist(status: "Live 번역 준비 완료")
+                } else {
+                    self.conversations = snapshot.conversations
+                    self.selectedConversationID = snapshot.selectedConversationID ?? self.conversations.first?.id
+                    self.provisionalConversationID = nil
+                    self.statusMessage = "Live 번역 준비 완료"
+                }
+                self.loadTask = nil
+            } catch {
+                guard let self,
+                      !Task.isCancelled
+                else {
+                    return
+                }
+                if self.hasLocalChanges {
+                    self.statusMessage = "기존 Live 대화 기록을 불러오지 못해 현재 대화만 유지합니다: \(error.localizedDescription)"
+                    self.loadTask = nil
+                    return
+                }
+                if self.conversations.isEmpty {
+                    self.conversations = [LiveConversation(title: "Teams 회의")]
+                }
+                self.selectedConversationID = self.conversations.first?.id
+                self.provisionalConversationID = nil
+                self.statusMessage = "Live 대화 기록을 불러오지 못했습니다: \(error.localizedDescription)"
+                self.loadTask = nil
+            }
         }
+    }
+
+    private func discardUnusedProvisionalConversation() {
+        guard let provisionalConversationID,
+              let index = conversations.firstIndex(where: { $0.id == provisionalConversationID })
+        else {
+            self.provisionalConversationID = nil
+            return
+        }
+
+        let conversation = conversations[index]
+        if conversation.title == "Teams 회의", conversation.messages.isEmpty {
+            conversations.remove(at: index)
+            if selectedConversationID == provisionalConversationID {
+                selectedConversationID = nil
+            }
+        }
+        self.provisionalConversationID = nil
     }
 
     private func startDefaultBypass() {
@@ -247,10 +381,37 @@ final class LiveTranslationViewModel: ObservableObject {
         }
     }
 
-    private func startIncomingTranslation() async {
+    private func beginIncomingTranslation() {
+        incomingStartTask?.cancel()
+        incomingStartGeneration &+= 1
+        let generation = incomingStartGeneration
+        incomingStartTask = Task { @MainActor [weak self] in
+            await self?.startIncomingTranslation(generation: generation)
+        }
+    }
+
+    private func beginOutgoingTranslation() {
+        outgoingStartTask?.cancel()
+        outgoingStartGeneration &+= 1
+        let generation = outgoingStartGeneration
+        outgoingStartTask = Task { @MainActor [weak self] in
+            await self?.startOutgoingTranslation(generation: generation)
+        }
+    }
+
+    private func startIncomingTranslation(generation: UInt) async {
+        guard wantsIncomingTranslation,
+              generation == incomingStartGeneration,
+              !Task.isCancelled
+        else {
+            return
+        }
+
         let settings = settingsSnapshot()
         guard !settings.listeningCredential.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             statusMessage = "수화용 Gemini Live API 키를 설정해 주세요."
+            wantsIncomingTranslation = false
+            incomingStartTask = nil
             return
         }
 
@@ -259,22 +420,47 @@ final class LiveTranslationViewModel: ObservableObject {
             updateTranscriptRoutes(settings: settings)
             resetAssembler(for: .incoming)
             try await audioCoordinator.startIncomingTranslation(settings: settings)
+            guard wantsIncomingTranslation,
+                  generation == incomingStartGeneration,
+                  !Task.isCancelled
+            else {
+                return
+            }
             isOnAir = true
             statusMessage = "On Air"
+            incomingStartTask = nil
+        } catch is CancellationError {
+            return
         } catch {
+            guard wantsIncomingTranslation,
+                  generation == incomingStartGeneration
+            else {
+                return
+            }
+            wantsIncomingTranslation = false
             isOnAir = false
             let failureMessage = "On Air 실패: \(Self.userFacingErrorMessage(error))"
             startSpeakerBypass(
                 statusOnSuccess: "\(failureMessage) · 스피커 By Pass로 복귀",
                 failurePrefix: "\(failureMessage) · 스피커 By Pass 실패"
             )
+            incomingStartTask = nil
         }
     }
 
-    private func startOutgoingTranslation() async {
+    private func startOutgoingTranslation(generation: UInt) async {
+        guard wantsOutgoingTranslation,
+              generation == outgoingStartGeneration,
+              !Task.isCancelled
+        else {
+            return
+        }
+
         let settings = settingsSnapshot()
         guard !settings.speakingCredential.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             statusMessage = "발화용 Gemini Live API 키를 설정해 주세요."
+            wantsOutgoingTranslation = false
+            outgoingStartTask = nil
             return
         }
 
@@ -285,9 +471,24 @@ final class LiveTranslationViewModel: ObservableObject {
             resetOutgoingKaraoke(clearHighlights: false)
             pauseIncomingForOutgoingIfNeeded(settings: settings)
             try await audioCoordinator.startOutgoingTranslation(settings: settings)
+            guard wantsOutgoingTranslation,
+                  generation == outgoingStartGeneration,
+                  !Task.isCancelled
+            else {
+                return
+            }
             isMicrophoneTranslationEnabled = true
             statusMessage = "마이크 통역 중"
+            outgoingStartTask = nil
+        } catch is CancellationError {
+            return
         } catch {
+            guard wantsOutgoingTranslation,
+                  generation == outgoingStartGeneration
+            else {
+                return
+            }
+            wantsOutgoingTranslation = false
             isMicrophoneTranslationEnabled = false
             let failureMessage = "마이크 통역 실패: \(Self.userFacingErrorMessage(error))"
             startMicBypass(
@@ -295,6 +496,7 @@ final class LiveTranslationViewModel: ObservableObject {
                 failurePrefix: "\(failureMessage) · 마이크 By Pass 실패"
             )
             resumeIncomingAfterOutgoingIfNeeded()
+            outgoingStartTask = nil
         }
     }
 
@@ -334,6 +536,9 @@ final class LiveTranslationViewModel: ObservableObject {
             return
         }
 
+        incomingStartTask?.cancel()
+        incomingStartTask = nil
+        incomingStartGeneration &+= 1
         audioCoordinator.stopIncomingTranslation()
         isOnAir = false
         shouldResumeIncomingAfterOutgoing = true
@@ -345,9 +550,10 @@ final class LiveTranslationViewModel: ObservableObject {
         }
 
         shouldResumeIncomingAfterOutgoing = false
-        Task {
-            await startIncomingTranslation()
+        guard wantsIncomingTranslation else {
+            return
         }
+        beginIncomingTranslation()
     }
 
     private func normalizedLanguageCode(_ code: String, fallback: String) -> String {
@@ -401,9 +607,43 @@ final class LiveTranslationViewModel: ObservableObject {
                 resetOutgoingKaraoke(clearHighlights: false)
             }
         case .error(let message):
-            statusMessage = "Live API 오류: \(message)"
+            handleConnectionFailure(message, direction: direction)
         case .setupComplete, .audio:
             break
+        }
+    }
+
+    private func handleConnectionFailure(
+        _ message: String,
+        direction: LiveTranslationAudioDirection
+    ) {
+        let failureMessage = "Live API 오류: \(message)"
+        switch direction {
+        case .incoming:
+            wantsIncomingTranslation = false
+            incomingStartTask?.cancel()
+            incomingStartTask = nil
+            incomingStartGeneration &+= 1
+            isOnAir = false
+            shouldResumeIncomingAfterOutgoing = false
+            audioCoordinator.stopIncomingTranslation()
+            startSpeakerBypass(
+                statusOnSuccess: "\(failureMessage) · 스피커 By Pass로 복귀",
+                failurePrefix: "\(failureMessage) · 스피커 By Pass 실패"
+            )
+        case .outgoing:
+            wantsOutgoingTranslation = false
+            outgoingStartTask?.cancel()
+            outgoingStartTask = nil
+            outgoingStartGeneration &+= 1
+            isMicrophoneTranslationEnabled = false
+            audioCoordinator.stopOutgoingTranslation()
+            resetOutgoingKaraoke(clearHighlights: false)
+            startMicBypass(
+                statusOnSuccess: "\(failureMessage) · 마이크 By Pass로 복귀",
+                failurePrefix: "\(failureMessage) · 마이크 By Pass 실패"
+            )
+            resumeIncomingAfterOutgoingIfNeeded()
         }
     }
 
@@ -520,7 +760,7 @@ final class LiveTranslationViewModel: ObservableObject {
         }
 
         conversations[conversationIndex].updatedAt = Date()
-        persist(status: "대화를 기록했습니다.")
+        persist(status: "대화를 기록했습니다.", delayNanoseconds: 200_000_000)
     }
 
     private func updateKaraokeTrackingIfNeeded(for message: LiveConversationMessage) {
@@ -837,17 +1077,124 @@ final class LiveTranslationViewModel: ObservableObject {
         }
     }
 
-    private func persist(status: String) {
-        do {
-            try store.save(
-                LiveConversationSnapshot(
-                    conversations: conversations,
-                    selectedConversationID: selectedConversationID
-                )
-            )
-            statusMessage = status
-        } catch {
-            statusMessage = "Live 대화 기록 저장 실패: \(error.localizedDescription)"
+    private func persist(status _: String, delayNanoseconds: UInt64 = 120_000_000) {
+        hasLocalChanges = true
+        persistenceNeedsFlush = true
+        persistenceGeneration &+= 1
+        let generation = persistenceGeneration
+        let snapshot = LiveConversationSnapshot(
+            conversations: conversations,
+            selectedConversationID: selectedConversationID
+        )
+
+        persistenceTask?.cancel()
+        persistenceTask = Task { @MainActor [weak self, repository] in
+            do {
+                if delayNanoseconds > 0 {
+                    try await Task.sleep(nanoseconds: delayNanoseconds)
+                }
+                try Task.checkCancellation()
+                try await repository.save(snapshot)
+                guard let self,
+                      !Task.isCancelled,
+                      self.persistenceGeneration == generation
+                else {
+                    return
+                }
+                self.persistenceNeedsFlush = false
+                self.persistenceTask = nil
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self,
+                      self.persistenceGeneration == generation
+                else {
+                    return
+                }
+                self.statusMessage = "Live 대화 기록 저장 실패: \(error.localizedDescription)"
+                self.persistenceTask = nil
+            }
         }
+    }
+
+    private func scheduleListenerVolumePersistence() {
+        let volume = listenerVolume
+        volumePersistenceGeneration &+= 1
+        let generation = volumePersistenceGeneration
+        volumePersistenceTask?.cancel()
+        volumePersistenceTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+                try Task.checkCancellation()
+                UserDefaults.standard.set(volume, forKey: PreferenceKeys.liveListenerVolume)
+                guard let self,
+                      self.volumePersistenceGeneration == generation
+                else {
+                    return
+                }
+                self.volumePersistenceTask = nil
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func flushPendingPersistence() async {
+        if let loadTask {
+            await loadTask.value
+        }
+
+        while persistenceNeedsFlush {
+            let generation = persistenceGeneration
+            let pendingTask = persistenceTask
+            pendingTask?.cancel()
+            if let pendingTask {
+                await pendingTask.value
+            }
+
+            let snapshot = LiveConversationSnapshot(
+                conversations: conversations,
+                selectedConversationID: selectedConversationID
+            )
+            do {
+                try await repository.save(snapshot)
+            } catch {
+                statusMessage = "Live 대화 기록 저장 실패: \(error.localizedDescription)"
+                return
+            }
+
+            guard persistenceGeneration == generation else {
+                continue
+            }
+            persistenceNeedsFlush = false
+            persistenceTask = nil
+        }
+
+        while let pendingTask = volumePersistenceTask {
+            let generation = volumePersistenceGeneration
+            pendingTask.cancel()
+            await pendingTask.value
+            UserDefaults.standard.set(listenerVolume, forKey: PreferenceKeys.liveListenerVolume)
+            guard volumePersistenceGeneration == generation else {
+                continue
+            }
+            volumePersistenceTask = nil
+        }
+    }
+}
+
+private actor LiveConversationRepository {
+    private let store: any LiveConversationStoring
+
+    init(store: any LiveConversationStoring) {
+        self.store = store
+    }
+
+    func load() throws -> LiveConversationSnapshot {
+        try store.load()
+    }
+
+    func save(_ snapshot: LiveConversationSnapshot) throws {
+        try store.save(snapshot)
     }
 }

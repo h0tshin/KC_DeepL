@@ -24,6 +24,10 @@ let package = Package(
         .testTarget(
             name: "KCDeepLCoreTests",
             dependencies: ["KCDeepLCore"]
+        ),
+        .testTarget(
+            name: "KCDeepLAppTests",
+            dependencies: ["KCDeepL"]
         )
     ]
 )

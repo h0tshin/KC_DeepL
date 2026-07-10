@@ -1,11 +1,11 @@
 import Foundation
 
-public protocol TranslationHistoryStoring {
+public protocol TranslationHistoryStoring: Sendable {
     func load() throws -> [TranslationHistoryItem]
     func save(_ items: [TranslationHistoryItem]) throws
 }
 
-public final class FileTranslationHistoryStore: TranslationHistoryStoring {
+public final class FileTranslationHistoryStore: TranslationHistoryStoring, @unchecked Sendable {
     private let fileURL: URL
     private let fileManager: FileManager
 

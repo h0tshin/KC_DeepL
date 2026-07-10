@@ -174,4 +174,59 @@ final class LiveTranscriptTurnAssemblerTests: XCTestCase {
         XCTAssertEqual(updatedMessage.originalText, "이거 뭐야?")
         XCTAssertEqual(updatedMessage.translatedText, "What is this? Please check it.")
     }
+
+    func testKeepsLaterSegmentAlignedAfterCombinedTranslation() {
+        var assembler = LiveTranscriptTurnAssembler(speaker: .me)
+
+        XCTAssertTrue(assembler.update(field: .original, text: "A. B.").isEmpty)
+
+        let firstChanges = assembler.update(field: .translation, text: "X Y.")
+        guard firstChanges.count == 1 else {
+            return XCTFail("Expected one first-pair change, got \(firstChanges.count)")
+        }
+        guard case .append(let firstMessage) = firstChanges[0] else {
+            return XCTFail("Expected the first paired message")
+        }
+        XCTAssertEqual(firstMessage.originalText, "A.")
+        XCTAssertEqual(firstMessage.translatedText, "X Y.")
+
+        let settlementChanges = assembler.update(field: .original, text: "A. B. C.")
+        guard settlementChanges.count == 1 else {
+            return XCTFail("Expected one settlement change, got \(settlementChanges.count)")
+        }
+        guard case .update(let settledMessage) = settlementChanges[0] else {
+            return XCTFail("Expected the unmatched source segment to settle into the previous message")
+        }
+        XCTAssertEqual(settledMessage.id, firstMessage.id)
+        XCTAssertEqual(settledMessage.originalText, "A. B.")
+        XCTAssertEqual(settledMessage.translatedText, "X Y.")
+
+        let nextChanges = assembler.update(field: .translation, text: "X Y. Z.")
+        guard nextChanges.count == 1 else {
+            return XCTFail("Expected one later-pair change, got \(nextChanges.count)")
+        }
+        guard case .append(let nextMessage) = nextChanges[0] else {
+            return XCTFail("Expected the later source and translation to remain paired")
+        }
+        XCTAssertEqual(nextMessage.originalText, "C.")
+        XCTAssertEqual(nextMessage.translatedText, "Z.")
+    }
+
+    func testReplacesLikelyRecognitionRevisionInsteadOfDuplicatingIt() {
+        var assembler = LiveTranscriptTurnAssembler(speaker: .me)
+
+        XCTAssertTrue(assembler.update(field: .original, text: "I scream").isEmpty)
+        XCTAssertTrue(assembler.update(field: .original, text: "ice cream").isEmpty)
+
+        XCTAssertEqual(assembler.draft.originalText, "ice cream")
+    }
+
+    func testMergesOverlappingIncrementalTranscriptChunks() {
+        var assembler = LiveTranscriptTurnAssembler(speaker: .me)
+
+        XCTAssertTrue(assembler.update(field: .original, text: "hello wor").isEmpty)
+        XCTAssertTrue(assembler.update(field: .original, text: "world").isEmpty)
+
+        XCTAssertEqual(assembler.draft.originalText, "hello world")
+    }
 }

@@ -1,6 +1,6 @@
 import Foundation
 
-public enum LLMProvider: String, CaseIterable, Codable, Identifiable {
+public enum LLMProvider: String, CaseIterable, Codable, Identifiable, Sendable {
     case gemini
     case chatGPT
     case claude
@@ -47,7 +47,7 @@ public enum LLMProvider: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-public struct LLMModel: Codable, Hashable, Identifiable {
+public struct LLMModel: Codable, Hashable, Identifiable, Sendable {
     public let id: String
     public let displayName: String
     public let provider: LLMProvider

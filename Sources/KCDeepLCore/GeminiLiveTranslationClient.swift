@@ -5,6 +5,8 @@ public enum GeminiLiveTranslationError: Error, Equatable, LocalizedError {
     case invalidEndpoint
     case socketMessageEncodingFailed
     case socketMessageDecodingFailed
+    case setupTimedOut
+    case eventBufferOverflow
     case serverError(String)
 
     public var errorDescription: String? {
@@ -17,19 +19,23 @@ public enum GeminiLiveTranslationError: Error, Equatable, LocalizedError {
             "Gemini Live API 메시지를 만들 수 없습니다."
         case .socketMessageDecodingFailed:
             "Gemini Live API 응답을 해석할 수 없습니다."
+        case .setupTimedOut:
+            "Gemini Live API 초기 연결 시간을 초과했습니다."
+        case .eventBufferOverflow:
+            "Gemini Live API 응답 처리가 늦어 연결을 안전하게 종료했습니다."
         case .serverError(let message):
             "Gemini Live API 오류: \(message)"
         }
     }
 }
 
-public enum GeminiLiveCredential: Equatable {
+public enum GeminiLiveCredential: Equatable, Sendable {
     case apiKey(String)
     case ephemeralToken(String)
 
     public init(rawValue: String) {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("AQ.") {
+        if trimmed.hasPrefix("AQ.") || trimmed.hasPrefix("auth_tokens/") {
             self = .ephemeralToken(trimmed)
         } else {
             self = .apiKey(trimmed)
@@ -44,7 +50,7 @@ public enum GeminiLiveCredential: Equatable {
     }
 }
 
-public struct GeminiLiveTranslationConfiguration: Equatable {
+public struct GeminiLiveTranslationConfiguration: Equatable, Sendable {
     public let modelID: String
     public let credential: GeminiLiveCredential
     public let targetLanguageCode: String
@@ -63,7 +69,7 @@ public struct GeminiLiveTranslationConfiguration: Equatable {
     }
 }
 
-public enum GeminiLiveTranslationEvent: Equatable {
+public enum GeminiLiveTranslationEvent: Equatable, Sendable {
     case setupComplete
     case inputTranscript(text: String, languageCode: String?)
     case outputTranscript(text: String, languageCode: String?)
@@ -73,17 +79,21 @@ public enum GeminiLiveTranslationEvent: Equatable {
     case error(String)
 }
 
-public protocol GeminiLiveTranslationConnecting {
+public protocol GeminiLiveTranslationConnecting: Sendable {
     func connect(configuration: GeminiLiveTranslationConfiguration) async throws -> GeminiLiveTranslationSession
 }
 
-public final class GeminiLiveTranslationWebSocketClient: GeminiLiveTranslationConnecting {
+public final class GeminiLiveTranslationWebSocketClient: GeminiLiveTranslationConnecting, @unchecked Sendable {
     private let urlSession: URLSession
-    private let encoder: JSONEncoder
+    private let setupTimeoutNanoseconds: UInt64
 
-    public init(urlSession: URLSession = .shared) {
+    public init(
+        urlSession: URLSession = .shared,
+        setupTimeout: TimeInterval = 10.0
+    ) {
         self.urlSession = urlSession
-        self.encoder = JSONEncoder()
+        let clampedTimeout = min(300.0, max(0.1, setupTimeout))
+        self.setupTimeoutNanoseconds = UInt64(clampedTimeout * 1_000_000_000)
     }
 
     public func connect(configuration: GeminiLiveTranslationConfiguration) async throws -> GeminiLiveTranslationSession {
@@ -96,12 +106,53 @@ public final class GeminiLiveTranslationWebSocketClient: GeminiLiveTranslationCo
         let session = GeminiLiveTranslationSession(
             task: task,
             configuration: configuration,
-            encoder: encoder
+            encoder: JSONEncoder()
         )
         task.resume()
-        try await session.sendSetupAndWaitForCompletion()
-        session.startReceiving()
-        return session
+        do {
+            try await waitForSetupCompletion(session)
+            try Task.checkCancellation()
+            session.startReceiving()
+            return session
+        } catch {
+            session.close()
+            throw error
+        }
+    }
+
+    private func waitForSetupCompletion(_ session: GeminiLiveTranslationSession) async throws {
+        enum SetupRaceResult {
+            case completed
+            case timedOut
+        }
+
+        let timeoutNanoseconds = setupTimeoutNanoseconds
+        try await withThrowingTaskGroup(of: SetupRaceResult.self) { group in
+            group.addTask {
+                try await session.sendSetupAndWaitForCompletion()
+                return .completed
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                return .timedOut
+            }
+
+            do {
+                guard let result = try await group.next() else {
+                    throw GeminiLiveTranslationError.setupTimedOut
+                }
+                group.cancelAll()
+
+                if case .timedOut = result {
+                    session.close()
+                    throw GeminiLiveTranslationError.setupTimedOut
+                }
+            } catch {
+                group.cancelAll()
+                session.close()
+                throw error
+            }
+        }
     }
 
     private func endpointURL(for credential: GeminiLiveCredential) throws -> URL {
@@ -126,14 +177,68 @@ public final class GeminiLiveTranslationWebSocketClient: GeminiLiveTranslationCo
     }
 }
 
-public final class GeminiLiveTranslationSession {
+final class GeminiLiveEventChannel: @unchecked Sendable {
+    let stream: AsyncThrowingStream<GeminiLiveTranslationEvent, Error>
+
+    private let continuation: AsyncThrowingStream<GeminiLiveTranslationEvent, Error>.Continuation
+
+    init(
+        capacity: Int,
+        onTermination: @escaping @Sendable () -> Void = {}
+    ) {
+        var capturedContinuation: AsyncThrowingStream<GeminiLiveTranslationEvent, Error>.Continuation?
+        let stream = AsyncThrowingStream<GeminiLiveTranslationEvent, Error>(
+            bufferingPolicy: .bufferingOldest(max(1, capacity))
+        ) { continuation in
+            capturedContinuation = continuation
+        }
+        let continuation = capturedContinuation!
+        continuation.onTermination = { @Sendable _ in
+            onTermination()
+        }
+
+        self.stream = stream
+        self.continuation = continuation
+    }
+
+    /// A full buffer is terminal rather than lossy. In particular, a control
+    /// event such as interruption or turn-complete is never silently discarded.
+    func yield(_ event: GeminiLiveTranslationEvent) throws {
+        switch continuation.yield(event) {
+        case .enqueued:
+            return
+        case .dropped:
+            continuation.finish(throwing: GeminiLiveTranslationError.eventBufferOverflow)
+            throw GeminiLiveTranslationError.eventBufferOverflow
+        case .terminated:
+            throw CancellationError()
+        @unknown default:
+            continuation.finish(throwing: GeminiLiveTranslationError.eventBufferOverflow)
+            throw GeminiLiveTranslationError.eventBufferOverflow
+        }
+    }
+
+    func finish() {
+        continuation.finish()
+    }
+
+    func finish(throwing error: Error) {
+        continuation.finish(throwing: error)
+    }
+}
+
+public final class GeminiLiveTranslationSession: @unchecked Sendable {
     public let events: AsyncThrowingStream<GeminiLiveTranslationEvent, Error>
+
+    private static let eventBufferCapacity = 128
 
     private let task: URLSessionWebSocketTask
     private let configuration: GeminiLiveTranslationConfiguration
     private let encoder: JSONEncoder
-    private let continuation: AsyncThrowingStream<GeminiLiveTranslationEvent, Error>.Continuation
+    private let eventChannel: GeminiLiveEventChannel
+    private let stateLock = NSLock()
     private var receiveTask: Task<Void, Never>?
+    private var isClosed = false
 
     init(
         task: URLSessionWebSocketTask,
@@ -144,9 +249,14 @@ public final class GeminiLiveTranslationSession {
         self.configuration = configuration
         self.encoder = encoder
 
-        let streamPair = Self.makeEventStream()
-        self.events = streamPair.stream
-        self.continuation = streamPair.continuation
+        let eventChannel = GeminiLiveEventChannel(
+            capacity: Self.eventBufferCapacity,
+            onTermination: { [task] in
+                task.cancel(with: .goingAway, reason: nil)
+            }
+        )
+        self.eventChannel = eventChannel
+        self.events = eventChannel.stream
     }
 
     deinit {
@@ -166,7 +276,7 @@ public final class GeminiLiveTranslationSession {
     }
 
     public func sendAudioChunk(_ data: Data) async throws {
-        let message = GeminiLiveTranslationMessageFactory.audioMessageData(data, encoder: encoder)
+        let message = try GeminiLiveTranslationMessageFactory.audioMessageData(data, encoder: encoder)
         guard let json = String(data: message, encoding: .utf8) else {
             throw GeminiLiveTranslationError.socketMessageEncodingFailed
         }
@@ -174,7 +284,7 @@ public final class GeminiLiveTranslationSession {
     }
 
     public func sendAudioStreamEnd() async throws {
-        let message = GeminiLiveTranslationMessageFactory.audioStreamEndMessageData(encoder: encoder)
+        let message = try GeminiLiveTranslationMessageFactory.audioStreamEndMessageData(encoder: encoder)
         guard let json = String(data: message, encoding: .utf8) else {
             throw GeminiLiveTranslationError.socketMessageEncodingFailed
         }
@@ -182,92 +292,87 @@ public final class GeminiLiveTranslationSession {
     }
 
     public func close() {
-        receiveTask?.cancel()
+        stateLock.lock()
+        guard !isClosed else {
+            stateLock.unlock()
+            return
+        }
+        isClosed = true
+        let taskToCancel = receiveTask
         receiveTask = nil
+        stateLock.unlock()
+
+        taskToCancel?.cancel()
         task.cancel(with: .goingAway, reason: nil)
-        continuation.finish()
+        eventChannel.finish()
     }
 
     func startReceiving() {
-        receiveTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
+        stateLock.lock()
+        guard !isClosed, receiveTask == nil else {
+            stateLock.unlock()
+            return
+        }
 
+        let webSocketTask = task
+        let eventChannel = eventChannel
+        receiveTask = Task { [webSocketTask, eventChannel] in
             while !Task.isCancelled {
                 do {
-                    let message = try await task.receive()
-                    let data: Data
-                    switch message {
-                    case .data(let value):
-                        data = value
-                    case .string(let value):
-                        guard let stringData = value.data(using: .utf8) else {
-                            throw GeminiLiveTranslationError.socketMessageDecodingFailed
-                        }
-                        data = stringData
-                    @unknown default:
-                        throw GeminiLiveTranslationError.socketMessageDecodingFailed
-                    }
+                    let message = try await webSocketTask.receive()
+                    let data = try Self.data(from: message)
 
                     let events = try GeminiLiveTranslationResponseParser.events(from: data)
                     for event in events {
-                        continuation.yield(event)
+                        try eventChannel.yield(event)
                     }
                 } catch {
                     if Task.isCancelled {
-                        continuation.finish()
+                        eventChannel.finish()
                     } else {
-                        continuation.finish(throwing: error)
+                        eventChannel.finish(throwing: error)
+                        webSocketTask.cancel(with: .goingAway, reason: nil)
                     }
                     break
                 }
             }
         }
+        stateLock.unlock()
     }
 
     private func waitForSetupComplete() async throws {
         while true {
             let message = try await task.receive()
-            let data: Data
-            switch message {
-            case .data(let value):
-                data = value
-            case .string(let value):
-                guard let stringData = value.data(using: .utf8) else {
-                    throw GeminiLiveTranslationError.socketMessageDecodingFailed
-                }
-                data = stringData
-            @unknown default:
-                throw GeminiLiveTranslationError.socketMessageDecodingFailed
-            }
+            let data = try Self.data(from: message)
 
             let events = try GeminiLiveTranslationResponseParser.events(from: data)
+            let didCompleteSetup = events.contains(.setupComplete)
             for event in events {
                 if case .error(let message) = event {
                     throw GeminiLiveTranslationError.serverError(message)
+                } else if event != .setupComplete {
+                    try eventChannel.yield(event)
                 }
             }
 
-            if events.contains(.setupComplete) {
+            if didCompleteSetup {
                 return
-            }
-
-            for event in events {
-                continuation.yield(event)
             }
         }
     }
 
-    private static func makeEventStream() -> (
-        stream: AsyncThrowingStream<GeminiLiveTranslationEvent, Error>,
-        continuation: AsyncThrowingStream<GeminiLiveTranslationEvent, Error>.Continuation
-    ) {
-        var capturedContinuation: AsyncThrowingStream<GeminiLiveTranslationEvent, Error>.Continuation?
-        let stream = AsyncThrowingStream<GeminiLiveTranslationEvent, Error> { continuation in
-            capturedContinuation = continuation
+    private static func data(from message: URLSessionWebSocketTask.Message) throws -> Data {
+        switch message {
+        case .data(let value):
+            return value
+        case .string(let value):
+            guard let data = value.data(using: .utf8) else {
+                throw GeminiLiveTranslationError.socketMessageDecodingFailed
+            }
+            return data
+        @unknown default:
+            throw GeminiLiveTranslationError.socketMessageDecodingFailed
         }
-        return (stream, capturedContinuation!)
     }
 }
 
@@ -293,18 +398,31 @@ enum GeminiLiveTranslationMessageFactory {
         return try encoder.encode(message)
     }
 
-    static func audioMessageData(_ data: Data, encoder: JSONEncoder = JSONEncoder()) -> Data {
+    static func audioMessageData(
+        _ data: Data,
+        encoder: JSONEncoder = JSONEncoder()
+    ) throws -> Data {
         let message = RealtimeAudioMessage(
             realtimeInput: RealtimeAudioInput(
                 audio: InlineAudio(data: data.base64EncodedString(), mimeType: "audio/pcm;rate=16000")
             )
         )
-        return (try? encoder.encode(message)) ?? Data()
+        do {
+            return try encoder.encode(message)
+        } catch {
+            throw GeminiLiveTranslationError.socketMessageEncodingFailed
+        }
     }
 
-    static func audioStreamEndMessageData(encoder: JSONEncoder = JSONEncoder()) -> Data {
+    static func audioStreamEndMessageData(
+        encoder: JSONEncoder = JSONEncoder()
+    ) throws -> Data {
         let message = AudioStreamEndMessage(realtimeInput: AudioStreamEndInput(audioStreamEnd: true))
-        return (try? encoder.encode(message)) ?? Data()
+        do {
+            return try encoder.encode(message)
+        } catch {
+            throw GeminiLiveTranslationError.socketMessageEncodingFailed
+        }
     }
 
     private struct SetupMessage: Encodable {

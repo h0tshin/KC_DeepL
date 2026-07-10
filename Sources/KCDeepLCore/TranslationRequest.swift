@@ -1,6 +1,6 @@
 import Foundation
 
-public struct TranslationRequest: Equatable {
+public struct TranslationRequest: Equatable, Sendable {
     public let sourceText: String
     public let sourceLanguage: LanguageOption
     public let targetLanguage: LanguageOption

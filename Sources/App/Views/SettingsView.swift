@@ -162,19 +162,22 @@ private struct ShortcutSettingsPane: View {
             ShortcutRow(
                 title: "선택한 텍스트 번역",
                 description: "텍스트 선택 후 이 단축키를 누르면 KC DeepL 앱에서 번역이 열립니다.",
-                shortcut: $selectedTextShortcut
+                shortcut: $selectedTextShortcut,
+                defaultShortcut: "⌃⇧1"
             )
 
             ShortcutRow(
                 title: "Live 번역",
                 description: "라이브 번역 화면을 단축키로 즉시 열 수 있습니다.",
-                shortcut: $rewriteShortcut
+                shortcut: $rewriteShortcut,
+                defaultShortcut: "⌃⇧2"
             )
 
             ShortcutRow(
                 title: "텍스트 화면 캡처",
                 description: "KC DeepL 앱에서 번역하려는 텍스트의 스크린샷을 찍습니다.",
                 shortcut: $screenCaptureShortcut,
+                defaultShortcut: "⌃⇧3",
                 note: "OCR 인식은 다음 구현 단계에서 연결됩니다."
             )
 
@@ -198,7 +201,7 @@ private struct AccessibilitySettingsPane: View {
         VStack(alignment: .leading, spacing: 30) {
             SettingsSection(title: "글꼴 크기", description: "번역된 텍스트를 쉽게 읽을 수 있도록 원하는 글꼴 크기를 선택하세요.") {
                 Text("번역문은 이렇게 표시됩니다.")
-                    .font(.system(size: readingFontSize == "large" ? 28 : 22, weight: .semibold))
+                    .font(.system(size: previewFontSize, weight: .semibold))
                     .frame(maxWidth: .infinity)
                     .frame(height: 128)
                     .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 5))
@@ -227,6 +230,17 @@ private struct AccessibilitySettingsPane: View {
             }
         }
     }
+
+    private var previewFontSize: CGFloat {
+        switch readingFontSize {
+        case "extraLarge":
+            34
+        case "large":
+            28
+        default:
+            22
+        }
+    }
 }
 
 private struct FileHistorySettingsPane: View {
@@ -244,7 +258,7 @@ private struct FileHistorySettingsPane: View {
                 .frame(width: 240)
             }
 
-            SettingsSection(title: "번역 기록", description: "번역을 자동으로 저장하여 이전 번역을 빠르게 찾고 재사용할 수 있습니다. 기록은 이 기기에 로컬로 암호화하여 저장합니다.") {
+            SettingsSection(title: "번역 기록", description: "번역을 자동으로 저장하여 이전 번역을 빠르게 찾고 재사용할 수 있습니다. 기록은 이 기기에 로컬로 저장합니다.") {
                 Toggle("번역 기록 켜기", isOn: $historyEnabled)
             }
         }
@@ -254,7 +268,7 @@ private struct FileHistorySettingsPane: View {
 private struct LLMTextTranslationSettingsPane: View {
     @AppStorage(PreferenceKeys.provider) private var providerRaw = AppDefaults.defaultProvider.rawValue
     @AppStorage(PreferenceKeys.modelID) private var modelID = AppDefaults.defaultModelID
-    @AppStorage(PreferenceKeys.geminiAPIKey) private var apiKey = AppDefaults.defaultGeminiAPIKey
+    @AppStorage(PreferenceKeys.geminiAPIKey) private var apiKey = ""
     @AppStorage(PreferenceKeys.autoTranslate) private var autoTranslate = true
     @AppStorage(PreferenceKeys.temperature) private var temperature = 0.2
 
@@ -288,7 +302,15 @@ private struct LLMTextTranslationSettingsPane: View {
                     }
                 }
 
-                SettingsSecureFieldRow(title: "번역 API", text: $apiKey, width: 500)
+                SettingsSecureFieldRow(
+                    title: "번역 API",
+                    text: $apiKey,
+                    width: 500
+                )
+
+                Text("API 키는 이 Mac의 앱 설정에 저장됩니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Toggle("입력 후 자동 번역", isOn: $autoTranslate)
 
@@ -302,13 +324,14 @@ private struct LLMTextTranslationSettingsPane: View {
             }
         }
     }
+
 }
 
 private struct LLMLiveTranslationSettingsPane: View {
     @AppStorage(PreferenceKeys.liveProvider) private var liveProviderRaw = AppDefaults.defaultProvider.rawValue
     @AppStorage(PreferenceKeys.liveModelID) private var liveModelID = AppDefaults.defaultLiveModelID
-    @AppStorage(PreferenceKeys.liveListeningAPIKey) private var listeningAPIKey = AppDefaults.defaultLiveListeningAPIKey
-    @AppStorage(PreferenceKeys.liveSpeakingAPIKey) private var speakingAPIKey = AppDefaults.defaultGeminiAPIKey
+    @AppStorage(PreferenceKeys.liveListeningAPIKey) private var listeningAPIKey = ""
+    @AppStorage(PreferenceKeys.liveSpeakingAPIKey) private var speakingAPIKey = ""
     @AppStorage(PreferenceKeys.liveRemoteMicInput) private var remoteMicInput = ""
     @AppStorage(PreferenceKeys.liveRemoteSpeakerOutput) private var remoteSpeakerOutput = ""
     @AppStorage(PreferenceKeys.liveLocalMicInput) private var localMicInput = ""
@@ -347,8 +370,20 @@ private struct LLMLiveTranslationSettingsPane: View {
                     }
                 }
 
-                SettingsSecureFieldRow(title: "수화용 API", text: $listeningAPIKey, width: 620)
-                SettingsSecureFieldRow(title: "발화용 API", text: $speakingAPIKey, width: 620)
+                SettingsSecureFieldRow(
+                    title: "수화용 API",
+                    text: $listeningAPIKey,
+                    width: 620
+                )
+                SettingsSecureFieldRow(
+                    title: "발화용 API",
+                    text: $speakingAPIKey,
+                    width: 620
+                )
+
+                Text("API 키는 이 Mac의 앱 설정에 저장됩니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             SettingsSection(title: "Audio Routing") {
@@ -427,7 +462,7 @@ private struct AudioRoutingPicker: View {
                 .font(.system(size: 14, weight: .semibold))
                 .frame(width: 150, alignment: .leading)
 
-            Picker("", selection: $selection) {
+            Picker(title, selection: $selection) {
                 ForEach(options, id: \.self) { option in
                     Text(option).tag(option)
                 }
@@ -448,7 +483,7 @@ private struct SettingsPickerRow<SelectionValue: Hashable, Content: View>: View 
         HStack(spacing: 16) {
             SettingsRowTitle(title)
 
-            Picker("", selection: $selection) {
+            Picker(title, selection: $selection) {
                 content
             }
             .labelsHidden()
@@ -466,7 +501,8 @@ private struct SettingsSecureFieldRow: View {
         HStack(spacing: 16) {
             SettingsRowTitle(title)
 
-            SecureField("", text: $text)
+            SecureField(title, text: $text)
+                .labelsHidden()
                 .textFieldStyle(.roundedBorder)
                 .frame(width: width)
         }
@@ -482,7 +518,8 @@ private struct SettingsTextFieldRow: View {
         HStack(spacing: 16) {
             SettingsRowTitle(title)
 
-            TextField("", text: $text)
+            TextField(title, text: $text)
+                .labelsHidden()
                 .textFieldStyle(.roundedBorder)
                 .frame(width: width)
         }
@@ -552,6 +589,8 @@ private struct RadioGroup: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(item.title)
+                .accessibilityValue(selection == item.id ? "선택됨" : "선택 안 됨")
             }
         }
     }
@@ -561,6 +600,7 @@ private struct ShortcutRow: View {
     let title: String
     let description: String
     @Binding var shortcut: String
+    let defaultShortcut: String
     var note: String?
 
     var body: some View {
@@ -591,10 +631,13 @@ private struct ShortcutRow: View {
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                     .frame(width: 180)
 
-                Button {} label: {
+                Button {
+                    shortcut = defaultShortcut
+                } label: {
                     Image(systemName: "arrow.uturn.backward")
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("\(title) 단축키 기본값으로 초기화")
             }
         }
     }

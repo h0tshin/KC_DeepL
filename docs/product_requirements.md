@@ -25,7 +25,6 @@ KC DeepL은 macOS에서 어디서든 빠르게 텍스트를 번역하는 즉석 
 - 실제 파일 번역 파이프라인
 - 시스템 로그인 아이템 등록
 - 앱별 단축키 차단의 실제 프로세스 감지
-- 키체인 저장소 전환
 
 ## 3. 사용자 시나리오
 
@@ -56,9 +55,9 @@ KC DeepL은 macOS에서 어디서든 빠르게 텍스트를 번역하는 즉석 
 
 - macOS 14 이상에서 실행한다.
 - SwiftUI 우선으로 구현하고, 실제 전역 단축키/OCR/권한 처리가 필요해지는 단계에서만 AppKit 또는 Vision 연동을 추가한다.
-- 사용자 텍스트는 명시적 번역 실행에서만 외부 API로 전송한다.
+- 자동 번역이 켜져 있으면 사용자가 입력하거나 붙여넣은 텍스트를 1초 디바운스 후 외부 API로 전송한다. 자동 번역을 끄면 번역 버튼을 실행할 때만 전송한다.
 - 번역 실패 시 원인을 UI에 표시한다.
-- 기본 설정은 `UserDefaults`로 저장한다. API 키는 초기 요구에 맞춰 기본값을 등록하지만, 제품화 단계에서는 Keychain으로 이전한다.
+- 일반 설정과 사용자가 입력한 API 키는 `UserDefaults`로 저장하며, 소스에는 기본 API 키를 포함하지 않는다.
 
 ## 6. 공식 레퍼런스 반영
 
@@ -66,4 +65,4 @@ KC DeepL은 macOS에서 어디서든 빠르게 텍스트를 번역하는 즉석 
 - DeepL 화면 캡처 기능은 캡처 영역 선택 후 OCR로 원문을 추출해 번역한다. 본 초기 구현은 캡처 진입까지만 제공한다.
 - Gemini API는 `generateContent` REST 호출과 API key 인증을 사용한다. 기본 모델은 저지연 경량 번역에 적합한 `gemini-2.5-flash-lite`로 둔다.
 
-출처는 [references/README.md](/Users/h0tshin/Documents/KC_DeepL/references/README.md)를 따른다.
+출처는 [references/README.md](../references/README.md)를 따른다.
