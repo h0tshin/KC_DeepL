@@ -83,66 +83,63 @@ struct ContentView: View {
                             showTools: $showTools,
                             viewModel: liveTranslationViewModel
                         )
+                    } else if selectedMode == .comparison {
+                        TranslationComparisonToolbar(
+                            sourceLanguage: sourceLanguageBinding,
+                            targetLanguage: targetLanguageBinding,
+                            showTools: $showTools,
+                            readingFontSizeRaw: $readingFontSizeRaw,
+                            comparisonViewModel: comparisonViewModel,
+                            onPaste: pasteClipboardIntoSource,
+                            onSwap: swapLanguages
+                        )
+
+                        TranslationComparisonView(
+                            viewModel: comparisonViewModel,
+                            sourceText: Binding(
+                                get: { viewModel.sourceText },
+                                set: { viewModel.setSourceText($0) }
+                            ),
+                            sourceAttributedText: Binding(
+                                get: { viewModel.sourceAttributedText },
+                                set: { viewModel.setSourceAttributedText($0) }
+                            ),
+                            fontSize: readingFontSize,
+                            onCapture: viewModel.beginScreenCaptureMock,
+                            onCompare: startTranslationComparison,
+                            onCancel: comparisonViewModel.cancelComparison
+                        )
                     } else {
                         LanguageBar(
                             sourceLanguage: sourceLanguageBinding,
                             targetLanguage: targetLanguageBinding,
                             showTools: $showTools,
                             readingFontSizeRaw: $readingFontSizeRaw,
+                            languageMenuWidth: 180,
+                            usesCompactLayout: false,
                             onPaste: pasteClipboardIntoSource,
-                            onSwap: {
-                                if selectedMode == .comparison {
-                                    swapComparisonLanguages()
-                                    return
-                                }
-                                var sourceLanguage = sourceLanguage
-                                var targetLanguage = targetLanguage
-                                viewModel.swapLanguages(
-                                    sourceLanguage: &sourceLanguage,
-                                    targetLanguage: &targetLanguage
-                                )
-                                self.sourceLanguage = sourceLanguage
-                                self.targetLanguage = targetLanguage
-                            }
+                            onSwap: swapLanguages
                         )
 
-                        if selectedMode == .comparison {
-                            TranslationComparisonView(
-                                viewModel: comparisonViewModel,
-                                sourceText: Binding(
-                                    get: { viewModel.sourceText },
-                                    set: { viewModel.setSourceText($0) }
-                                ),
-                                sourceAttributedText: Binding(
-                                    get: { viewModel.sourceAttributedText },
-                                    set: { viewModel.setSourceAttributedText($0) }
-                                ),
-                                fontSize: readingFontSize,
-                                onCapture: viewModel.beginScreenCaptureMock,
-                                onCompare: startTranslationComparison,
-                                onCancel: comparisonViewModel.cancelComparison
-                            )
-                        } else {
-                            TranslationWorkspace(
-                                sourceText: Binding(
-                                    get: { viewModel.sourceText },
-                                    set: { viewModel.setSourceText($0) }
-                                ),
-                                sourceAttributedText: Binding(
-                                    get: { viewModel.sourceAttributedText },
-                                    set: { viewModel.setSourceAttributedText($0) }
-                                ),
-                                translatedText: viewModel.translatedText,
-                                fontSize: readingFontSize,
-                                isTranslating: viewModel.isTranslating,
-                                errorMessage: viewModel.errorMessage,
-                                pasteBackTarget: pasteBackTarget,
-                                onCapture: viewModel.beginScreenCaptureMock,
-                                onPasteBack: pasteTranslationBackToSourceApp
-                            )
+                        TranslationWorkspace(
+                            sourceText: Binding(
+                                get: { viewModel.sourceText },
+                                set: { viewModel.setSourceText($0) }
+                            ),
+                            sourceAttributedText: Binding(
+                                get: { viewModel.sourceAttributedText },
+                                set: { viewModel.setSourceAttributedText($0) }
+                            ),
+                            translatedText: viewModel.translatedText,
+                            fontSize: readingFontSize,
+                            isTranslating: viewModel.isTranslating,
+                            errorMessage: viewModel.errorMessage,
+                            pasteBackTarget: pasteBackTarget,
+                            onCapture: viewModel.beginScreenCaptureMock,
+                            onPasteBack: pasteTranslationBackToSourceApp
+                        )
 
-                            BottomStatusBar(statusMessage: viewModel.statusMessage)
-                        }
+                        BottomStatusBar(statusMessage: viewModel.statusMessage)
                     }
                 }
 
@@ -311,6 +308,22 @@ struct ContentView: View {
         sourceLanguage = source
         targetLanguage = target
         comparisonViewModel.resetForInputChange()
+    }
+
+    private func swapLanguages() {
+        if selectedMode == .comparison {
+            swapComparisonLanguages()
+            return
+        }
+
+        var source = sourceLanguage
+        var target = targetLanguage
+        viewModel.swapLanguages(
+            sourceLanguage: &source,
+            targetLanguage: &target
+        )
+        sourceLanguage = source
+        targetLanguage = target
     }
 
     private func startTranslationComparison() {
@@ -537,69 +550,61 @@ private struct TitlebarMenuAccessory: NSViewRepresentable {
     }
 }
 
+private struct TranslationComparisonToolbar: View {
+    @Binding var sourceLanguage: LanguageOption
+    @Binding var targetLanguage: LanguageOption
+    @Binding var showTools: Bool
+    @Binding var readingFontSizeRaw: String
+    @ObservedObject var comparisonViewModel: TranslationComparisonViewModel
+    let onPaste: () -> Void
+    let onSwap: () -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            HStack(spacing: 0) {
+                LanguageBar(
+                    sourceLanguage: $sourceLanguage,
+                    targetLanguage: $targetLanguage,
+                    showTools: $showTools,
+                    readingFontSizeRaw: $readingFontSizeRaw,
+                    languageMenuWidth: 86,
+                    usesCompactLayout: true,
+                    onPaste: onPaste,
+                    onSwap: onSwap
+                )
+                .frame(width: proxy.size.width / 2)
+
+                TranslationComparisonModelPicker(viewModel: comparisonViewModel)
+                    .frame(width: proxy.size.width / 2)
+                    .overlay(alignment: .leading) {
+                        Rectangle()
+                            .fill(AppTheme.panelBorder)
+                            .frame(width: 1)
+                    }
+            }
+        }
+        .frame(height: 50)
+    }
+}
+
 private struct LanguageBar: View {
     @Binding var sourceLanguage: LanguageOption
     @Binding var targetLanguage: LanguageOption
     @Binding var showTools: Bool
     @Binding var readingFontSizeRaw: String
+    let languageMenuWidth: CGFloat
+    let usesCompactLayout: Bool
     let onPaste: () -> Void
     let onSwap: () -> Void
 
     var body: some View {
-        ZStack {
-            HStack {
-                Button(action: onPaste) {
-                    Label("붙여넣기", systemImage: "doc.on.clipboard")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 10)
-                .frame(height: 32)
-                .contentShape(Rectangle())
-                .help("클립보드 내용을 원문에 붙여넣기")
-
-                Spacer()
+        Group {
+            if usesCompactLayout {
+                compactContent
+            } else {
+                regularContent
             }
-
-            HStack(spacing: 16) {
-                LanguageMenu(
-                    selection: $sourceLanguage,
-                    languages: LanguageOption.sourceLanguages,
-                    help: "출발 언어 선택"
-                )
-
-                Button(action: onSwap) {
-                    Image(systemName: "arrow.left.arrow.right")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("언어 전환")
-
-                LanguageMenu(
-                    selection: $targetLanguage,
-                    languages: LanguageOption.targetLanguages,
-                    help: "도착 언어 선택"
-                )
-            }
-
-            HStack {
-                Spacer()
-
-                FontSizeControl(readingFontSizeRaw: $readingFontSizeRaw)
-
-                if !showTools {
-                    ToolPanelToggleButton {
-                        withAnimation(.easeOut(duration: 0.16)) {
-                            showTools = true
-                        }
-                    }
-                }
-            }
-            .padding(.trailing, 10)
         }
-        .padding(.horizontal, 18)
         .frame(height: 50)
         .background(AppTheme.toolbarBackground)
         .overlay(alignment: .bottom) {
@@ -608,11 +613,98 @@ private struct LanguageBar: View {
                 .frame(height: 1)
         }
     }
+
+    private var regularContent: some View {
+        ZStack {
+            HStack {
+                pasteButton
+
+                Spacer()
+            }
+
+            languageControls(spacing: 16)
+
+            HStack {
+                Spacer()
+
+                trailingControls
+            }
+            .padding(.trailing, 10)
+        }
+        .padding(.horizontal, 18)
+    }
+
+    private var compactContent: some View {
+        HStack(spacing: 6) {
+            pasteButton
+
+            Spacer(minLength: 4)
+
+            languageControls(spacing: 4)
+            trailingControls
+        }
+        .padding(.horizontal, 10)
+    }
+
+    private var pasteButton: some View {
+        Button(action: onPaste) {
+            Label("붙여넣기", systemImage: "doc.on.clipboard")
+                .font(.system(size: 12, weight: .semibold))
+                .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+        .contentShape(Rectangle())
+        .help("클립보드 내용을 원문에 붙여넣기")
+    }
+
+    private func languageControls(spacing: CGFloat) -> some View {
+        HStack(spacing: spacing) {
+            LanguageMenu(
+                selection: $sourceLanguage,
+                languages: LanguageOption.sourceLanguages,
+                width: languageMenuWidth,
+                help: "출발 언어 선택"
+            )
+
+            Button(action: onSwap) {
+                Image(systemName: "arrow.left.arrow.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("언어 전환")
+
+            LanguageMenu(
+                selection: $targetLanguage,
+                languages: LanguageOption.targetLanguages,
+                width: languageMenuWidth,
+                help: "도착 언어 선택"
+            )
+        }
+    }
+
+    private var trailingControls: some View {
+        HStack(spacing: 8) {
+            FontSizeControl(readingFontSizeRaw: $readingFontSizeRaw)
+
+            if !showTools {
+                ToolPanelToggleButton {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        showTools = true
+                    }
+                }
+            }
+        }
+    }
 }
 
 private struct LanguageMenu: View {
     @Binding var selection: LanguageOption
     let languages: [LanguageOption]
+    let width: CGFloat
     let help: String
 
     var body: some View {
@@ -637,7 +729,7 @@ private struct LanguageMenu: View {
                     .foregroundStyle(.secondary)
             }
             .font(.system(size: 13, weight: .semibold))
-            .frame(width: 180, height: 32)
+            .frame(width: width, height: 32)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

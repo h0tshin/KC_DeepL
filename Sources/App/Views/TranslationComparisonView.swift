@@ -26,10 +26,6 @@ struct TranslationComparisonView: View {
                 .onHover { sourceIsFocused = $0 }
 
                 VStack(spacing: 0) {
-                    comparisonTabs
-
-                    Divider().opacity(0.35)
-
                     selectedResult
 
                     Divider().opacity(0.35)
@@ -47,57 +43,23 @@ struct TranslationComparisonView: View {
         }
     }
 
-    private var comparisonTabs: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(CodexComparisonModel.allCases) { model in
-                    Button {
-                        viewModel.selectedModel = model
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: stateIcon(for: viewModel.states[model] ?? .idle))
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(stateColor(for: viewModel.states[model] ?? .idle))
-
-                            Text(model.tabTitle)
-                                .font(.system(size: 11, weight: .semibold))
-                        }
-                        .padding(.horizontal, 9)
-                        .frame(height: 29)
-                        .foregroundStyle(
-                            viewModel.selectedModel == model
-                                ? AppTheme.selectedTitlebarForeground
-                                : Color.primary
-                        )
-                        .background(
-                            viewModel.selectedModel == model
-                                ? AppTheme.selectedTitlebarBackground
-                                : AppTheme.controlBackground
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.displayName)
-                }
-            }
-            .padding(.horizontal, 12)
-        }
-        .frame(height: 48)
-        .background(AppTheme.toolbarBackground)
-    }
-
     private var selectedResult: some View {
         ZStack(alignment: .bottomTrailing) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
                         Text(viewModel.selectedModel.displayName)
                             .font(.system(size: 15, weight: .bold))
+                            .lineLimit(1)
+
+                        Spacer(minLength: 12)
 
                         Text("Codex App Server · \(viewModel.selectedModel.modelID)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
+                    .frame(maxWidth: .infinity)
 
                     resultContent
                 }
@@ -231,6 +193,55 @@ struct TranslationComparisonView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.vertical, 20)
+    }
+}
+
+struct TranslationComparisonModelPicker: View {
+    @ObservedObject var viewModel: TranslationComparisonViewModel
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(CodexComparisonModel.allCases) { model in
+                    Button {
+                        viewModel.selectedModel = model
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: stateIcon(for: viewModel.states[model] ?? .idle))
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(stateColor(for: viewModel.states[model] ?? .idle))
+
+                            Text(model.tabTitle)
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 9)
+                        .frame(height: 29)
+                        .foregroundStyle(
+                            viewModel.selectedModel == model
+                                ? AppTheme.selectedTitlebarForeground
+                                : Color.primary
+                        )
+                        .background(
+                            viewModel.selectedModel == model
+                                ? AppTheme.selectedTitlebarBackground
+                                : AppTheme.controlBackground
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .help(model.displayName)
+                }
+            }
+            .padding(.horizontal, 10)
+        }
+        .frame(height: 50)
+        .background(AppTheme.toolbarBackground)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(AppTheme.panelBorder)
+                .frame(height: 1)
+        }
     }
 
     private func stateIcon(for state: TranslationComparisonState) -> String {
