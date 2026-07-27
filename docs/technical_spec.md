@@ -13,6 +13,8 @@
 - 설정 및 API 키 저장: `UserDefaults` + `@AppStorage`
 - 번역 기록 저장: Application Support의 `KCDeepL/translation-history.json`
 - Codex 전용 작업 폴더: Application Support의 `KCDeepL/CodexTranslation`
+- 로컬 개발 서명: `Apple Development`
+- 직접 배포 서명: `Developer ID Application` + Hardened Runtime + timestamp
 
 ## 2. 모듈 구조
 
@@ -217,3 +219,14 @@ Codex 작업에는 원문과 결과가 누적될 수 있다. 이는 KC DeepL의 
 번역 기록과 Live 대화 기록은 Application Support에 atomic JSON으로 저장하며 현재 암호화하지 않는다. 앱 수명의 단일 ViewModel이 actor 저장소를 소유하고 빠른 연속 변경을 합쳐 MainActor의 파일 I/O를 피한다. 종료 시 신규 번역·Live 이벤트를 먼저 중단하고 초기 load를 기다린 뒤, generation이 안정될 때까지 최신 snapshot을 직렬 저장한다.
 
 번역 기록은 원문과 결과를 생략하지 않고 스크롤 가능한 기록 화면에 모두 표시한다. 신규 기록은 `backend`, API 경로의 `provider`, `modelID`를 저장하며, 기존 JSON과 호환되도록 새 엔진 필드는 optional로 decode한다.
+
+## 9. macOS 서명
+
+`script/build_and_run.sh`의 기본 실행과 `--verify`는 디버깅 가능한 `Apple Development` 서명을 유지한다. `--release`는 Release 바이너리를 빌드하고 `Developer ID Application` 인증서로 서명하며 다음 배포 보호를 적용한다.
+
+- Hardened Runtime
+- Apple 보안 timestamp
+- `com.apple.security.device.audio-input` entitlement
+- Team ID와 서명 Authority 명시적 검증
+
+일반 Developer ID 직접 배포에는 고급 capability를 사용하지 않는 한 별도 프로비저닝 프로파일을 embed하지 않는다. 외부 배포 파일은 Apple notarization 제출과 stapling을 추가로 완료해야 Gatekeeper 검증이 완성된다.

@@ -17,6 +17,9 @@ let package = Package(
             name: "KCDeepL",
             dependencies: ["KCDeepLCore"],
             path: "Sources/App",
+            exclude: [
+                "KCDeepL.entitlements"
+            ],
             resources: [
                 .copy("Resources")
             ]

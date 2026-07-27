@@ -6,6 +6,11 @@
 - `swift build`
 - `swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warn-concurrency`
 - `swift build -Xswiftc -swift-version -Xswiftc 6`
+- `./script/build_and_run.sh --release`
+- `codesign --verify --deep --strict dist/KCDeepL.app`
+- `codesign -dv --verbose=4 dist/KCDeepL.app`에서 Developer ID Authority, Team ID, runtime flag, timestamp 확인
+- `codesign -d --entitlements - --xml dist/KCDeepL.app`에서 audio-input entitlement 확인
+- 공증·stapling 후 `spctl -a -vv dist/KCDeepL.app`
 - `git status --short`로 의도한 파일만 변경되었는지 확인
 
 ## 2. 앱 실행 검증

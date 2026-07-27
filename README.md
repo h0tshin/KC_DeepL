@@ -27,6 +27,14 @@ LLM API 키는 앱에 포함되지 않습니다. 첫 실행 후 **설정 > LLM �
 ./script/build_and_run.sh --verify
 ```
 
+Developer ID Release 번들:
+
+```bash
+./script/build_and_run.sh --release
+```
+
+Release 모드는 `Developer ID Application` 인증서, Hardened Runtime, 보안 타임스탬프와 마이크 입력 entitlement를 적용해 `dist/KCDeepL.app`을 생성합니다. App Store 밖에서 다른 Mac에 배포하려면 이 번들을 Apple 공증한 뒤 공증 티켓을 stapling해야 합니다.
+
 테스트:
 
 ```bash
