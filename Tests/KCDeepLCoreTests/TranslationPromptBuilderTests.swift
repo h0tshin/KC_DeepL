@@ -52,8 +52,14 @@ final class TranslationPromptBuilderTests: XCTestCase {
             defaults.string(forKey: PreferenceKeys.readingFontSize),
             ReadingFontSize.defaultValue.rawValue
         )
+        XCTAssertEqual(
+            defaults.string(forKey: PreferenceKeys.translationBackend),
+            TranslationBackend.llmAPI.rawValue
+        )
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.provider), LLMProvider.gemini.rawValue)
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.modelID), "gemini-2.5-flash-lite")
+        XCTAssertEqual(defaults.string(forKey: PreferenceKeys.codexModelID), "")
+        XCTAssertNil(defaults.string(forKey: PreferenceKeys.codexThreadID))
         XCTAssertNil(defaults.string(forKey: PreferenceKeys.geminiAPIKey))
         XCTAssertTrue(defaults.bool(forKey: PreferenceKeys.autoTranslate))
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveProvider), LLMProvider.gemini.rawValue)

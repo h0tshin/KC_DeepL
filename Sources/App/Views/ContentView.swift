@@ -13,8 +13,12 @@ struct ContentView: View {
     @State private var selectedMode: TranslationMode = .text
     @State private var pasteBackTarget: PasteBackTarget?
 
+    @AppStorage(PreferenceKeys.translationBackend)
+    private var translationBackendRaw = AppDefaults.defaultTranslationBackend.rawValue
     @AppStorage(PreferenceKeys.provider) private var providerRaw = AppDefaults.defaultProvider.rawValue
     @AppStorage(PreferenceKeys.modelID) private var modelID = AppDefaults.defaultModelID
+    @AppStorage(PreferenceKeys.codexModelID)
+    private var codexModelID = AppDefaults.defaultCodexModelID
     @AppStorage(PreferenceKeys.geminiAPIKey) private var apiKey = ""
     @AppStorage(PreferenceKeys.temperature) private var temperature = 0.2
     @AppStorage(PreferenceKeys.historyEnabled) private var historyEnabled = true
@@ -22,6 +26,15 @@ struct ContentView: View {
 
     private var provider: LLMProvider {
         LLMProvider(rawValue: providerRaw) ?? .gemini
+    }
+
+    private var translationBackend: TranslationBackend {
+        TranslationBackend(rawValue: translationBackendRaw)
+            ?? AppDefaults.defaultTranslationBackend
+    }
+
+    private var activeModelID: String {
+        translationBackend == .codexAppServer ? codexModelID : modelID
     }
 
     private var readingFontSize: CGFloat {
@@ -135,7 +148,7 @@ struct ContentView: View {
         .toolbarBackground(.visible, for: .windowToolbar)
         .onAppear {
             viewModel.setHistoryEnabled(historyEnabled)
-            viewModel.runStartupChecks(apiKey: apiKey)
+            runStartupChecks()
         }
         .onOpenURL(perform: PopClipIntegration.handle)
         .onChange(of: viewModel.sourceText) { _, _ in
@@ -152,13 +165,29 @@ struct ContentView: View {
             scheduleAutoTranslation()
         }
         .onChange(of: providerRaw) { _, _ in
+            if translationBackend == .llmAPI {
+                scheduleAutoTranslation()
+            }
+        }
+        .onChange(of: translationBackendRaw) { _, _ in
+            runStartupChecks()
             scheduleAutoTranslation()
         }
         .onChange(of: modelID) { _, _ in
-            scheduleAutoTranslation()
+            if translationBackend == .llmAPI {
+                scheduleAutoTranslation()
+            }
+        }
+        .onChange(of: codexModelID) { _, _ in
+            if translationBackend == .codexAppServer {
+                runStartupChecks()
+                scheduleAutoTranslation()
+            }
         }
         .onChange(of: temperature) { _, _ in
-            scheduleAutoTranslation()
+            if translationBackend == .llmAPI {
+                scheduleAutoTranslation()
+            }
         }
         .onChange(of: autoTranslate) { _, _ in
             scheduleAutoTranslation()
@@ -167,8 +196,10 @@ struct ContentView: View {
             viewModel.setHistoryEnabled(enabled)
         }
         .onChange(of: apiKey) { _, _ in
-            viewModel.runStartupChecks(apiKey: apiKey)
-            scheduleAutoTranslation()
+            if translationBackend == .llmAPI {
+                runStartupChecks()
+                scheduleAutoTranslation()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .kcDeepLPerformAction)) { notification in
             if let payload = notification.object as? AppCommandPayload {
@@ -195,11 +226,20 @@ struct ContentView: View {
             sourceLanguage: sourceLanguage,
             targetLanguage: targetLanguage,
             provider: provider,
-            modelID: modelID,
+            modelID: activeModelID,
             apiKey: apiKey,
             temperature: temperature,
             historyEnabled: historyEnabled,
-            autoTranslate: autoTranslate
+            autoTranslate: autoTranslate,
+            backend: translationBackend
+        )
+    }
+
+    private func runStartupChecks() {
+        viewModel.runStartupChecks(
+            backend: translationBackend,
+            modelID: activeModelID,
+            apiKey: apiKey
         )
     }
 

@@ -5,6 +5,67 @@ import KCDeepLCore
 
 @MainActor
 final class TranslationViewModelTests: XCTestCase {
+    func testCodexBackendUsesAppServerWithoutAPIKeyAndUpdatesExistingResultFlow() async throws {
+        let apiClient = RecordingTranslationClient(output: "unexpected API result")
+        let codexClient = RecordingTranslationClient(output: "Codex 번역 결과")
+        let historyStore = InMemoryTranslationHistoryStore()
+        let viewModel = TranslationViewModel(
+            client: apiClient,
+            appServerClient: codexClient,
+            historyStore: historyStore
+        )
+        try await Task.sleep(for: .milliseconds(30))
+        viewModel.setSourceText("Translate this")
+
+        await viewModel.translate(
+            sourceLanguage: .english,
+            targetLanguage: .korean,
+            provider: .gemini,
+            modelID: "gpt-test",
+            apiKey: "",
+            temperature: 0.2,
+            historyEnabled: true,
+            backend: .codexAppServer
+        )
+
+        XCTAssertEqual(viewModel.translatedText, "Codex 번역 결과")
+        let apiRequests = await apiClient.requestsSnapshot()
+        let codexRequests = await codexClient.requestsSnapshot()
+        XCTAssertEqual(apiRequests.count, 0)
+        XCTAssertEqual(codexRequests.map(\.modelID), ["gpt-test"])
+        XCTAssertEqual(codexRequests.map(\.apiKey), [""])
+        XCTAssertEqual(viewModel.history.map(\.translatedText), ["Codex 번역 결과"])
+    }
+
+    func testLLMAPIBackendContinuesToUseAPIClient() async throws {
+        let apiClient = RecordingTranslationClient(output: "API 번역 결과")
+        let codexClient = RecordingTranslationClient(output: "unexpected Codex result")
+        let viewModel = TranslationViewModel(
+            client: apiClient,
+            appServerClient: codexClient,
+            historyStore: InMemoryTranslationHistoryStore()
+        )
+        try await Task.sleep(for: .milliseconds(30))
+        viewModel.setSourceText("Translate this")
+
+        await viewModel.translate(
+            sourceLanguage: .english,
+            targetLanguage: .korean,
+            provider: .gemini,
+            modelID: "gemini-test",
+            apiKey: "test-key",
+            temperature: 0.2,
+            historyEnabled: false,
+            backend: .llmAPI
+        )
+
+        XCTAssertEqual(viewModel.translatedText, "API 번역 결과")
+        let apiRequests = await apiClient.requestsSnapshot()
+        let codexRequests = await codexClient.requestsSnapshot()
+        XCTAssertEqual(apiRequests.map(\.modelID), ["gemini-test"])
+        XCTAssertEqual(codexRequests.count, 0)
+    }
+
     func testOlderRequestCannotOverwriteNewerConfigurationResult() async throws {
         let historyStore = InMemoryTranslationHistoryStore()
         let viewModel = TranslationViewModel(
@@ -140,6 +201,24 @@ final class TranslationViewModelTests: XCTestCase {
         await PendingPersistenceRegistry.shared.flushAll()
 
         XCTAssertEqual(Set(historyStore.snapshot().map(\.modelID)), ["existing-model", "fast-model"])
+    }
+}
+
+private actor RecordingTranslationClient: TranslationClient {
+    private let output: String
+    private var requests: [TranslationRequest] = []
+
+    init(output: String) {
+        self.output = output
+    }
+
+    func translate(_ request: TranslationRequest) async throws -> String {
+        requests.append(request)
+        return output
+    }
+
+    func requestsSnapshot() -> [TranslationRequest] {
+        requests
     }
 }
 

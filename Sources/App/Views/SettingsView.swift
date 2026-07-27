@@ -3,6 +3,13 @@ import KCDeepLCore
 
 struct SettingsView: View {
     @State private var selectedCategory = SettingsCategory.general
+    @StateObject private var codexModelStore: CodexAppServerModelStore
+
+    init(codexClient: CodexAppServerClient) {
+        _codexModelStore = StateObject(
+            wrappedValue: CodexAppServerModelStore(provider: codexClient)
+        )
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -20,7 +27,9 @@ struct SettingsView: View {
                     case .accessibility:
                         AccessibilitySettingsPane()
                     case .llmTextTranslation:
-                        LLMTextTranslationSettingsPane()
+                        LLMTextTranslationSettingsPane(
+                            codexModelStore: codexModelStore
+                        )
                     case .llmLiveTranslation:
                         LLMLiveTranslationSettingsPane()
                     case .files:
@@ -343,8 +352,13 @@ private struct FileHistorySettingsPane: View {
 }
 
 private struct LLMTextTranslationSettingsPane: View {
+    @ObservedObject var codexModelStore: CodexAppServerModelStore
+    @AppStorage(PreferenceKeys.translationBackend)
+    private var translationBackendRaw = AppDefaults.defaultTranslationBackend.rawValue
     @AppStorage(PreferenceKeys.provider) private var providerRaw = AppDefaults.defaultProvider.rawValue
     @AppStorage(PreferenceKeys.modelID) private var modelID = AppDefaults.defaultModelID
+    @AppStorage(PreferenceKeys.codexModelID)
+    private var codexModelID = AppDefaults.defaultCodexModelID
     @AppStorage(PreferenceKeys.geminiAPIKey) private var apiKey = ""
     @AppStorage(PreferenceKeys.autoTranslate) private var autoTranslate = true
     @AppStorage(PreferenceKeys.temperature) private var temperature = 0.2
@@ -360,48 +374,175 @@ private struct LLMTextTranslationSettingsPane: View {
         }
     }
 
+    private var backendBinding: Binding<TranslationBackend> {
+        Binding {
+            TranslationBackend(rawValue: translationBackendRaw)
+                ?? AppDefaults.defaultTranslationBackend
+        } set: { backend in
+            translationBackendRaw = backend.rawValue
+        }
+    }
+
+    private var currentBackend: TranslationBackend {
+        TranslationBackend(rawValue: translationBackendRaw)
+            ?? AppDefaults.defaultTranslationBackend
+    }
+
     private var currentProvider: LLMProvider {
         LLMProvider(rawValue: providerRaw) ?? .gemini
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
-            SettingsSection(title: "LLM 번역 모델", description: "텍스트 번역에 사용할 모델 공급자와 세부 모델을 선택합니다.") {
-                SettingsPickerRow(title: "공급자", selection: providerBinding, width: 320) {
-                    ForEach(LLMProvider.allCases) { provider in
-                        Text(provider.displayName).tag(provider)
+            SettingsSection(
+                title: "LLM 번역 모델",
+                description: "텍스트 번역 요청을 처리할 방식과 모델을 선택합니다."
+            ) {
+                SettingsPickerRow(
+                    title: "번역 방식",
+                    selection: backendBinding,
+                    width: 320
+                ) {
+                    ForEach(TranslationBackend.allCases) { backend in
+                        Text(backend.displayName).tag(backend)
                     }
                 }
 
-                SettingsPickerRow(title: "세부모델", selection: $modelID, width: 320) {
-                    ForEach(currentProvider.models) { model in
-                        Text(model.displayName).tag(model.id)
-                    }
+                if currentBackend == .codexAppServer {
+                    codexAppServerSettings
+                } else {
+                    llmAPISettings
                 }
-
-                SettingsSecureFieldRow(
-                    title: "번역 API",
-                    text: $apiKey,
-                    width: 500
-                )
-
-                Text("API 키는 이 Mac의 앱 설정에 저장됩니다.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
 
                 Toggle("입력 후 자동 번역", isOn: $autoTranslate)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("창의성 \(temperature, specifier: "%.1f")")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Slider(value: $temperature, in: 0...1, step: 0.1)
-                        .frame(maxWidth: 360)
-                }
             }
+        }
+        .task(id: currentBackend) {
+            guard currentBackend == .codexAppServer else {
+                return
+            }
+            await codexModelStore.refresh()
+            normalizeCodexModelSelection()
+        }
+        .onChange(of: codexModelStore.models) { _, _ in
+            normalizeCodexModelSelection()
         }
     }
 
+    @ViewBuilder
+    private var codexAppServerSettings: some View {
+        if codexModelStore.models.isEmpty {
+            HStack(spacing: 10) {
+                if codexModelStore.isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Codex 모델 목록을 불러오는 중입니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("선택할 수 있는 Codex 모델이 없습니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Button("다시 불러오기") {
+                    Task {
+                        await codexModelStore.refresh()
+                        normalizeCodexModelSelection()
+                    }
+                }
+                .disabled(codexModelStore.isLoading)
+            }
+        } else {
+            SettingsPickerRow(
+                title: "Codex 모델",
+                selection: $codexModelID,
+                width: 320
+            ) {
+                ForEach(codexModelStore.models) { model in
+                    Text(model.displayName).tag(model.model)
+                }
+            }
+
+            HStack(spacing: 10) {
+                if codexModelStore.isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Button("모델 목록 새로고침") {
+                    Task {
+                        await codexModelStore.refresh()
+                        normalizeCodexModelSelection()
+                    }
+                }
+                .disabled(codexModelStore.isLoading)
+            }
+        }
+
+        if let selectedModel = codexModelStore.models.first(
+            where: { $0.model == codexModelID }
+        ), !selectedModel.description.isEmpty {
+            Text(selectedModel.description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        if let errorMessage = codexModelStore.errorMessage {
+            Label(errorMessage, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+
+        Text(
+            "현재 Mac의 Codex 로그인으로 요청하며, 모든 번역은 Codex 작업 ‘\(CodexAppServerClient.fixedThreadName)’에서 처리됩니다. 앱의 로컬 번역 기록을 꺼도 이 Codex 작업 기록은 별도로 남습니다."
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private var llmAPISettings: some View {
+        SettingsPickerRow(title: "공급자", selection: providerBinding, width: 320) {
+            ForEach(LLMProvider.allCases) { provider in
+                Text(provider.displayName).tag(provider)
+            }
+        }
+
+        SettingsPickerRow(title: "세부모델", selection: $modelID, width: 320) {
+            ForEach(currentProvider.models) { model in
+                Text(model.displayName).tag(model.id)
+            }
+        }
+
+        SettingsSecureFieldRow(
+            title: "번역 API",
+            text: $apiKey,
+            width: 500
+        )
+
+        Text("API 키는 이 Mac의 앱 설정에 저장됩니다.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+        VStack(alignment: .leading, spacing: 8) {
+            Text("창의성 \(temperature, specifier: "%.1f")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Slider(value: $temperature, in: 0...1, step: 0.1)
+                .frame(maxWidth: 360)
+        }
+    }
+
+    private func normalizeCodexModelSelection() {
+        guard !codexModelStore.models.isEmpty,
+              !codexModelStore.models.contains(where: { $0.model == codexModelID }),
+              let fallback = codexModelStore.defaultModel
+        else {
+            return
+        }
+        codexModelID = fallback.model
+    }
 }
 
 private struct LLMLiveTranslationSettingsPane: View {

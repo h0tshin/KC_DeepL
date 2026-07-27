@@ -12,9 +12,11 @@ final class TranslationViewModel: ObservableObject {
     @Published var captureState: CaptureState?
     @Published private(set) var history: [TranslationHistoryItem] = []
 
-    private let client: TranslationClient
+    private let apiClient: TranslationClient
+    private let appServerClient: TranslationClient
     private let historyRepository: TranslationHistoryRepository
     private var debouncedTranslationTask: Task<Void, Never>?
+    private var activeTranslationTask: Task<Void, Never>?
     private var historyLoadTask: Task<Void, Never>?
     private var historyPersistenceTask: Task<Void, Never>?
     private var historyPersistenceGeneration: UInt = 0
@@ -28,9 +30,11 @@ final class TranslationViewModel: ObservableObject {
 
     init(
         client: TranslationClient = GeminiTranslationClient(),
+        appServerClient: TranslationClient? = nil,
         historyStore: TranslationHistoryStoring = FileTranslationHistoryStore()
     ) {
-        self.client = client
+        self.apiClient = client
+        self.appServerClient = appServerClient ?? client
         self.historyRepository = TranslationHistoryRepository(store: historyStore)
         loadHistory()
         PendingPersistenceRegistry.shared.registerPreparation { [weak self] in
@@ -43,6 +47,7 @@ final class TranslationViewModel: ObservableObject {
 
     deinit {
         debouncedTranslationTask?.cancel()
+        activeTranslationTask?.cancel()
         historyLoadTask?.cancel()
     }
 
@@ -53,7 +58,8 @@ final class TranslationViewModel: ObservableObject {
         modelID: String,
         apiKey: String,
         temperature: Double,
-        historyEnabled: Bool
+        historyEnabled: Bool,
+        backend: TranslationBackend = .llmAPI
     ) async {
         historyPreferenceEnabled = historyEnabled
         let generation = nextRequestGeneration()
@@ -61,18 +67,34 @@ final class TranslationViewModel: ObservableObject {
             from: sourceAttributedText,
             fallback: sourceText
         )
-        await translateSnapshot(
-            translationText,
-            expectedSourceText: sourceText,
-            sourceLanguage: sourceLanguage,
-            targetLanguage: targetLanguage,
-            provider: provider,
-            modelID: modelID,
-            apiKey: apiKey,
-            temperature: temperature,
-            historyEnabled: historyEnabled,
-            generation: generation
-        )
+        let expectedSourceText = sourceText
+        let task = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            await self.translateSnapshot(
+                translationText,
+                expectedSourceText: expectedSourceText,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                provider: provider,
+                modelID: modelID,
+                apiKey: apiKey,
+                temperature: temperature,
+                historyEnabled: historyEnabled,
+                backend: backend,
+                generation: generation
+            )
+        }
+        activeTranslationTask = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        if requestGeneration == generation {
+            activeTranslationTask = nil
+        }
     }
 
     func scheduleAutoTranslation(
@@ -83,7 +105,8 @@ final class TranslationViewModel: ObservableObject {
         apiKey: String,
         temperature: Double,
         historyEnabled: Bool,
-        autoTranslate: Bool
+        autoTranslate: Bool,
+        backend: TranslationBackend = .llmAPI
     ) {
         historyPreferenceEnabled = historyEnabled
         let generation = nextRequestGeneration()
@@ -93,7 +116,11 @@ final class TranslationViewModel: ObservableObject {
         guard !expectedSourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             translatedText = ""
             errorMessage = nil
-            runStartupChecks(apiKey: apiKey)
+            runStartupChecks(
+                backend: backend,
+                modelID: modelID,
+                apiKey: apiKey
+            )
             return
         }
 
@@ -130,6 +157,7 @@ final class TranslationViewModel: ObservableObject {
                 apiKey: apiKey,
                 temperature: temperature,
                 historyEnabled: historyEnabled,
+                backend: backend,
                 generation: generation
             )
         }
@@ -137,13 +165,53 @@ final class TranslationViewModel: ObservableObject {
 
     func runStartupChecks(apiKey: String) {
         let defaults = UserDefaults.standard
+        let backend = TranslationBackend(
+            rawValue: defaults.string(forKey: PreferenceKeys.translationBackend) ?? ""
+        ) ?? AppDefaults.defaultTranslationBackend
         let provider = LLMProvider(rawValue: defaults.string(forKey: PreferenceKeys.provider) ?? "") ?? .gemini
-        let modelID = defaults.string(forKey: PreferenceKeys.modelID) ?? AppDefaults.defaultModelID
+        let modelID = backend == .codexAppServer
+            ? defaults.string(forKey: PreferenceKeys.codexModelID) ?? AppDefaults.defaultCodexModelID
+            : defaults.string(forKey: PreferenceKeys.modelID) ?? AppDefaults.defaultModelID
 
-        if provider == .gemini && apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        runStartupChecks(
+            backend: backend,
+            provider: provider,
+            modelID: modelID,
+            apiKey: apiKey
+        )
+    }
+
+    func runStartupChecks(
+        backend: TranslationBackend,
+        modelID: String,
+        apiKey: String
+    ) {
+        let defaults = UserDefaults.standard
+        let provider = LLMProvider(
+            rawValue: defaults.string(forKey: PreferenceKeys.provider) ?? ""
+        ) ?? .gemini
+        runStartupChecks(
+            backend: backend,
+            provider: provider,
+            modelID: modelID,
+            apiKey: apiKey
+        )
+    }
+
+    private func runStartupChecks(
+        backend: TranslationBackend,
+        provider: LLMProvider,
+        modelID: String,
+        apiKey: String
+    ) {
+        if backend == .llmAPI,
+           provider == .gemini,
+           apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             statusMessage = "Gemini API 키를 설정해 주세요."
         } else if modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             statusMessage = "번역 모델을 선택해 주세요."
+        } else if backend == .codexAppServer {
+            statusMessage = "Codex App Server로 번역할 준비가 되었습니다."
         } else {
             statusMessage = "사용할 준비가 되었습니다."
         }
@@ -159,6 +227,7 @@ final class TranslationViewModel: ObservableObject {
         apiKey: String,
         temperature: Double,
         historyEnabled: Bool,
+        backend: TranslationBackend,
         generation: UInt
     ) async {
         guard isCurrentRequest(generation, expectedSourceText: expectedSourceText) else {
@@ -168,11 +237,15 @@ final class TranslationViewModel: ObservableObject {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             translatedText = ""
             errorMessage = nil
-            runStartupChecks(apiKey: apiKey)
+            runStartupChecks(
+                backend: backend,
+                modelID: modelID,
+                apiKey: apiKey
+            )
             return
         }
 
-        guard provider == .gemini else {
+        guard backend == .codexAppServer || provider == .gemini else {
             errorMessage = nil
             isTranslating = false
             translatedText = "현재 목업에서는 Gemini 번역 호출만 연결되어 있습니다. \(provider.displayName) 연동은 고급 설정 설계 범위에 포함되어 있습니다."
@@ -182,7 +255,9 @@ final class TranslationViewModel: ObservableObject {
 
         isTranslating = true
         errorMessage = nil
-        statusMessage = "\(modelID)로 번역 중입니다."
+        statusMessage = backend == .codexAppServer
+            ? "Codex App Server (\(modelID))로 번역 중입니다."
+            : "\(modelID)로 번역 중입니다."
 
         let request = TranslationRequest(
             sourceText: text,
@@ -195,7 +270,10 @@ final class TranslationViewModel: ObservableObject {
         )
 
         do {
-            let output = try await client.translate(request)
+            let selectedClient = backend == .codexAppServer
+                ? appServerClient
+                : apiClient
+            let output = try await selectedClient.translate(request)
             guard isCurrentRequest(generation, expectedSourceText: expectedSourceText),
                   !Task.isCancelled
             else {
@@ -238,6 +316,8 @@ final class TranslationViewModel: ObservableObject {
     private func nextRequestGeneration() -> UInt {
         debouncedTranslationTask?.cancel()
         debouncedTranslationTask = nil
+        activeTranslationTask?.cancel()
+        activeTranslationTask = nil
         requestGeneration &+= 1
         return requestGeneration
     }
@@ -245,6 +325,8 @@ final class TranslationViewModel: ObservableObject {
     private func prepareForTermination() {
         debouncedTranslationTask?.cancel()
         debouncedTranslationTask = nil
+        activeTranslationTask?.cancel()
+        activeTranslationTask = nil
         requestGeneration &+= 1
         isTranslating = false
     }

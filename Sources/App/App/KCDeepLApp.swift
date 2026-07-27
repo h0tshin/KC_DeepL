@@ -6,11 +6,21 @@ struct KCDeepLApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var translationViewModel: TranslationViewModel
     @StateObject private var liveTranslationViewModel: LiveTranslationViewModel
+    private let codexAppServerClient: CodexAppServerClient
 
     init() {
         UserDefaults.standard.registerKCDeepLDefaults()
-        _translationViewModel = StateObject(wrappedValue: TranslationViewModel())
+        let codexAppServerClient = CodexAppServerClient()
+        self.codexAppServerClient = codexAppServerClient
+        _translationViewModel = StateObject(
+            wrappedValue: TranslationViewModel(
+                appServerClient: codexAppServerClient
+            )
+        )
         _liveTranslationViewModel = StateObject(wrappedValue: LiveTranslationViewModel())
+        PendingPersistenceRegistry.shared.register {
+            await codexAppServerClient.shutdown()
+        }
     }
 
     var body: some Scene {
@@ -30,7 +40,7 @@ struct KCDeepLApp: App {
         }
 
         Settings {
-            SettingsView()
+            SettingsView(codexClient: codexAppServerClient)
                 .preferredColorScheme(.dark)
         }
     }
