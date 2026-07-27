@@ -274,7 +274,8 @@ private struct ShortcutSettingsPane: View {
 }
 
 private struct AccessibilitySettingsPane: View {
-    @AppStorage(PreferenceKeys.readingFontSize) private var readingFontSize = "large"
+    @AppStorage(PreferenceKeys.readingFontSize)
+    private var readingFontSize = ReadingFontSize.defaultValue.rawValue
     @AppStorage(PreferenceKeys.speechSpeed) private var speechSpeed = "1.0"
 
     var body: some View {
@@ -287,9 +288,9 @@ private struct AccessibilitySettingsPane: View {
                     .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 5))
 
                 Picker("글꼴 크기 변경", selection: $readingFontSize) {
-                    Text("보통").tag("regular")
-                    Text("크게").tag("large")
-                    Text("매우 크게").tag("extraLarge")
+                    ForEach(ReadingFontSize.allCases) { size in
+                        Text("\(size.points) pt").tag(size.rawValue)
+                    }
                 }
                 .frame(width: 260)
             }
@@ -309,17 +310,13 @@ private struct AccessibilitySettingsPane: View {
                 .frame(width: 260)
             }
         }
+        .onAppear {
+            readingFontSize = ReadingFontSize.resolved(readingFontSize).rawValue
+        }
     }
 
     private var previewFontSize: CGFloat {
-        switch readingFontSize {
-        case "extraLarge":
-            34
-        case "large":
-            28
-        default:
-            22
-        }
+        CGFloat(ReadingFontSize.resolved(readingFontSize).points)
     }
 }
 

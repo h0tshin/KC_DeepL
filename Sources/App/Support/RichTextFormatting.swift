@@ -1,6 +1,8 @@
 import AppKit
 
 enum RichTextFormatting {
+    static let defaultFontSize: CGFloat = 26
+
     static func plainAttributedString(_ text: String, fontSize: CGFloat = 26) -> NSAttributedString {
         NSAttributedString(
             string: text,
@@ -73,6 +75,28 @@ enum RichTextFormatting {
             updated.removeValue(forKey: .backgroundColor)
             updated[.foregroundColor] = NSColor.labelColor
             mutable.setAttributes(updated, range: range)
+        }
+
+        return mutable
+    }
+
+    static func scaledFontSizes(
+        in attributed: NSAttributedString,
+        by scale: CGFloat,
+        fallbackFontSize: CGFloat = defaultFontSize
+    ) -> NSAttributedString {
+        guard scale.isFinite, scale > 0 else {
+            return NSAttributedString(attributedString: attributed)
+        }
+
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+        let fullRange = NSRange(location: 0, length: mutable.length)
+
+        mutable.enumerateAttribute(.font, in: fullRange) { value, range, _ in
+            let font = value as? NSFont ?? NSFont.systemFont(ofSize: fallbackFontSize)
+            let scaledSize = max(1, font.pointSize * scale)
+            let scaledFont = NSFontManager.shared.convert(font, toSize: scaledSize)
+            mutable.addAttribute(.font, value: scaledFont, range: range)
         }
 
         return mutable

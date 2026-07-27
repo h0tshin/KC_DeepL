@@ -157,6 +157,32 @@ final class RichTextFormattingTests: XCTestCase {
         XCTAssertEqual(markdown, "First paragraph\n\n**Bold paragraph**")
     }
 
+    func testDisplayFontScalingPreservesTraitsAndRestoresStoredPointSize() throws {
+        let sourceFont = NSFontManager.shared.convert(
+            NSFont.systemFont(ofSize: 20),
+            toHaveTrait: [.boldFontMask, .italicFontMask]
+        )
+        let source = NSAttributedString(
+            string: "Scalable",
+            attributes: [.font: sourceFont]
+        )
+
+        let displayed = RichTextFormatting.scaledFontSizes(in: source, by: 1.4)
+        let displayedFont = try XCTUnwrap(
+            displayed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertEqual(displayedFont.pointSize, 28, accuracy: 0.01)
+        let displayedTraits = NSFontManager.shared.traits(of: displayedFont)
+        XCTAssertTrue(displayedTraits.contains(.boldFontMask))
+        XCTAssertTrue(displayedTraits.contains(.italicFontMask))
+
+        let restored = RichTextFormatting.scaledFontSizes(in: displayed, by: 1 / 1.4)
+        let restoredFont = try XCTUnwrap(
+            restored.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertEqual(restoredFont.pointSize, 20, accuracy: 0.01)
+    }
+
     private func assertFontTrait(
         _ trait: NSFontTraitMask,
         in attributed: NSAttributedString,

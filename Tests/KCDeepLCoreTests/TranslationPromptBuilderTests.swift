@@ -48,6 +48,10 @@ final class TranslationPromptBuilderTests: XCTestCase {
 
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.mainSourceLanguage), LanguageOption.english.code)
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.mainTargetLanguage), LanguageOption.korean.code)
+        XCTAssertEqual(
+            defaults.string(forKey: PreferenceKeys.readingFontSize),
+            ReadingFontSize.defaultValue.rawValue
+        )
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.provider), LLMProvider.gemini.rawValue)
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.modelID), "gemini-2.5-flash-lite")
         XCTAssertNil(defaults.string(forKey: PreferenceKeys.geminiAPIKey))

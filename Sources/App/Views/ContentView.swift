@@ -8,6 +8,8 @@ struct ContentView: View {
     @SceneStorage("kc.main.showTools") private var showTools = false
     @AppStorage(PreferenceKeys.mainSourceLanguage) private var sourceLanguageCode = LanguageOption.english.code
     @AppStorage(PreferenceKeys.mainTargetLanguage) private var targetLanguageCode = LanguageOption.korean.code
+    @AppStorage(PreferenceKeys.readingFontSize)
+    private var readingFontSizeRaw = ReadingFontSize.defaultValue.rawValue
     @State private var selectedMode: TranslationMode = .text
     @State private var pasteBackTarget: PasteBackTarget?
 
@@ -20,6 +22,10 @@ struct ContentView: View {
 
     private var provider: LLMProvider {
         LLMProvider(rawValue: providerRaw) ?? .gemini
+    }
+
+    private var readingFontSize: CGFloat {
+        CGFloat(ReadingFontSize.resolved(readingFontSizeRaw).points)
     }
 
     private var sourceLanguage: LanguageOption {
@@ -68,6 +74,7 @@ struct ContentView: View {
                             sourceLanguage: sourceLanguageBinding,
                             targetLanguage: targetLanguageBinding,
                             showTools: $showTools,
+                            readingFontSizeRaw: $readingFontSizeRaw,
                             onPaste: pasteClipboardIntoSource,
                             onSwap: {
                                 var sourceLanguage = sourceLanguage
@@ -91,6 +98,7 @@ struct ContentView: View {
                                 set: { viewModel.setSourceAttributedText($0) }
                             ),
                             translatedText: viewModel.translatedText,
+                            fontSize: readingFontSize,
                             isTranslating: viewModel.isTranslating,
                             errorMessage: viewModel.errorMessage,
                             pasteBackTarget: pasteBackTarget,
@@ -416,6 +424,7 @@ private struct LanguageBar: View {
     @Binding var sourceLanguage: LanguageOption
     @Binding var targetLanguage: LanguageOption
     @Binding var showTools: Bool
+    @Binding var readingFontSizeRaw: String
     let onPaste: () -> Void
     let onSwap: () -> Void
 
@@ -460,6 +469,8 @@ private struct LanguageBar: View {
 
             HStack {
                 Spacer()
+
+                FontSizeControl(readingFontSizeRaw: $readingFontSizeRaw)
 
                 if !showTools {
                     ToolPanelToggleButton {
@@ -538,6 +549,7 @@ private struct TranslationWorkspace: View {
     @Binding var sourceText: String
     @Binding var sourceAttributedText: NSAttributedString
     let translatedText: String
+    let fontSize: CGFloat
     let isTranslating: Bool
     let errorMessage: String?
     let pasteBackTarget: PasteBackTarget?
@@ -552,6 +564,7 @@ private struct TranslationWorkspace: View {
                     text: $sourceText,
                     attributedText: $sourceAttributedText,
                     width: proxy.size.width / 2,
+                    fontSize: fontSize,
                     isFocused: focusedPane == .source,
                     onCapture: onCapture
                 )
@@ -561,6 +574,7 @@ private struct TranslationWorkspace: View {
 
                 ResultPane(
                     translatedText: translatedText,
+                    fontSize: fontSize,
                     isTranslating: isTranslating,
                     errorMessage: errorMessage,
                     isFocused: focusedPane == .result,
@@ -584,6 +598,7 @@ private struct SourceEditorPane: View {
     @Binding var text: String
     @Binding var attributedText: NSAttributedString
     let width: CGFloat
+    let fontSize: CGFloat
     let isFocused: Bool
     let onCapture: () -> Void
 
@@ -593,13 +608,17 @@ private struct SourceEditorPane: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            RichTextEditor(text: $text, attributedText: $attributedText)
+            RichTextEditor(
+                text: $text,
+                attributedText: $attributedText,
+                fontSize: fontSize
+            )
                 .padding(20)
 
             if text.isEmpty {
                 VStack(alignment: .leading, spacing: 20) {
                     Text("번역하려는 텍스트를 입력하거나 붙여넣기 하세요")
-                        .font(.system(size: 30, weight: .regular))
+                        .font(.system(size: fontSize + 4, weight: .regular))
                         .foregroundStyle(.secondary)
                         .frame(width: min(width - 64, 520), alignment: .leading)
 
@@ -706,9 +725,14 @@ private struct SourceEditorPane: View {
 private struct RichTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var attributedText: NSAttributedString
+    let fontSize: CGFloat
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, attributedText: $attributedText)
+        Coordinator(
+            text: $text,
+            attributedText: $attributedText,
+            fontSize: fontSize
+        )
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -720,10 +744,10 @@ private struct RichTextEditor: NSViewRepresentable {
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
-        textView.font = NSFont.systemFont(ofSize: 26)
+        textView.font = NSFont.systemFont(ofSize: fontSize)
         textView.textColor = .labelColor
         textView.typingAttributes = [
-            .font: NSFont.systemFont(ofSize: 26),
+            .font: NSFont.systemFont(ofSize: fontSize),
             .foregroundColor: NSColor.labelColor
         ]
         textView.textContainerInset = NSSize(width: 0, height: 0)
@@ -732,7 +756,11 @@ private struct RichTextEditor: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
-        textView.textStorage?.setAttributedString(RichTextFormatting.normalize(attributedText))
+        context.coordinator.apply(
+            attributedText,
+            fontSize: fontSize,
+            to: textView
+        )
 
         let scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -750,16 +778,11 @@ private struct RichTextEditor: NSViewRepresentable {
             return
         }
 
-        if !textView.attributedString().isEqual(to: attributedText) {
-            context.coordinator.apply(attributedText, to: textView)
-        }
-
-        textView.font = NSFont.systemFont(ofSize: 26)
-        textView.textColor = .labelColor
-        textView.typingAttributes = [
-            .font: NSFont.systemFont(ofSize: 26),
-            .foregroundColor: NSColor.labelColor
-        ]
+        context.coordinator.apply(
+            attributedText,
+            fontSize: fontSize,
+            to: textView
+        )
     }
 
     @MainActor
@@ -767,21 +790,49 @@ private struct RichTextEditor: NSViewRepresentable {
         @Binding private var text: String
         @Binding private var attributedText: NSAttributedString
         private var isApplyingProgrammaticUpdate = false
+        private var displayScale: CGFloat
 
-        init(text: Binding<String>, attributedText: Binding<NSAttributedString>) {
+        init(
+            text: Binding<String>,
+            attributedText: Binding<NSAttributedString>,
+            fontSize: CGFloat
+        ) {
             _text = text
             _attributedText = attributedText
+            displayScale = Self.displayScale(for: fontSize)
         }
 
-        func apply(_ attributed: NSAttributedString, to textView: NSTextView) {
+        func apply(
+            _ attributed: NSAttributedString,
+            fontSize: CGFloat,
+            to textView: NSTextView
+        ) {
             guard !isApplyingProgrammaticUpdate else {
                 return
             }
 
+            displayScale = Self.displayScale(for: fontSize)
+            let normalized = RichTextFormatting.normalize(attributed)
+            let displayed = RichTextFormatting.scaledFontSizes(
+                in: normalized,
+                by: displayScale
+            )
+
             isApplyingProgrammaticUpdate = true
-            let selectedRanges = clampedSelectionRanges(textView.selectedRanges, textLength: attributed.length)
-            textView.textStorage?.setAttributedString(RichTextFormatting.normalize(attributed))
-            textView.selectedRanges = selectedRanges
+            if !textView.attributedString().isEqual(to: displayed) {
+                let selectedRanges = clampedSelectionRanges(
+                    textView.selectedRanges,
+                    textLength: displayed.length
+                )
+                textView.textStorage?.setAttributedString(displayed)
+                textView.selectedRanges = selectedRanges
+            }
+            textView.font = NSFont.systemFont(ofSize: fontSize)
+            textView.textColor = .labelColor
+            textView.typingAttributes = [
+                .font: NSFont.systemFont(ofSize: fontSize),
+                .foregroundColor: NSColor.labelColor
+            ]
             isApplyingProgrammaticUpdate = false
         }
 
@@ -794,9 +845,22 @@ private struct RichTextEditor: NSViewRepresentable {
                 return
             }
 
-            let normalized = RichTextFormatting.normalize(textView.attributedString())
+            let stored = RichTextFormatting.scaledFontSizes(
+                in: textView.attributedString(),
+                by: 1 / displayScale,
+                fallbackFontSize: fontSizeForDisplayScale
+            )
+            let normalized = RichTextFormatting.normalize(stored)
             text = normalized.string
             attributedText = normalized
+        }
+
+        private var fontSizeForDisplayScale: CGFloat {
+            RichTextFormatting.defaultFontSize * displayScale
+        }
+
+        private static func displayScale(for fontSize: CGFloat) -> CGFloat {
+            max(0.1, fontSize / RichTextFormatting.defaultFontSize)
         }
 
         private func clampedSelectionRanges(_ ranges: [NSValue], textLength: Int) -> [NSValue] {
@@ -886,6 +950,7 @@ private struct FileDropMock: View {
 
 private struct ResultPane: View {
     let translatedText: String
+    let fontSize: CGFloat
     let isTranslating: Bool
     let errorMessage: String?
     let isFocused: Bool
@@ -911,7 +976,7 @@ private struct ResultPane: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .padding(.top, 220)
                     } else {
-                        MarkdownText(text: translatedText, fontSize: 25)
+                        MarkdownText(text: translatedText, fontSize: fontSize)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(28)

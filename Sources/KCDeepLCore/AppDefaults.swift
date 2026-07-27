@@ -60,7 +60,7 @@ public extension UserDefaults {
             PreferenceKeys.selectedTextShortcut: "⌃⇧1",
             PreferenceKeys.rewriteShortcut: "⌃⇧2",
             PreferenceKeys.screenCaptureShortcut: "⌃⇧3",
-            PreferenceKeys.readingFontSize: "large",
+            PreferenceKeys.readingFontSize: ReadingFontSize.defaultValue.rawValue,
             PreferenceKeys.speechSpeed: "1.0",
             PreferenceKeys.downloadLocation: "desktop",
             PreferenceKeys.historyEnabled: true,

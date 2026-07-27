@@ -20,6 +20,8 @@ APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICON_SOURCE="$ROOT_DIR/Sources/App/Resources/AppIcon.icns"
 MENU_BAR_ICON_SOURCE="$ROOT_DIR/Sources/App/Resources/MenuBarIcon.png"
+FONT_SIZE_DECREASE_ICON_SOURCE="$ROOT_DIR/Sources/App/Resources/FontSizeDecrease.png"
+FONT_SIZE_INCREASE_ICON_SOURCE="$ROOT_DIR/Sources/App/Resources/FontSizeIncrease.png"
 CODESIGN_IDENTITY="${KCDEEPL_CODESIGN_IDENTITY:-}"
 REQUIREMENTS_FILE="$STAGING_ROOT/KCDeepL.requirements"
 
@@ -58,6 +60,14 @@ fi
 
 if [[ -f "$MENU_BAR_ICON_SOURCE" ]]; then
   cp "$MENU_BAR_ICON_SOURCE" "$APP_RESOURCES/MenuBarIcon.png"
+fi
+
+if [[ -f "$FONT_SIZE_DECREASE_ICON_SOURCE" ]]; then
+  cp "$FONT_SIZE_DECREASE_ICON_SOURCE" "$APP_RESOURCES/FontSizeDecrease.png"
+fi
+
+if [[ -f "$FONT_SIZE_INCREASE_ICON_SOURCE" ]]; then
+  cp "$FONT_SIZE_INCREASE_ICON_SOURCE" "$APP_RESOURCES/FontSizeIncrease.png"
 fi
 
 cat >"$INFO_PLIST" <<PLIST
