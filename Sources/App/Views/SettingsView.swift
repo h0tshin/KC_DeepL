@@ -110,14 +110,41 @@ private struct SettingsSidebar: View {
 }
 
 private struct GeneralSettingsPane: View {
-    @AppStorage(PreferenceKeys.launchAtLogin) private var launchAtLogin = true
+    @ObservedObject private var launchAtLoginController = LaunchAtLoginController.shared
     @AppStorage(PreferenceKeys.quickAccessMode) private var quickAccessMode = "floating"
     @AppStorage(PreferenceKeys.closeBehavior) private var closeBehavior = "background"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
             SettingsSection(title: "KC DeepL 번역기") {
-                Toggle("기기를 켜면 앱이 자동으로 열립니다", isOn: $launchAtLogin)
+                Toggle(
+                    "기기를 켜면 앱이 자동으로 열립니다",
+                    isOn: Binding(
+                        get: { launchAtLoginController.isRequested },
+                        set: { launchAtLoginController.setEnabled($0) }
+                    )
+                )
+
+                if let statusMessage = launchAtLoginController.statusMessage {
+                    Label(
+                        statusMessage,
+                        systemImage: launchAtLoginStatusImage
+                    )
+                    .font(.caption)
+                    .foregroundStyle(launchAtLoginStatusColor)
+                }
+
+                if let errorMessage = launchAtLoginController.errorMessage {
+                    Label(errorMessage, systemImage: "xmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                if launchAtLoginController.requiresApproval {
+                    Button("로그인 항목 설정 열기") {
+                        launchAtLoginController.openSystemSettings()
+                    }
+                }
             }
 
             SettingsSection(title: "빠른 액세스 옵션", description: "특정 단축키 또는 부동 KC DeepL 아이콘 사용 시, 번역 또는 개선된 텍스트가 열릴 위치를 선택합니다.") {
@@ -141,6 +168,31 @@ private struct GeneralSettingsPane: View {
                 )
             }
         }
+        .onAppear {
+            launchAtLoginController.refreshStatus()
+        }
+    }
+
+    private var launchAtLoginStatusImage: String {
+        switch launchAtLoginController.status {
+        case .enabled:
+            "checkmark.circle"
+        case .requiresApproval:
+            "exclamationmark.triangle"
+        case .notRegistered, .notFound:
+            "xmark.circle"
+        }
+    }
+
+    private var launchAtLoginStatusColor: Color {
+        switch launchAtLoginController.status {
+        case .enabled:
+            .secondary
+        case .requiresApproval:
+            .orange
+        case .notRegistered, .notFound:
+            .red
+        }
     }
 }
 
@@ -148,6 +200,7 @@ private struct ShortcutSettingsPane: View {
     @AppStorage(PreferenceKeys.selectedTextShortcut) private var selectedTextShortcut = "⌃⇧1"
     @AppStorage(PreferenceKeys.rewriteShortcut) private var rewriteShortcut = "⌃⇧2"
     @AppStorage(PreferenceKeys.screenCaptureShortcut) private var screenCaptureShortcut = "⌃⇧3"
+    @State private var registrationMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
@@ -157,20 +210,34 @@ private struct ShortcutSettingsPane: View {
                 Text("단축키를 사용하여 번역 워크플로의 효율을 높입니다. 편집하려면 텍스트 영역을 선택한 후, 함께 사용할 새로운 키 조합을 입력하세요.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if let registrationMessage {
+                    Label(registrationMessage, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
 
             ShortcutRow(
                 title: "선택한 텍스트 번역",
                 description: "텍스트 선택 후 이 단축키를 누르면 KC DeepL 앱에서 번역이 열립니다.",
                 shortcut: $selectedTextShortcut,
-                defaultShortcut: "⌃⇧1"
+                defaultShortcut: "⌃⇧1",
+                unavailableShortcuts: normalizedShortcuts([
+                    rewriteShortcut,
+                    screenCaptureShortcut
+                ])
             )
 
             ShortcutRow(
                 title: "Live 번역",
                 description: "라이브 번역 화면을 단축키로 즉시 열 수 있습니다.",
                 shortcut: $rewriteShortcut,
-                defaultShortcut: "⌃⇧2"
+                defaultShortcut: "⌃⇧2",
+                unavailableShortcuts: normalizedShortcuts([
+                    selectedTextShortcut,
+                    screenCaptureShortcut
+                ])
             )
 
             ShortcutRow(
@@ -178,6 +245,10 @@ private struct ShortcutSettingsPane: View {
                 description: "KC DeepL 앱에서 번역하려는 텍스트의 스크린샷을 찍습니다.",
                 shortcut: $screenCaptureShortcut,
                 defaultShortcut: "⌃⇧3",
+                unavailableShortcuts: normalizedShortcuts([
+                    selectedTextShortcut,
+                    rewriteShortcut
+                ]),
                 note: "OCR 인식은 다음 구현 단계에서 연결됩니다."
             )
 
@@ -190,6 +261,15 @@ private struct ShortcutSettingsPane: View {
                 }
             }
         }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .kcDeepLShortcutRegistrationFailed)
+        ) { notification in
+            registrationMessage = notification.object as? String
+        }
+    }
+
+    private func normalizedShortcuts(_ values: [String]) -> Set<String> {
+        Set(values.compactMap { AppShortcutDescriptor.parse($0)?.displayString })
     }
 }
 
@@ -601,7 +681,9 @@ private struct ShortcutRow: View {
     let description: String
     @Binding var shortcut: String
     let defaultShortcut: String
+    let unavailableShortcuts: Set<String>
     var note: String?
+    @State private var validationMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -626,13 +708,28 @@ private struct ShortcutRow: View {
 
                 Spacer()
 
-                TextField("", text: $shortcut)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                VStack(alignment: .trailing, spacing: 5) {
+                    ShortcutRecorder(
+                        shortcut: $shortcut,
+                        unavailableShortcuts: unavailableShortcuts,
+                        onValidationError: { validationMessage = $0 }
+                    )
                     .frame(width: 180)
+
+                    if let validationMessage {
+                        Text(validationMessage)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    } else {
+                        Text("클릭한 뒤 새 조합을 누르세요")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 Button {
                     shortcut = defaultShortcut
+                    validationMessage = nil
                 } label: {
                     Image(systemName: "arrow.uturn.backward")
                 }

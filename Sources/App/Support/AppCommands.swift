@@ -1,9 +1,10 @@
 import AppKit
 @preconcurrency import ApplicationServices
 import Carbon
+import os
 import SwiftUI
 
-enum AppCommandAction: String {
+enum AppCommandAction: String, Hashable {
     case textTranslation
     case writing
     case fileTranslation
@@ -21,6 +22,9 @@ enum AppCommandAction: String {
 
 extension Notification.Name {
     static let kcDeepLPerformAction = Notification.Name("KCDeepLPerformAction")
+    static let kcDeepLShortcutRegistrationFailed = Notification.Name(
+        "KCDeepLShortcutRegistrationFailed"
+    )
 }
 
 struct AppCommandPayload {
@@ -95,25 +99,19 @@ struct AppCommandBridge: View {
 }
 
 @MainActor
-final class GlobalHotKeyManager {
-    private struct HotKeyRegistration {
-        let action: AppCommandAction
-        let keyCode: UInt32
-        let id: UInt32
-    }
-
+final class GlobalHotKeyManager: NSObject {
     private let signature = FourCharCode("KCDL")
     private var eventHandler: EventHandlerRef?
     private var hotKeyRefs: [EventHotKeyRef] = []
     private var actionsByID: [UInt32: AppCommandAction] = [:]
+    private var registeredDescriptors: [UInt32: AppShortcutDescriptor] = [:]
+    private var resolvedDescriptors: [UInt32: AppShortcutDescriptor] = [:]
     private var isRunning = false
     private var captureTask: Task<Void, Never>?
-
-    private let registrations: [HotKeyRegistration] = [
-        HotKeyRegistration(action: .textTranslation, keyCode: UInt32(kVK_ANSI_1), id: 1),
-        HotKeyRegistration(action: .writing, keyCode: UInt32(kVK_ANSI_2), id: 2),
-        HotKeyRegistration(action: .screenCapture, keyCode: UInt32(kVK_ANSI_3), id: 3)
-    ]
+    private let logger = Logger(
+        subsystem: "com.h0tshin.KCDeepL",
+        category: "GlobalHotKey"
+    )
 
     func start() {
         guard !isRunning else {
@@ -121,18 +119,28 @@ final class GlobalHotKeyManager {
         }
 
         installEventHandler()
-        registerHotKeys()
+        resolvedDescriptors = currentDescriptors()
+        if !registerHotKeys(resolvedDescriptors) {
+            notifyRegistrationFailure()
+        }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(preferencesDidChange),
+            name: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard
+        )
         isRunning = true
     }
 
     func stop() {
         captureTask?.cancel()
         captureTask = nil
-        for hotKeyRef in hotKeyRefs {
-            UnregisterEventHotKey(hotKeyRef)
-        }
-        hotKeyRefs.removeAll()
-        actionsByID.removeAll()
+        NotificationCenter.default.removeObserver(
+            self,
+            name: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard
+        )
+        unregisterHotKeys()
 
         if let eventHandler {
             RemoveEventHandler(eventHandler)
@@ -189,15 +197,22 @@ final class GlobalHotKeyManager {
         }
     }
 
-    private func registerHotKeys() {
-        let modifiers = UInt32(controlKey | shiftKey)
+    @discardableResult
+    private func registerHotKeys(
+        _ descriptors: [UInt32: AppShortcutDescriptor]
+    ) -> Bool {
+        var didRegisterAll = true
 
-        for registration in registrations {
-            let hotKeyID = EventHotKeyID(signature: signature, id: registration.id)
+        for definition in AppShortcutDefinition.all {
+            guard let descriptor = descriptors[definition.hotKeyID] else {
+                didRegisterAll = false
+                continue
+            }
+            let hotKeyID = EventHotKeyID(signature: signature, id: definition.hotKeyID)
             var hotKeyRef: EventHotKeyRef?
             let status = RegisterEventHotKey(
-                registration.keyCode,
-                modifiers,
+                descriptor.keyCode,
+                descriptor.carbonModifiers,
                 hotKeyID,
                 GetApplicationEventTarget(),
                 0,
@@ -206,11 +221,103 @@ final class GlobalHotKeyManager {
 
             if status == noErr, let hotKeyRef {
                 hotKeyRefs.append(hotKeyRef)
-                actionsByID[registration.id] = registration.action
+                actionsByID[definition.hotKeyID] = definition.action
+                registeredDescriptors[definition.hotKeyID] = descriptor
             } else {
-                NSLog("KCDeepL failed to register global hotkey \(registration.id): \(status)")
+                didRegisterAll = false
+                let hotKeyID = definition.hotKeyID
+                let displayString = descriptor.displayString
+                logger.error(
+                    "Failed to register hotkey \(hotKeyID) (\(displayString, privacy: .public)): \(status)"
+                )
             }
         }
+        return didRegisterAll
+    }
+
+    private func unregisterHotKeys() {
+        for hotKeyRef in hotKeyRefs {
+            UnregisterEventHotKey(hotKeyRef)
+        }
+        hotKeyRefs.removeAll()
+        actionsByID.removeAll()
+        registeredDescriptors.removeAll()
+    }
+
+    @objc private func preferencesDidChange() {
+        guard isRunning else {
+            return
+        }
+
+        let updatedDescriptors = currentDescriptors()
+        guard updatedDescriptors != resolvedDescriptors else {
+            return
+        }
+
+        let previousDescriptors = resolvedDescriptors
+        unregisterHotKeys()
+        if registerHotKeys(updatedDescriptors) {
+            resolvedDescriptors = updatedDescriptors
+            logger.info("Global hotkeys reloaded from preferences")
+            return
+        }
+
+        unregisterHotKeys()
+        normalizePreferences(from: previousDescriptors)
+        resolvedDescriptors = previousDescriptors
+        _ = registerHotKeys(previousDescriptors)
+        notifyRegistrationFailure()
+    }
+
+    private func currentDescriptors() -> [UInt32: AppShortcutDescriptor] {
+        var descriptors = Dictionary(
+            uniqueKeysWithValues: AppShortcutDefinition.all.map {
+                ($0.hotKeyID, $0.descriptor())
+            }
+        )
+
+        let uniqueDisplayValues = Set(descriptors.values.map(\.displayString))
+        if uniqueDisplayValues.count != AppShortcutDefinition.all.count {
+            descriptors = Dictionary(
+                uniqueKeysWithValues: AppShortcutDefinition.all.map { definition in
+                    guard let descriptor = AppShortcutDescriptor.parse(
+                        definition.defaultValue
+                    ) else {
+                        preconditionFailure(
+                            "Invalid built-in shortcut: \(definition.defaultValue)"
+                        )
+                    }
+                    return (definition.hotKeyID, descriptor)
+                }
+            )
+        }
+
+        normalizePreferences(from: descriptors)
+        return descriptors
+    }
+
+    private func normalizePreferences(
+        from descriptors: [UInt32: AppShortcutDescriptor]
+    ) {
+        for definition in AppShortcutDefinition.all {
+            guard let descriptor = descriptors[definition.hotKeyID] else {
+                continue
+            }
+            if UserDefaults.standard.string(forKey: definition.preferenceKey)
+                != descriptor.displayString {
+                UserDefaults.standard.set(
+                    descriptor.displayString,
+                    forKey: definition.preferenceKey
+                )
+            }
+        }
+    }
+
+    private func notifyRegistrationFailure() {
+        NotificationCenter.default.post(
+            name: .kcDeepLShortcutRegistrationFailed,
+            object: "다른 앱 또는 macOS가 이미 사용 중인 조합입니다. 이전 단축키로 복구했습니다."
+        )
     }
 
     private func handleHotKey(id: UInt32) {

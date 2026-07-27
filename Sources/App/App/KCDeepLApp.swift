@@ -26,28 +26,68 @@ struct KCDeepLApp: App {
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {}
-
-            CommandMenu("KC DeepL") {
-                Button("텍스트 번역") {
-                    AppActionDispatcher.shared.perform(.textTranslation)
-                }
-                .keyboardShortcut("1", modifiers: [.control, .shift])
-
-                Button("Live 번역") {
-                    AppActionDispatcher.shared.perform(.writing)
-                }
-                .keyboardShortcut("2", modifiers: [.control, .shift])
-
-                Button("화면 캡처") {
-                    AppActionDispatcher.shared.perform(.screenCapture)
-                }
-                .keyboardShortcut("3", modifiers: [.control, .shift])
-            }
+            KCDeepLShortcutCommands()
         }
 
         Settings {
             SettingsView()
                 .preferredColorScheme(.dark)
+        }
+    }
+}
+
+private struct KCDeepLShortcutCommands: Commands {
+    @AppStorage(PreferenceKeys.selectedTextShortcut)
+    private var selectedTextShortcut = AppShortcutDefinition.textTranslation.defaultValue
+    @AppStorage(PreferenceKeys.rewriteShortcut)
+    private var liveTranslationShortcut = AppShortcutDefinition.liveTranslation.defaultValue
+    @AppStorage(PreferenceKeys.screenCaptureShortcut)
+    private var screenCaptureShortcut = AppShortcutDefinition.screenCapture.defaultValue
+
+    var body: some Commands {
+        CommandMenu("KC DeepL") {
+            shortcutButton(
+                title: "텍스트 번역",
+                action: .textTranslation,
+                storedValue: selectedTextShortcut,
+                definition: .textTranslation
+            )
+            shortcutButton(
+                title: "Live 번역",
+                action: .writing,
+                storedValue: liveTranslationShortcut,
+                definition: .liveTranslation
+            )
+            shortcutButton(
+                title: "화면 캡처",
+                action: .screenCapture,
+                storedValue: screenCaptureShortcut,
+                definition: .screenCapture
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func shortcutButton(
+        title: String,
+        action: AppCommandAction,
+        storedValue: String,
+        definition: AppShortcutDefinition
+    ) -> some View {
+        let descriptor = AppShortcutDescriptor.parse(storedValue) ?? definition.descriptor()
+
+        if let character = descriptor.keyEquivalentCharacter {
+            Button(title) {
+                AppActionDispatcher.shared.perform(action)
+            }
+            .keyboardShortcut(
+                KeyEquivalent(character),
+                modifiers: descriptor.swiftUIModifiers
+            )
+        } else {
+            Button(title) {
+                AppActionDispatcher.shared.perform(action)
+            }
         }
     }
 }

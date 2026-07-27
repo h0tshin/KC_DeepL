@@ -3,11 +3,22 @@ import AppKit
 @MainActor
 final class AppStatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private var shortcutItems: [AppCommandAction: NSMenuItem] = [:]
 
     override init() {
         super.init()
         configureButton()
         configureMenu()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(preferencesDidChange),
+            name: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     private func configureButton() {
@@ -32,19 +43,23 @@ final class AppStatusItemController: NSObject {
     private func configureMenu() {
         let menu = NSMenu()
 
-        menu.addItem(actionItem(
+        let textTranslationItem = actionItem(
             title: "텍스트 번역",
-            keyEquivalent: "1",
-            modifiers: [.control, .shift],
+            keyEquivalent: "",
+            modifiers: [],
             action: #selector(performTextTranslation)
-        ))
+        )
+        shortcutItems[.textTranslation] = textTranslationItem
+        menu.addItem(textTranslationItem)
 
-        menu.addItem(actionItem(
+        let liveTranslationItem = actionItem(
             title: "Live 번역",
-            keyEquivalent: "2",
-            modifiers: [.control, .shift],
+            keyEquivalent: "",
+            modifiers: [],
             action: #selector(performWriting)
-        ))
+        )
+        shortcutItems[.writing] = liveTranslationItem
+        menu.addItem(liveTranslationItem)
 
         menu.addItem(actionItem(
             title: "파일 번역",
@@ -53,12 +68,14 @@ final class AppStatusItemController: NSObject {
             action: #selector(performFileTranslation)
         ))
 
-        menu.addItem(actionItem(
+        let screenCaptureItem = actionItem(
             title: "화면 캡처",
-            keyEquivalent: "3",
-            modifiers: [.control, .shift],
+            keyEquivalent: "",
+            modifiers: [],
             action: #selector(performScreenCapture)
-        ))
+        )
+        shortcutItems[.screenCapture] = screenCaptureItem
+        menu.addItem(screenCaptureItem)
 
         menu.addItem(.separator())
 
@@ -77,6 +94,7 @@ final class AppStatusItemController: NSObject {
         ))
 
         statusItem.menu = menu
+        refreshShortcutItems()
     }
 
     private func actionItem(
@@ -107,6 +125,21 @@ final class AppStatusItemController: NSObject {
         }
 
         return nil
+    }
+
+    @objc private func preferencesDidChange() {
+        refreshShortcutItems()
+    }
+
+    private func refreshShortcutItems() {
+        for definition in AppShortcutDefinition.all {
+            guard let item = shortcutItems[definition.action] else {
+                continue
+            }
+            let descriptor = definition.descriptor()
+            item.keyEquivalent = descriptor.keyEquivalent
+            item.keyEquivalentModifierMask = descriptor.modifiers
+        }
     }
 
     @objc private func performTextTranslation() {

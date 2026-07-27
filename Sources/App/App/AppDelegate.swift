@@ -11,6 +11,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         _ = statusItemController
         globalHotKeyManager.start()
+        LaunchAtLoginController.shared.synchronizeOnLaunch()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        LaunchAtLoginController.shared.refreshStatus()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
