@@ -51,9 +51,11 @@ enum RichTextFormatting {
             if updated[.font] == nil {
                 updated[.font] = NSFont.systemFont(ofSize: fontSize)
             }
-            if updated[.foregroundColor] == nil {
-                updated[.foregroundColor] = NSColor.labelColor
-            }
+
+            // Preserve semantic and typographic formatting while discarding
+            // source-specific colors that may be unreadable in the app theme.
+            updated.removeValue(forKey: .backgroundColor)
+            updated[.foregroundColor] = NSColor.labelColor
             mutable.setAttributes(updated, range: range)
         }
 
