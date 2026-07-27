@@ -69,10 +69,11 @@ final class AppActionDispatcher {
     }
 
     private func showMainWindow() {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        let application = NSApplication.shared
+        application.setActivationPolicy(.regular)
+        application.activate(ignoringOtherApps: true)
 
-        if let window = NSApp.windows.first(where: { $0.title == "KC DeepL" }) {
+        if let window = application.windows.first(where: { $0.title == "KC DeepL" }) {
             if window.isMiniaturized {
                 window.deminiaturize(nil)
             }

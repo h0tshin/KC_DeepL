@@ -77,6 +77,19 @@ cat >"$INFO_PLIST" <<PLIST
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
   <string>1.0</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>CFBundleURLName</key>
+      <string>com.h0tshin.KCDeepL.translate</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>kcdeepl</string>
+      </array>
+    </dict>
+  </array>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>

@@ -129,6 +129,7 @@ struct ContentView: View {
             viewModel.setHistoryEnabled(historyEnabled)
             viewModel.runStartupChecks(apiKey: apiKey)
         }
+        .onOpenURL(perform: PopClipIntegration.handle)
         .onChange(of: viewModel.sourceText) { _, _ in
             if viewModel.sourceText.isEmpty {
                 pasteBackTarget = nil

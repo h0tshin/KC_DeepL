@@ -1,0 +1,27 @@
+{
+  "name": {
+    "en": "Translate with KC DeepL",
+    "ko": "KC DeepL로 번역"
+  },
+  "identifier": "com.h0tshin.KCDeepL.PopClipExtension",
+  "description": {
+    "en": "Send selected text to KC DeepL for translation.",
+    "ko": "선택한 텍스트를 KC DeepL로 보내 번역합니다."
+  },
+  "icon": "symbol:character.book.closed",
+  "macosVersion": "14.0",
+  "showAs": "icon",
+  "requirements": [
+    "text"
+  ],
+  "url": "kcdeepl://translate?text={popclip text}",
+  "cleanQuery": false,
+  "app": {
+    "name": "KC DeepL",
+    "link": "https://github.com/h0tshin/KC_DeepL",
+    "checkInstalled": true,
+    "bundleIdentifiers": [
+      "com.h0tshin.KCDeepL"
+    ]
+  }
+}
