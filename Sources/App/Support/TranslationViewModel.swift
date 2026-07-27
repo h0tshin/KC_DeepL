@@ -290,6 +290,8 @@ final class TranslationViewModel: ObservableObject {
                         translatedText: output,
                         sourceLanguage: sourceLanguage,
                         targetLanguage: targetLanguage,
+                        backend: backend,
+                        provider: backend == .llmAPI ? provider : nil,
                         modelID: modelID
                     )
                 )
@@ -368,6 +370,29 @@ final class TranslationViewModel: ObservableObject {
 
     func setHistoryEnabled(_ enabled: Bool) {
         historyPreferenceEnabled = enabled
+    }
+
+    func cancelPendingTranslation() {
+        _ = nextRequestGeneration()
+        isTranslating = false
+    }
+
+    func recordComparisonTranslation(_ record: CompletedComparisonTranslation) {
+        guard historyPreferenceEnabled else {
+            return
+        }
+
+        appendHistoryItem(
+            TranslationHistoryItem(
+                sourceText: record.sourceText,
+                translatedText: record.translatedText,
+                sourceLanguage: record.sourceLanguage,
+                targetLanguage: record.targetLanguage,
+                backend: .codexAppServer,
+                provider: nil,
+                modelID: record.modelID
+            )
+        )
     }
 
     func swapLanguages(sourceLanguage: inout LanguageOption, targetLanguage: inout LanguageOption) {

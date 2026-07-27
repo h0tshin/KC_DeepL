@@ -4,6 +4,7 @@ import KCDeepLCore
 
 struct ContentView: View {
     @ObservedObject var viewModel: TranslationViewModel
+    @ObservedObject var comparisonViewModel: TranslationComparisonViewModel
     @ObservedObject var liveTranslationViewModel: LiveTranslationViewModel
     @SceneStorage("kc.main.showTools") private var showTools = false
     @AppStorage(PreferenceKeys.mainSourceLanguage) private var sourceLanguageCode = LanguageOption.english.code
@@ -90,6 +91,10 @@ struct ContentView: View {
                             readingFontSizeRaw: $readingFontSizeRaw,
                             onPaste: pasteClipboardIntoSource,
                             onSwap: {
+                                if selectedMode == .comparison {
+                                    swapComparisonLanguages()
+                                    return
+                                }
                                 var sourceLanguage = sourceLanguage
                                 var targetLanguage = targetLanguage
                                 viewModel.swapLanguages(
@@ -101,25 +106,43 @@ struct ContentView: View {
                             }
                         )
 
-                        TranslationWorkspace(
-                            sourceText: Binding(
-                                get: { viewModel.sourceText },
-                                set: { viewModel.setSourceText($0) }
-                            ),
-                            sourceAttributedText: Binding(
-                                get: { viewModel.sourceAttributedText },
-                                set: { viewModel.setSourceAttributedText($0) }
-                            ),
-                            translatedText: viewModel.translatedText,
-                            fontSize: readingFontSize,
-                            isTranslating: viewModel.isTranslating,
-                            errorMessage: viewModel.errorMessage,
-                            pasteBackTarget: pasteBackTarget,
-                            onCapture: viewModel.beginScreenCaptureMock,
-                            onPasteBack: pasteTranslationBackToSourceApp
-                        )
+                        if selectedMode == .comparison {
+                            TranslationComparisonView(
+                                viewModel: comparisonViewModel,
+                                sourceText: Binding(
+                                    get: { viewModel.sourceText },
+                                    set: { viewModel.setSourceText($0) }
+                                ),
+                                sourceAttributedText: Binding(
+                                    get: { viewModel.sourceAttributedText },
+                                    set: { viewModel.setSourceAttributedText($0) }
+                                ),
+                                fontSize: readingFontSize,
+                                onCapture: viewModel.beginScreenCaptureMock,
+                                onCompare: startTranslationComparison,
+                                onCancel: comparisonViewModel.cancelComparison
+                            )
+                        } else {
+                            TranslationWorkspace(
+                                sourceText: Binding(
+                                    get: { viewModel.sourceText },
+                                    set: { viewModel.setSourceText($0) }
+                                ),
+                                sourceAttributedText: Binding(
+                                    get: { viewModel.sourceAttributedText },
+                                    set: { viewModel.setSourceAttributedText($0) }
+                                ),
+                                translatedText: viewModel.translatedText,
+                                fontSize: readingFontSize,
+                                isTranslating: viewModel.isTranslating,
+                                errorMessage: viewModel.errorMessage,
+                                pasteBackTarget: pasteBackTarget,
+                                onCapture: viewModel.beginScreenCaptureMock,
+                                onPasteBack: pasteTranslationBackToSourceApp
+                            )
 
-                        BottomStatusBar(statusMessage: viewModel.statusMessage)
+                            BottomStatusBar(statusMessage: viewModel.statusMessage)
+                        }
                     }
                 }
 
@@ -155,14 +178,23 @@ struct ContentView: View {
             if viewModel.sourceText.isEmpty {
                 pasteBackTarget = nil
             }
-            scheduleAutoTranslation()
+            comparisonViewModel.resetForInputChange()
+            if selectedMode != .comparison {
+                scheduleAutoTranslation()
+            }
         }
         .onChange(of: sourceLanguage) { _, _ in
-            scheduleAutoTranslation()
+            comparisonViewModel.resetForInputChange()
+            if selectedMode != .comparison {
+                scheduleAutoTranslation()
+            }
         }
         .onChange(of: targetLanguage) { _, _ in
             normalizeSourceLanguageForTarget()
-            scheduleAutoTranslation()
+            comparisonViewModel.resetForInputChange()
+            if selectedMode != .comparison {
+                scheduleAutoTranslation()
+            }
         }
         .onChange(of: providerRaw) { _, _ in
             if translationBackend == .llmAPI {
@@ -201,6 +233,17 @@ struct ContentView: View {
                 scheduleAutoTranslation()
             }
         }
+        .onChange(of: selectedMode) { previousMode, newMode in
+            if previousMode == .comparison, newMode != .comparison {
+                comparisonViewModel.cancelComparison()
+            }
+            if newMode == .comparison {
+                viewModel.cancelPendingTranslation()
+            } else if newMode == .text {
+                runStartupChecks()
+                scheduleAutoTranslation()
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .kcDeepLPerformAction)) { notification in
             if let payload = notification.object as? AppCommandPayload {
                 handleCommandAction(
@@ -222,6 +265,9 @@ struct ContentView: View {
     }
 
     private func scheduleAutoTranslation() {
+        guard selectedMode == .text else {
+            return
+        }
         viewModel.scheduleAutoTranslation(
             sourceLanguage: sourceLanguage,
             targetLanguage: targetLanguage,
@@ -251,6 +297,34 @@ struct ContentView: View {
         }
 
         sourceLanguage = .korean
+    }
+
+    private func swapComparisonLanguages() {
+        var source = sourceLanguage
+        var target = targetLanguage
+        if source == .autoDetect {
+            source = target
+            target = target == .korean ? .english : .korean
+        } else {
+            swap(&source, &target)
+        }
+        sourceLanguage = source
+        targetLanguage = target
+        comparisonViewModel.resetForInputChange()
+    }
+
+    private func startTranslationComparison() {
+        let source = RichTextFormatting.markdown(
+            from: viewModel.sourceAttributedText,
+            fallback: viewModel.sourceText
+        )
+        comparisonViewModel.startComparison(
+            sourceText: source,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage
+        ) { record in
+            viewModel.recordComparisonTranslation(record)
+        }
     }
 
     private func pasteClipboardIntoSource() {
@@ -324,6 +398,7 @@ struct ContentView: View {
 
 private enum TranslationMode: String, CaseIterable, Identifiable {
     case text = "텍스트 번역"
+    case comparison = "번역비교"
     case write = "Live 번역"
     case files = "파일 번역"
     case history = "기록"
@@ -334,6 +409,8 @@ private enum TranslationMode: String, CaseIterable, Identifiable {
         switch self {
         case .text:
             "textformat"
+        case .comparison:
+            "rectangle.3.group"
         case .write:
             "speaker.wave.2"
         case .files:
@@ -634,7 +711,7 @@ private enum WorkspacePane {
     case result
 }
 
-private struct SourceEditorPane: View {
+struct SourceEditorPane: View {
     @Binding var text: String
     @Binding var attributedText: NSAttributedString
     let width: CGFloat
@@ -945,7 +1022,7 @@ private enum MarkdownFormatting {
     }
 }
 
-private struct MarkdownText: View {
+struct MarkdownText: View {
     let text: String
     var fontSize: CGFloat
     var weight: Font.Weight = .regular
@@ -1121,9 +1198,15 @@ private struct HistoryCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Text(item.relativeTimestamp)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.relativeTimestamp)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+
+                    Label(item.engineSummary, systemImage: "cpu")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
 
                 Spacer()
 
@@ -1177,7 +1260,8 @@ private struct HistoryTextBlock: View {
                     .foregroundStyle(.secondary)
             }
 
-            MarkdownText(text: text, fontSize: 14, weight: .semibold, lineLimit: 3)
+            MarkdownText(text: text, fontSize: 14, weight: .semibold)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -1231,53 +1315,61 @@ private struct ToolsPanel: View {
     let onClose: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
                 ToolPanelToggleButton(action: onClose)
                 Spacer()
             }
+            .padding(.bottom, 18)
 
-            Text("편집 도구")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("편집 도구")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
-            ToolRow(title: "격식/비격식", icon: "text.badge.checkmark", isDisabled: true)
+                    ToolRow(title: "격식/비격식", icon: "text.badge.checkmark", isDisabled: true)
 
-            Text("사용자 지정")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                    Text("사용자 지정")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
-            ToolRow(title: "스타일 프로필 0/1", icon: "square.grid.2x2", hasToggle: true)
-            ToolRow(title: "용어집 0/1", icon: "book", hasToggle: true)
-            ToolRow(title: "스타일 규칙", icon: "quote.opening", hasToggle: true)
+                    ToolRow(title: "스타일 프로필 0/1", icon: "square.grid.2x2", hasToggle: true)
+                    ToolRow(title: "용어집 0/1", icon: "book", hasToggle: true)
+                    ToolRow(title: "스타일 규칙", icon: "quote.opening", hasToggle: true)
 
-            Divider().opacity(0.25)
+                    Divider().opacity(0.25)
 
-            Text("최근 기록")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                    Text("최근 기록")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
-            if history.isEmpty {
-                Text("아직 저장된 번역이 없습니다.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
-            } else {
-                ForEach(history.prefix(3)) { item in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(item.translatedText)
-                            .font(.system(size: 12, weight: .semibold))
-                            .lineLimit(2)
-                        Text(item.modelID)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                    if history.isEmpty {
+                        Text("아직 저장된 번역이 없습니다.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        ForEach(history.prefix(3)) { item in
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(item.translatedText)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text(item.engineSummary)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 7))
+                        }
                     }
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 7))
-                }
-            }
 
-            Spacer()
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollIndicators(.visible)
         }
         .padding(20)
         .frame(width: 280)

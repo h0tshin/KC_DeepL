@@ -25,10 +25,12 @@ Sources/
     Views/
       ContentView.swift
       SettingsView.swift
+      TranslationComparisonView.swift
     Services/
       CodexAppServerTransport.swift
     Support/
       Theme.swift
+      TranslationComparisonViewModel.swift
       TranslationViewModel.swift
   KCDeepLCore/
     AppDefaults.swift
@@ -123,6 +125,22 @@ codex app-server --listen stdio://
 
 Codex 작업에는 원문과 결과가 누적될 수 있다. 이는 KC DeepL의 로컬 번역 기록 저장 여부와 독립적이며, 전용 작업 폴더, 읽기 전용/무승인 정책, 도구 비활성화는 번역 요청이 사용자 프로젝트나 연결 서비스에 접근하지 않도록 실행 범위를 제한한다.
 
+### 4.4 번역비교
+
+상단의 `번역비교` 모드는 동일한 원문과 언어 설정으로 다음 모델을 고정 순서로 요청한다.
+
+1. `gpt-5.6-sol`
+2. `gpt-5.6-terra`
+3. `gpt-5.6-luna`
+4. `gpt-5.5`
+5. `gpt-5.4`
+6. `gpt-5.4-mini`
+7. `gpt-5.3-codex-spark`
+
+실행 전에 App Server의 `model/list`와 대조하여 없는 모델은 해당 탭에 사용 불가 상태로 표시한다. 사용 가능한 모델은 고정 `KC DeepL 번역` 작업의 turn 충돌을 피하도록 순차 실행하고, 개별 실패는 그 탭에만 표시한 뒤 다음 모델을 계속 처리한다. 원문 또는 언어가 바뀌거나 모드를 벗어나면 현재 비교를 취소하며 늦게 도착한 결과를 무시한다.
+
+성공 결과는 탭별로 독립 보관하고 기록 설정이 켜져 있으면 각 결과를 `codexAppServer` 엔진과 실제 모델 ID로 로컬 기록에 추가한다.
+
 ## 5. 실시간 오디오 안정성
 
 이 절의 Gemini Live 동작은 텍스트 번역 백엔드 선택의 영향을 받지 않는다.
@@ -140,7 +158,7 @@ Codex 작업에는 원문과 결과가 누적될 수 있다. 이는 KC DeepL의 
 
 메인 창:
 
-- 상단 모드 바: 텍스트 번역, 글 작성, 파일 번역, 기록
+- 상단 모드 바: 텍스트 번역, 번역비교, Live 번역, 파일 번역, 기록
 - 언어 바: 원문 언어, 전환 버튼, 대상 언어
 - 작업 영역: 왼쪽 입력, 오른쪽 결과
 - 하단 상태 바: 보안/상태/보조 아이콘
@@ -184,6 +202,8 @@ Codex 작업에는 원문과 결과가 누적될 수 있다. 이는 KC DeepL의 
 - Codex turn 취소/interrupt와 terminal 이벤트 대기 검증
 - Codex final output 선택, `{translation:string}` output schema, 정상 JSON decode 검증
 - ViewModel의 백엔드 라우팅과 취소된 결과 배제 검증
+- 번역비교 모델 순서, 순차 실행, 부분 실패 지속 검증
+- 번역 기록의 엔진/공급자/모델 직렬화와 구버전 기록 호환 검증
 - Live transcript 언어 라우팅, 증분 조립, 문장 분할 회귀 검증
 - 파일 기반 번역 기록 저장/로드 검증
 - 초기 비동기 load와 종료 flush의 merge 검증
@@ -195,3 +215,5 @@ Codex 작업에는 원문과 결과가 누적될 수 있다. 이는 KC DeepL의 
 - OCR 권한 상태별 UI 검증
 
 번역 기록과 Live 대화 기록은 Application Support에 atomic JSON으로 저장하며 현재 암호화하지 않는다. 앱 수명의 단일 ViewModel이 actor 저장소를 소유하고 빠른 연속 변경을 합쳐 MainActor의 파일 I/O를 피한다. 종료 시 신규 번역·Live 이벤트를 먼저 중단하고 초기 load를 기다린 뒤, generation이 안정될 때까지 최신 snapshot을 직렬 저장한다.
+
+번역 기록은 원문과 결과를 생략하지 않고 스크롤 가능한 기록 화면에 모두 표시한다. 신규 기록은 `backend`, API 경로의 `provider`, `modelID`를 저장하며, 기존 JSON과 호환되도록 새 엔진 필드는 optional로 decode한다.

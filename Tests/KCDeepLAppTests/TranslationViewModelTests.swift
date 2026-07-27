@@ -35,6 +35,12 @@ final class TranslationViewModelTests: XCTestCase {
         XCTAssertEqual(codexRequests.map(\.modelID), ["gpt-test"])
         XCTAssertEqual(codexRequests.map(\.apiKey), [""])
         XCTAssertEqual(viewModel.history.map(\.translatedText), ["Codex 번역 결과"])
+        XCTAssertEqual(viewModel.history.first?.backend, .codexAppServer)
+        XCTAssertNil(viewModel.history.first?.provider)
+        XCTAssertEqual(
+            viewModel.history.first?.engineSummary,
+            "엔진: Codex App Server · 모델: gpt-test"
+        )
     }
 
     func testLLMAPIBackendContinuesToUseAPIClient() async throws {
@@ -55,7 +61,7 @@ final class TranslationViewModelTests: XCTestCase {
             modelID: "gemini-test",
             apiKey: "test-key",
             temperature: 0.2,
-            historyEnabled: false,
+            historyEnabled: true,
             backend: .llmAPI
         )
 
@@ -64,6 +70,40 @@ final class TranslationViewModelTests: XCTestCase {
         let codexRequests = await codexClient.requestsSnapshot()
         XCTAssertEqual(apiRequests.map(\.modelID), ["gemini-test"])
         XCTAssertEqual(codexRequests.count, 0)
+        XCTAssertEqual(viewModel.history.first?.backend, .llmAPI)
+        XCTAssertEqual(viewModel.history.first?.provider, .gemini)
+        XCTAssertEqual(
+            viewModel.history.first?.engineSummary,
+            "엔진: Gemini · 모델: gemini-test"
+        )
+    }
+
+    func testComparisonTranslationRecordsCodexEngineMetadata() async throws {
+        let viewModel = TranslationViewModel(
+            client: RecordingTranslationClient(output: ""),
+            historyStore: InMemoryTranslationHistoryStore()
+        )
+        try await Task.sleep(for: .milliseconds(30))
+        viewModel.setHistoryEnabled(true)
+
+        viewModel.recordComparisonTranslation(
+            CompletedComparisonTranslation(
+                sourceText: "Complete source",
+                translatedText: "전체 번역",
+                sourceLanguage: .english,
+                targetLanguage: .korean,
+                modelID: "gpt-5.6-sol"
+            )
+        )
+
+        XCTAssertEqual(viewModel.history.count, 1)
+        XCTAssertEqual(viewModel.history.first?.sourceText, "Complete source")
+        XCTAssertEqual(viewModel.history.first?.translatedText, "전체 번역")
+        XCTAssertEqual(viewModel.history.first?.backend, .codexAppServer)
+        XCTAssertEqual(
+            viewModel.history.first?.engineSummary,
+            "엔진: Codex App Server · 모델: gpt-5.6-sol"
+        )
     }
 
     func testOlderRequestCannotOverwriteNewerConfigurationResult() async throws {

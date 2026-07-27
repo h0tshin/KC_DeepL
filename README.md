@@ -11,6 +11,8 @@ KC DeepL은 DeepL 스타일의 macOS 즉석 번역 앱입니다. 텍스트 번�
 
 Codex 번역은 이름이 **`KC DeepL 번역`**인 전용 Codex 작업을 계속 재사용합니다. 작업 ID와 선택 모델은 앱 설정에 저장되며, Codex 작업의 대화 내역은 KC DeepL의 로컬 번역 기록과 별개로 유지됩니다. 따라서 KC DeepL에서 로컬 기록 저장을 꺼도 Codex 작업 내역이 자동으로 삭제되지는 않습니다.
 
+상단의 **번역비교**에서는 같은 원문을 SOL, Terra, Luna, 5.5, 5.4, 5.4 mini, 5.3의 7개 Codex 모델로 번역하고 탭별 결과를 비교할 수 있습니다. 고정 Codex 작업을 안전하게 공유하도록 모델 요청은 순서대로 실행되며, 한 모델이 실패해도 나머지 비교는 계속됩니다.
+
 LLM API 키는 앱에 포함되지 않습니다. 첫 실행 후 **설정 > LLM 번역 / LLM Live**에서 필요한 키를 직접 입력하면 이 Mac의 앱 설정(`UserDefaults`)에 저장됩니다. Codex App Server 경로에는 API 키가 필요하지 않습니다.
 
 ## 실행
@@ -39,10 +41,11 @@ swift test
 - 텍스트 번역용 Codex App Server / LLM API 백엔드 선택
 - 설치된 Codex 실행 파일 탐색, 로컬 stdio App Server 연결, 동적 모델 선택
 - 고정된 `KC DeepL 번역` Codex 작업 재사용
+- 7개 Codex 모델의 탭 기반 번역 품질 비교
 - 기존 Gemini API 번역 클라이언트
 - Gemini Live 실시간 음성 번역과 오디오 By Pass
 - `UserDefaults` 기반 API 설정 저장
-- 로컬 번역 기록과 Live 대화 기록
+- 엔진·모델 정보와 원문/결과 전체를 표시하는 로컬 번역 기록
 - 화면 캡처 진입 목업
 - 번역 프롬프트/응답 파서 단위 테스트
 

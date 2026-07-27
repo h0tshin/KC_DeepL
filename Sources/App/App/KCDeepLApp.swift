@@ -5,6 +5,7 @@ import KCDeepLCore
 struct KCDeepLApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var translationViewModel: TranslationViewModel
+    @StateObject private var translationComparisonViewModel: TranslationComparisonViewModel
     @StateObject private var liveTranslationViewModel: LiveTranslationViewModel
     private let codexAppServerClient: CodexAppServerClient
 
@@ -17,6 +18,12 @@ struct KCDeepLApp: App {
                 appServerClient: codexAppServerClient
             )
         )
+        _translationComparisonViewModel = StateObject(
+            wrappedValue: TranslationComparisonViewModel(
+                client: codexAppServerClient,
+                modelProvider: codexAppServerClient
+            )
+        )
         _liveTranslationViewModel = StateObject(wrappedValue: LiveTranslationViewModel())
         PendingPersistenceRegistry.shared.register {
             await codexAppServerClient.shutdown()
@@ -27,6 +34,7 @@ struct KCDeepLApp: App {
         WindowGroup("KC DeepL", id: "main") {
             ContentView(
                 viewModel: translationViewModel,
+                comparisonViewModel: translationComparisonViewModel,
                 liveTranslationViewModel: liveTranslationViewModel
             )
                 .frame(minWidth: 980, minHeight: 600)
