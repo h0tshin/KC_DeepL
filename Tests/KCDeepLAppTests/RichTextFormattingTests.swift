@@ -84,4 +84,100 @@ final class RichTextFormattingTests: XCTestCase {
             accuracy: 0.01
         )
     }
+
+    func testDisplayMarkdownPreservesParagraphsAndInlineFormatting() throws {
+        let markdown = "First line\nSecond line\n\n**Bold paragraph**\n[Link](https://example.com)"
+
+        let displayed = RichTextFormatting.displayAttributedString(markdown: markdown)
+        let displayedText = String(displayed.characters)
+
+        XCTAssertEqual(
+            displayedText,
+            "First line\nSecond line\n\nBold paragraph\nLink"
+        )
+
+        let attributed = NSAttributedString(displayed)
+        let boldRange = (attributed.string as NSString).range(of: "Bold paragraph")
+        let boldIntent = try XCTUnwrap(
+            attributed.attribute(
+                .inlinePresentationIntent,
+                at: boldRange.location,
+                effectiveRange: nil
+            ) as? NSNumber
+        )
+        XCTAssertTrue(
+            InlinePresentationIntent(rawValue: boldIntent.uintValue)
+                .contains(.stronglyEmphasized)
+        )
+
+        let linkRange = (attributed.string as NSString).range(of: "Link")
+        XCTAssertEqual(
+            attributed.attribute(.link, at: linkRange.location, effectiveRange: nil) as? URL,
+            URL(string: "https://example.com")
+        )
+    }
+
+    func testMarkdownPasteboardFormattingPreservesParagraphsAndStyles() throws {
+        let markdown = "First paragraph\n\n**Bold** and *italic* with <u>underline</u>."
+        let attributed = RichTextFormatting.attributedString(markdown: markdown)
+
+        XCTAssertEqual(
+            attributed.string,
+            "First paragraph\n\nBold and italic with underline."
+        )
+
+        let string = attributed.string as NSString
+        assertFontTrait(.boldFontMask, in: attributed, text: "Bold", string: string)
+        assertFontTrait(.italicFontMask, in: attributed, text: "italic", string: string)
+
+        let underlineRange = string.range(of: "underline")
+        XCTAssertEqual(
+            attributed.attribute(
+                .underlineStyle,
+                at: underlineRange.location,
+                effectiveRange: nil
+            ) as? Int,
+            NSUnderlineStyle.single.rawValue
+        )
+    }
+
+    func testSourceMarkdownPreservesBlankLinesAndBoldRuns() {
+        let source = NSMutableAttributedString(
+            attributedString: RichTextFormatting.plainAttributedString("First paragraph\n\nBold paragraph")
+        )
+        let boldRange = (source.string as NSString).range(of: "Bold paragraph")
+        let boldFont = NSFontManager.shared.convert(
+            NSFont.systemFont(ofSize: 26),
+            toHaveTrait: .boldFontMask
+        )
+        source.addAttribute(.font, value: boldFont, range: boldRange)
+
+        let markdown = RichTextFormatting.markdown(from: source, fallback: source.string)
+
+        XCTAssertEqual(markdown, "First paragraph\n\n**Bold paragraph**")
+    }
+
+    private func assertFontTrait(
+        _ trait: NSFontTraitMask,
+        in attributed: NSAttributedString,
+        text: String,
+        string: NSString,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let range = string.range(of: text)
+        let font = attributed.attribute(
+            .font,
+            at: range.location,
+            effectiveRange: nil
+        ) as? NSFont
+        XCTAssertNotNil(font, file: file, line: line)
+        if let font {
+            XCTAssertTrue(
+                NSFontManager.shared.traits(of: font).contains(trait),
+                file: file,
+                line: line
+            )
+        }
+    }
 }

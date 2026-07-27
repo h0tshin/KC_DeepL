@@ -48,9 +48,25 @@ enum RichTextFormatting {
 
         mutable.enumerateAttributes(in: fullRange) { attributes, range, _ in
             var updated = attributes
-            if updated[.font] == nil {
-                updated[.font] = NSFont.systemFont(ofSize: fontSize)
+            var font = updated[.font] as? NSFont ?? NSFont.systemFont(ofSize: fontSize)
+
+            if let rawIntent = updated[.inlinePresentationIntent] as? NSNumber {
+                let intent = InlinePresentationIntent(rawValue: rawIntent.uintValue)
+                if intent.contains(.stronglyEmphasized) {
+                    font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+                }
+                if intent.contains(.emphasized) {
+                    font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+                }
+                if intent.contains(.code) {
+                    font = NSFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular)
+                }
+                if intent.contains(.strikethrough) {
+                    updated[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+                }
+                updated.removeValue(forKey: .inlinePresentationIntent)
             }
+            updated[.font] = font
 
             // Preserve semantic and typographic formatting while discarding
             // source-specific colors that may be unreadable in the app theme.
@@ -139,13 +155,23 @@ enum RichTextFormatting {
         write(attributed, to: pasteboard)
     }
 
-    static func attributedString(markdown text: String, fontSize: CGFloat = 25) -> NSAttributedString {
-        if let swiftAttributed = try? AttributedString(markdown: text) {
-            let attributed = NSMutableAttributedString(swiftAttributed)
-            return normalize(attributed, fontSize: fontSize)
-        }
+    static func displayAttributedString(markdown text: String) -> AttributedString {
+        let parsed = (
+            try? AttributedString(
+                markdown: text,
+                options: AttributedString.MarkdownParsingOptions(
+                    interpretedSyntax: .inlineOnlyPreservingWhitespace
+                )
+            )
+        ) ?? AttributedString(text)
+        let attributed = NSMutableAttributedString(parsed)
+        applyUnderlineTags(to: attributed)
+        return AttributedString(attributed)
+    }
 
-        return plainAttributedString(text, fontSize: fontSize)
+    static func attributedString(markdown text: String, fontSize: CGFloat = 25) -> NSAttributedString {
+        let attributed = NSMutableAttributedString(displayAttributedString(markdown: text))
+        return normalize(attributed, fontSize: fontSize)
     }
 
     private static func markdownLine(from attributed: NSAttributedString, lineRange: NSRange) -> String {
@@ -185,5 +211,46 @@ enum RichTextFormatting {
         }
 
         return escaped
+    }
+
+    private static func applyUnderlineTags(to attributed: NSMutableAttributedString) {
+        let openingTag = "<u>"
+        let closingTag = "</u>"
+
+        while true {
+            let string = attributed.string as NSString
+            let fullRange = NSRange(location: 0, length: string.length)
+            let openingRange = string.range(
+                of: openingTag,
+                options: [.caseInsensitive],
+                range: fullRange
+            )
+            guard openingRange.location != NSNotFound else {
+                return
+            }
+
+            let contentStart = NSMaxRange(openingRange)
+            let remainingRange = NSRange(
+                location: contentStart,
+                length: string.length - contentStart
+            )
+            let closingRange = string.range(
+                of: closingTag,
+                options: [.caseInsensitive],
+                range: remainingRange
+            )
+            guard closingRange.location != NSNotFound else {
+                return
+            }
+
+            let contentLength = closingRange.location - contentStart
+            attributed.deleteCharacters(in: closingRange)
+            attributed.deleteCharacters(in: openingRange)
+            attributed.addAttribute(
+                .underlineStyle,
+                value: NSUnderlineStyle.single.rawValue,
+                range: NSRange(location: openingRange.location, length: contentLength)
+            )
+        }
     }
 }

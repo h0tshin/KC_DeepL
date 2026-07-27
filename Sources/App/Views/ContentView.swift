@@ -854,8 +854,7 @@ private struct MarkdownText: View {
     }
 
     private var attributedText: AttributedString {
-        (try? AttributedString(markdown: text))
-            ?? AttributedString(text)
+        RichTextFormatting.displayAttributedString(markdown: text)
     }
 }
 

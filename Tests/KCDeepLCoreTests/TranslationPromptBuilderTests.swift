@@ -18,6 +18,8 @@ final class TranslationPromptBuilderTests: XCTestCase {
         XCTAssertTrue(prompt.contains("한국어"))
         XCTAssertTrue(prompt.contains("Return only the translated text"))
         XCTAssertTrue(prompt.contains("Preserve Markdown or HTML-like formatting markers"))
+        XCTAssertTrue(prompt.contains("exactly the same paragraph count"))
+        XCTAssertTrue(prompt.contains("Never merge or split paragraphs"))
         XCTAssertTrue(prompt.contains("Hello, world."))
     }
 
