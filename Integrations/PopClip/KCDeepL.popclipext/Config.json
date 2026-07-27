@@ -8,7 +8,7 @@
     "en": "Send selected text to KC DeepL for translation.",
     "ko": "선택한 텍스트를 KC DeepL로 보내 번역합니다."
   },
-  "icon": "symbol:character.book.closed",
+  "icon": "kcdeepl-popclip.png",
   "macosVersion": "14.0",
   "showAs": "icon",
   "requirements": [
