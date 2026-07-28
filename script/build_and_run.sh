@@ -4,6 +4,7 @@ set -euo pipefail
 MODE="${1:-run}"
 APP_NAME="KCDeepL"
 BUNDLE_ID="com.h0tshin.KCDeepL"
+PACKAGE_RESOURCE_BUNDLE_NAME="${APP_NAME}_${APP_NAME}.bundle"
 MIN_SYSTEM_VERSION="14.0"
 EXPECTED_TEAM_IDENTIFIER="${KCDEEPL_TEAM_IDENTIFIER:-5M6Y34KW88}"
 DEVELOPMENT_SIGNING_COMMON_NAME="${KCDEEPL_DEVELOPMENT_SIGNING_COMMON_NAME:-Apple Development: Kyung Chul Shin (GSB3764KDE)}"
@@ -75,13 +76,23 @@ if [[ "$IS_RELEASE_BUILD" != "true" ]]; then
 fi
 
 swift build -c "$BUILD_CONFIGURATION"
-BUILD_BINARY="$(swift build -c "$BUILD_CONFIGURATION" --show-bin-path)/$APP_NAME"
+BUILD_OUTPUT_DIR="$(swift build -c "$BUILD_CONFIGURATION" --show-bin-path)"
+BUILD_BINARY="$BUILD_OUTPUT_DIR/$APP_NAME"
+PACKAGE_RESOURCE_BUNDLE_SOURCE="$BUILD_OUTPUT_DIR/$PACKAGE_RESOURCE_BUNDLE_NAME"
+
+if [[ ! -d "$PACKAGE_RESOURCE_BUNDLE_SOURCE" ]]; then
+  echo "error: Swift package resource bundle is missing: $PACKAGE_RESOURCE_BUNDLE_SOURCE" >&2
+  exit 1
+fi
 
 rm -rf "$STAGING_ROOT"
 trap 'rm -rf "$STAGING_ROOT"' EXIT
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+cp -R \
+  "$PACKAGE_RESOURCE_BUNDLE_SOURCE" \
+  "$APP_RESOURCES/$PACKAGE_RESOURCE_BUNDLE_NAME"
 
 if [[ -f "$ICON_SOURCE" ]]; then
   cp "$ICON_SOURCE" "$APP_RESOURCES/AppIcon.icns"
@@ -252,6 +263,7 @@ codesign --verify \
   "=identifier \"$BUNDLE_ID\" and anchor apple generic and certificate leaf[subject.OU] = \"$EXPECTED_TEAM_IDENTIFIER\"" \
   "$STAGING_BUNDLE"
 
+mkdir -p "$DIST_DIR"
 rm -rf "$APP_BUNDLE"
 mv "$STAGING_BUNDLE" "$APP_BUNDLE"
 rm -rf "$STAGING_ROOT"

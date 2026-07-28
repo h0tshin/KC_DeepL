@@ -90,27 +90,16 @@ private struct FontSizePNGIcon: View {
 
 enum FontSizeIconResource {
     static func image(named name: String) -> NSImage? {
-        let candidates: [(Bundle, String?)] = [
-            (.main, nil),
-            (.module, nil),
-            (.module, "Resources")
-        ]
-
-        for (bundle, subdirectory) in candidates {
-            guard let url = bundle.url(
-                forResource: name,
-                withExtension: "png",
-                subdirectory: subdirectory
-            ),
-            let image = NSImage(contentsOf: url)
-            else {
-                continue
-            }
-
-            image.isTemplate = true
-            return image
+        guard let url = AppResourceLocator.url(
+            forResource: name,
+            withExtension: "png"
+        ),
+        let image = NSImage(contentsOf: url)
+        else {
+            return nil
         }
 
-        return nil
+        image.isTemplate = true
+        return image
     }
 }

@@ -114,12 +114,10 @@ final class AppStatusItemController: NSObject {
             return image
         }
 
-        if let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
-           let image = NSImage(contentsOf: url) {
-            return image
-        }
-
-        if let url = Bundle.module.url(forResource: "MenuBarIcon", withExtension: "png"),
+        if let url = AppResourceLocator.url(
+            forResource: "MenuBarIcon",
+            withExtension: "png"
+        ),
            let image = NSImage(contentsOf: url) {
             return image
         }

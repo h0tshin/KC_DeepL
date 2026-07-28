@@ -6,4 +6,13 @@ final class FontSizeControlTests: XCTestCase {
         XCTAssertNotNil(FontSizeIconResource.image(named: "FontSizeDecrease"))
         XCTAssertNotNil(FontSizeIconResource.image(named: "FontSizeIncrease"))
     }
+
+    func testMissingResourceReturnsNilWithoutCrashing() {
+        XCTAssertNil(
+            AppResourceLocator.url(
+                forResource: "ResourceThatDoesNotExist",
+                withExtension: "png"
+            )
+        )
+    }
 }
