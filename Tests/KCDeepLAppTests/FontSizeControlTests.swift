@@ -7,6 +7,21 @@ final class FontSizeControlTests: XCTestCase {
         XCTAssertNotNil(FontSizeIconResource.image(named: "FontSizeIncrease"))
     }
 
+    func testApplicationIconsLoadFromResources() {
+        XCTAssertNotNil(
+            AppResourceLocator.url(
+                forResource: "AppIcon",
+                withExtension: "png"
+            )
+        )
+        XCTAssertNotNil(
+            AppResourceLocator.url(
+                forResource: "MenuBarIcon",
+                withExtension: "png"
+            )
+        )
+    }
+
     func testMissingResourceReturnsNilWithoutCrashing() {
         XCTAssertNil(
             AppResourceLocator.url(

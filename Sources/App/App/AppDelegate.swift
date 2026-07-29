@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        applyApplicationIcon()
         NSApp.activate(ignoringOtherApps: true)
         _ = statusItemController
         globalHotKeyManager.start()
@@ -34,5 +35,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         globalHotKeyManager.stop()
+    }
+
+    private func applyApplicationIcon() {
+        guard let iconURL = AppResourceLocator.url(
+            forResource: "AppIcon",
+            withExtension: "png"
+        ),
+        let icon = NSImage(contentsOf: iconURL)
+        else {
+            return
+        }
+
+        NSApp.applicationIconImage = icon
     }
 }
