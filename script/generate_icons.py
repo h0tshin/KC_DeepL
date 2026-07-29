@@ -30,6 +30,7 @@ MENUBAR_CANVAS_SIZE = 32
 MENUBAR_SYMBOL_SIZE = 24
 POPCLIP_CANVAS_SIZE = 1024
 POPCLIP_SYMBOL_SIZE = 800
+SYMBOL_SAFE_AREA_INSET_RATIO = 0.10
 
 
 def square_image(path: Path) -> Image.Image:
@@ -76,8 +77,23 @@ def symbol_mask(source: Image.Image) -> Image.Image:
             / (background_cutoff - opaque_cutoff)
         )
 
-    mask = luminance.point(mask_value)
-    return ImageChops.multiply(mask, source.getchannel("A"))
+    mask = ImageChops.multiply(
+        luminance.point(mask_value),
+        source.getchannel("A"),
+    )
+
+    safe_area = Image.new("L", source.size, 0)
+    inset = round(source.width * SYMBOL_SAFE_AREA_INSET_RATIO)
+    ImageDraw.Draw(safe_area).rectangle(
+        (
+            inset,
+            inset,
+            source.width - inset - 1,
+            source.height - inset - 1,
+        ),
+        fill=255,
+    )
+    return ImageChops.multiply(mask, safe_area)
 
 
 def make_app_icon() -> None:
