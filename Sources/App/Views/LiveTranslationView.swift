@@ -571,14 +571,14 @@ private struct LiveMessageBubble: View {
 
     private var primaryFont: Font {
         speaker == .me
-            ? .system(size: 20, weight: .bold)
-            : .system(size: 24, weight: .bold)
+            ? AppFont.swiftUIFont(size: 20, weight: .bold)
+            : AppFont.swiftUIFont(size: 24, weight: .bold)
     }
 
     private var secondaryFont: Font {
         speaker == .me
-            ? .system(size: 18, weight: .semibold)
-            : .system(size: 15, weight: .semibold)
+            ? AppFont.swiftUIFont(size: 18, weight: .semibold)
+            : AppFont.swiftUIFont(size: 15, weight: .semibold)
     }
 
     private var primaryBaseColor: Color {

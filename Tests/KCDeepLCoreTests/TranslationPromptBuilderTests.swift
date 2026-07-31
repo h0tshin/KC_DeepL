@@ -18,6 +18,7 @@ final class TranslationPromptBuilderTests: XCTestCase {
         XCTAssertTrue(prompt.contains("한국어"))
         XCTAssertTrue(prompt.contains("Return only the translated text"))
         XCTAssertTrue(prompt.contains("Preserve Markdown or HTML-like formatting markers"))
+        XCTAssertTrue(prompt.contains("preserve the root, every <kc_segment> element"))
         XCTAssertTrue(prompt.contains("exactly the same paragraph count"))
         XCTAssertTrue(prompt.contains("Never merge or split paragraphs"))
         XCTAssertTrue(prompt.contains("Hello, world."))
@@ -61,6 +62,14 @@ final class TranslationPromptBuilderTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.codexModelID), "")
         XCTAssertNil(defaults.string(forKey: PreferenceKeys.codexThreadID))
         XCTAssertNil(defaults.string(forKey: PreferenceKeys.geminiAPIKey))
+        XCTAssertEqual(
+            defaults.string(forKey: PreferenceKeys.fileTranslationEngine),
+            FileTranslationEngine.apple.rawValue
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: PreferenceKeys.fileAPIModelID),
+            AppDefaults.defaultModelID
+        )
         XCTAssertTrue(defaults.bool(forKey: PreferenceKeys.autoTranslate))
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveProvider), LLMProvider.gemini.rawValue)
         XCTAssertEqual(defaults.string(forKey: PreferenceKeys.liveModelID), AppDefaults.defaultLiveModelID)

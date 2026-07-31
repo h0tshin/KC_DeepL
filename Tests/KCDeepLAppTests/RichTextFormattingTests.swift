@@ -1,8 +1,48 @@
 import AppKit
+import CoreText
 import XCTest
 @testable import KCDeepL
 
 final class RichTextFormattingTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        _ = AppFontRegistry.registerBundledFonts()
+    }
+
+    func testPlainTextUsesBarlowWithNotoSansKRCascade() throws {
+        let attributed = RichTextFormatting.plainAttributedString("English 한글")
+        let font = try XCTUnwrap(
+            attributed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertEqual(font.fontName, AppFont.barlowRegular)
+
+        let korean = "한글" as NSString
+        let fallback = CTFontCreateForString(
+            font as CTFont,
+            korean,
+            CFRange(location: 0, length: korean.length)
+        ) as NSFont
+        XCTAssertEqual(fallback.fontName, AppFont.notoSansKRRegular)
+    }
+
+    func testInlineCodeNormalizesToD2Coding() throws {
+        let source = NSAttributedString(
+            string: "let value = 1",
+            attributes: [
+                .font: AppFont.uiFont(size: 18),
+                .inlinePresentationIntent: NSNumber(
+                    value: InlinePresentationIntent.code.rawValue
+                )
+            ]
+        )
+
+        let normalized = RichTextFormatting.normalize(source)
+        let font = try XCTUnwrap(
+            normalized.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertEqual(font.fontName, AppFont.d2CodingRegular)
+    }
+
     func testNormalizeDiscardsTextAndBackgroundColorsWhilePreservingFormatting() throws {
         let sourceFont = NSFontManager.shared.convert(
             NSFont.systemFont(ofSize: 18),

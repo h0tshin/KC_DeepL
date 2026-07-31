@@ -7,7 +7,7 @@ enum RichTextFormatting {
         NSAttributedString(
             string: text,
             attributes: [
-                .font: NSFont.systemFont(ofSize: fontSize),
+                .font: AppFont.uiFont(size: fontSize),
                 .foregroundColor: NSColor.labelColor
             ]
         )
@@ -50,7 +50,7 @@ enum RichTextFormatting {
 
         mutable.enumerateAttributes(in: fullRange) { attributes, range, _ in
             var updated = attributes
-            var font = updated[.font] as? NSFont ?? NSFont.systemFont(ofSize: fontSize)
+            var font = updated[.font] as? NSFont ?? AppFont.uiFont(size: fontSize)
 
             if let rawIntent = updated[.inlinePresentationIntent] as? NSNumber {
                 let intent = InlinePresentationIntent(rawValue: rawIntent.uintValue)
@@ -61,7 +61,7 @@ enum RichTextFormatting {
                     font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
                 }
                 if intent.contains(.code) {
-                    font = NSFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular)
+                    font = AppFont.monospacedFont(size: font.pointSize)
                 }
                 if intent.contains(.strikethrough) {
                     updated[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
@@ -93,7 +93,7 @@ enum RichTextFormatting {
         let fullRange = NSRange(location: 0, length: mutable.length)
 
         mutable.enumerateAttribute(.font, in: fullRange) { value, range, _ in
-            let font = value as? NSFont ?? NSFont.systemFont(ofSize: fallbackFontSize)
+            let font = value as? NSFont ?? AppFont.uiFont(size: fallbackFontSize)
             let scaledSize = max(1, font.pointSize * scale)
             let scaledFont = NSFontManager.shared.convert(font, toSize: scaledSize)
             mutable.addAttribute(.font, value: scaledFont, range: range)

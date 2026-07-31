@@ -169,7 +169,7 @@ final class ShortcutRecorderControl: NSView {
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = .center
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .semibold),
+            .font: AppFont.monospacedFont(size: 14, weight: .semibold),
             .foregroundColor: isRecording ? NSColor.controlAccentColor : NSColor.labelColor,
             .paragraphStyle: paragraphStyle
         ]

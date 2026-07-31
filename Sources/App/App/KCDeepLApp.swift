@@ -7,9 +7,13 @@ struct KCDeepLApp: App {
     @StateObject private var translationViewModel: TranslationViewModel
     @StateObject private var translationComparisonViewModel: TranslationComparisonViewModel
     @StateObject private var liveTranslationViewModel: LiveTranslationViewModel
+    @StateObject private var fileTranslationViewModel: FileTranslationViewModel
     private let codexAppServerClient: CodexAppServerClient
 
     init() {
+        // Process-scoped registration keeps the bundled typography available
+        // to SwiftUI, AppKit editors, and PDFKit without installing user fonts.
+        _ = AppFontRegistry.registerBundledFonts()
         UserDefaults.standard.registerKCDeepLDefaults()
         let codexAppServerClient = CodexAppServerClient()
         self.codexAppServerClient = codexAppServerClient
@@ -25,6 +29,12 @@ struct KCDeepLApp: App {
             )
         )
         _liveTranslationViewModel = StateObject(wrappedValue: LiveTranslationViewModel())
+        _fileTranslationViewModel = StateObject(
+            wrappedValue: FileTranslationViewModel(
+                appServerClient: codexAppServerClient,
+                codexModelProvider: codexAppServerClient
+            )
+        )
         PendingPersistenceRegistry.shared.register {
             await codexAppServerClient.shutdown()
         }
@@ -35,9 +45,11 @@ struct KCDeepLApp: App {
             ContentView(
                 viewModel: translationViewModel,
                 comparisonViewModel: translationComparisonViewModel,
-                liveTranslationViewModel: liveTranslationViewModel
+                liveTranslationViewModel: liveTranslationViewModel,
+                fileTranslationViewModel: fileTranslationViewModel
             )
                 .frame(minWidth: 980, minHeight: 600)
+                .font(AppFont.swiftUIFont(size: 13))
                 .background(AppCommandBridge())
                 .preferredColorScheme(.dark)
         }
@@ -49,6 +61,7 @@ struct KCDeepLApp: App {
 
         Settings {
             SettingsView(codexClient: codexAppServerClient)
+                .font(AppFont.swiftUIFont(size: 13))
                 .preferredColorScheme(.dark)
         }
     }

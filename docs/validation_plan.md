@@ -79,7 +79,45 @@
 - 원문·언어 변경, 모드 이탈, 중지 버튼은 진행 중 비교를 취소하고 늦은 결과를 반영하지 않는다.
 - 성공한 각 결과는 기록 설정에 따라 Codex App Server 엔진과 실제 모델 ID로 저장된다.
 
-## 7. Codex App Server 검증
+## 7. PDF 파일 번역 검증
+
+### 자동 검증
+
+- 같은 디지털 PDF를 두 번 분석하면 페이지·블록·줄 ID와 2단 열 읽기 순서가 동일하다.
+- 텍스트 레이어가 없는 깨끗한 스캔 페이지는 Vision OCR 줄과 경고를 만든다.
+- MediaBox 원점이 (0, 0)인 0/90/180/270도 스캔은 비영점 CropBox에서도 같은 page-space OCR 좌표를 복원하고 같은 bounds에 overlay를 저장한다. 90°/270°는 동일 문서의 임시 0° carrier에서 CJK FreeText appearance를 만든 뒤 같은 annotation 객체를 대상 페이지로 이동하며 `hasAppearanceStream`, URL action, 원 page count/box/회전을 최종 재개방에서 검사한다. MediaBox 원점이 0이 아니거나 회전이 네 허용값 밖이면 엔진 호출 전 실패하고 출력 파일을 만들지 않는다.
+- 페이지 XML 요청은 특수 문자를 escape하며 응답의 ID 순서를 원본대로 복원한다.
+- 누락·중복·알 수 없는 ID, 빈 번역, 손상된 XML은 합성 전에 실패한다.
+- Apple 응답의 `clientIdentifier` 순서가 바뀌어도 원본 블록 순서를 복원하고 언어 코드/중국어 script를 보존한다.
+- 출력의 페이지 수, media/crop/bleed/trim/art box, 회전, 기존 일반 주석과 링크 URL/action 및 appearance stream 존재 여부를 포함한 안정적인 fingerprint가 원본과 같다. overlay의 subtype, bounds, 마스크/글자 색, 정렬, 글꼴/glyph, 표시/인쇄 속성을 재개방 후 검사하며 링크와 겹친 overlay에도 같은 URL action이 남는다.
+- 색상 배경에는 샘플한 마스크 색을 적용하고 대상 문자의 glyph를 지원하는 글꼴을 사용한다.
+- 번들 Barlow/Noto Sans KR/D2Coding을 실제 공개 PostScript 이름으로 등록하고 반복 등록 요청이 캐시된 같은 결과를 반환하는지 검증한다.
+- 라틴/한글/고정폭 PDF를 저장·재개방·재저장한 뒤 각각 신뢰 가능한 공개 원본 또는 Barlow/Noto Sans KR/D2Coding font identity와 전체 glyph가 유지되는지 검증한다. private SF 리소스가 PDFKit에서 Times로 대체된 경우도 원래 bold/monospaced 의도를 복원해 Times 출력 회귀가 없는지 확인한다.
+- 번역 누락, 최소 5pt에서도 overflow, 지원할 글꼴 없음, 복잡·추정 불가 배경, 단일 URL로 복제할 수 없는 중첩 링크, Link가 아닌 기존 주석 중첩, 잠금/서명/변경 금지/입력형 양식은 최종 파일을 남기지 않는다. 번역 전에 알 수 있는 조건은 엔진 호출 전 preflight에서 실패한다.
+- OCR 실패·낮은 신뢰도·텍스트 미검출 경고가 있으면 확인 전에는 엔진을 호출하지 않고, 명시적 확인 후에만 나머지 페이지 번역을 허용한다.
+- 원본 경로와 같은 출력 및 기존 목적지 덮어쓰기를 거부한다.
+- 존재하지 않거나 쓸 수 없는 저장 폴더는 UUID 0바이트 probe 단계에서 엔진 호출 전에 거부하고 probe 파일을 남기지 않는다.
+- 취소 또는 새 import 뒤 늦게 도착한 번역 결과가 UI나 목적지 파일에 반영되지 않는다.
+
+### 시각 검증
+
+1. 표, 컬러 배경, 2단 본문과 기존 일반 주석이 있는 fixture를 분석/합성한다.
+2. Poppler `pdftoppm -png -r 150`으로 원본과 번역본의 모든 페이지를 이미지로 렌더링한다.
+3. 0°/90°/180°/270°에서 페이지 크기·회전·표·이미지·벡터·일반 주석 위치가 같은지, 원문 영역만 배경과 번역문으로 바뀌었는지 눈으로 확인한다. 이 수동 렌더 비교는 자동 구조 재검증과 구분해 기록한다.
+4. 긴 번역, CJK/라틴 혼합, 흰 글자/어두운 배경, OCR 결과를 별도로 확인한다. 비영점 CropBox의 90°/270° CJK 출력은 Poppler 144dpi에서 한 줄 방향·정렬 기준점과 PDFKit 재저장 전후 렌더 hash를 비교한다.
+5. 생성된 QA 중간 파일은 검증 후 삭제하고 제품 출력만 전달한다.
+
+### 수동 UI 검증
+
+- PDF 선택 버튼과 드래그앤드롭 모두 동작하며 PDF 외 파일은 거부한다.
+- 원본/번역본 미리보기 전환, 분석/OCR 경고, 페이지 진행률, 취소가 보인다.
+- macOS 15 이상에서는 Apple 내장 번역과 언어 팩 안내가 동작하고 macOS 14에서는 명확히 비활성화된다.
+- Codex는 동적 모델 목록을, Gemini API는 모델 picker와 보안 입력 API 키를 사용한다.
+- 파일 번역용 Gemini API 키는 화면을 닫거나 앱을 종료한 뒤 `UserDefaults`에 남지 않는다.
+- `매번 묻기`는 save panel을 열고 Desktop/Downloads는 충돌 없는 이름으로 저장한다.
+- 완료 후 번역본 열기와 Finder에서 보기가 정확한 결과 파일을 가리킨다.
+
+## 8. Codex App Server 검증
 
 | 영역 | 검증 방법 | 기대 결과 |
 | --- | --- | --- |
@@ -96,7 +134,7 @@
 
 실제 Codex 로그인과 사용량을 소비하는 통합 smoke test는 기본 `swift test`와 분리해 opt-in으로 실행한다. 일반 테스트에서는 scripted transport/process launcher로 모델, 작업, turn 이벤트 순서를 결정적으로 재현한다.
 
-## 8. 회귀 테스트
+## 9. 회귀 테스트
 
 기본 단위 테스트:
 
@@ -111,6 +149,11 @@
 - `TranslationViewModelTests`
 - `TranslationComparisonViewModelTests`
 - `LiveTranslationViewModelPersistenceTests`
+- `DocumentPageTranslationTests`
+- `AppleDocumentTranslationClientTests`
+- `PDFDocumentServicesTests`
+- `FileTranslationOutputURLResolverTests`
+- `FileTranslationViewModelTests`
 
 추가 권장 테스트:
 
@@ -124,7 +167,7 @@
 - 캡처 상태 전이 테스트
 - 기록 저장 정책 테스트
 
-## 9. 수동 QA 시나리오
+## 10. 수동 QA 시나리오
 
 1. 앱 실행 후 한국어 대상 언어 유지 확인
 2. 기본 `LLM API 사용`에서 영어 문장 입력 후 번역 실행
@@ -141,3 +184,9 @@
 13. LLM Live 화면에서 기존 양방향 음성 번역이 그대로 동작하는지 확인
 14. 설정 > 키보드 단축키에서 기본값 초기화
 15. 캡처 버튼으로 목업 시트 열고 캡처 완료
+16. 파일 번역에서 디지털 PDF를 선택하고 페이지/텍스트 영역 수와 원본 미리보기 확인
+17. Apple, Codex, Gemini API 세 엔진에서 각각 모델/키 요구사항과 페이지 진행률 확인
+18. 번역본 미리보기와 렌더링을 원본과 비교하고 표·이미지·일반 주석 보존 확인
+19. 입력형 PDF 양식은 출력 없이 평면화 안내 오류로 끝나는지 확인
+20. 스캔 PDF의 OCR 경고와 번역 배치 확인
+21. 번역 중 취소하고 목적지에 부분 PDF가 남지 않는지 확인

@@ -5,20 +5,25 @@ enum AppResourceLocator {
 
     static func url(
         forResource name: String,
-        withExtension fileExtension: String
+        withExtension fileExtension: String,
+        subdirectory: String? = nil
     ) -> URL? {
         for bundle in candidateBundles {
             if let url = bundle.url(
                 forResource: name,
-                withExtension: fileExtension
+                withExtension: fileExtension,
+                subdirectory: subdirectory
             ) {
                 return url
             }
 
+            let resourceSubdirectory = ["Resources", subdirectory]
+                .compactMap { $0 }
+                .joined(separator: "/")
             if let url = bundle.url(
                 forResource: name,
                 withExtension: fileExtension,
-                subdirectory: "Resources"
+                subdirectory: resourceSubdirectory
             ) {
                 return url
             }
@@ -28,7 +33,10 @@ enum AppResourceLocator {
     }
 
     private static let candidateBundles: [Bundle] = {
-        var bundles = [Bundle.main]
+        // `Bundle.module` is the canonical SwiftPM resource location. The
+        // additional candidates keep the signed app-bundle packaging path and
+        // direct executable/debug launches working as well.
+        var bundles = [Bundle.module, Bundle.main]
         var bundleURLs = [
             Bundle.main.bundleURL.appendingPathComponent(
                 packageResourceBundleName,
@@ -80,7 +88,9 @@ enum AppResourceLocator {
         }
 #endif
 
-        var seenPaths = Set([Bundle.main.bundleURL.standardizedFileURL.path])
+        var seenPaths = Set(
+            bundles.map { $0.bundleURL.standardizedFileURL.path }
+        )
         for bundleURL in bundleURLs {
             let standardizedURL = bundleURL.standardizedFileURL
             guard seenPaths.insert(standardizedURL.path).inserted,

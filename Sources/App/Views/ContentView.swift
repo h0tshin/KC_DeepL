@@ -6,6 +6,7 @@ struct ContentView: View {
     @ObservedObject var viewModel: TranslationViewModel
     @ObservedObject var comparisonViewModel: TranslationComparisonViewModel
     @ObservedObject var liveTranslationViewModel: LiveTranslationViewModel
+    @ObservedObject var fileTranslationViewModel: FileTranslationViewModel
     @SceneStorage("kc.main.showTools") private var showTools = false
     @AppStorage(PreferenceKeys.mainSourceLanguage) private var sourceLanguageCode = LanguageOption.english.code
     @AppStorage(PreferenceKeys.mainTargetLanguage) private var targetLanguageCode = LanguageOption.korean.code
@@ -109,6 +110,12 @@ struct ContentView: View {
                             onCompare: startTranslationComparison,
                             onCancel: comparisonViewModel.cancelComparison
                         )
+                    } else if selectedMode == .files {
+                        FileTranslationWorkspace(
+                            viewModel: fileTranslationViewModel,
+                            sourceLanguage: sourceLanguageBinding,
+                            targetLanguage: targetLanguageBinding
+                        )
                     } else {
                         LanguageBar(
                             sourceLanguage: sourceLanguageBinding,
@@ -158,6 +165,7 @@ struct ContentView: View {
         }
         .background(AppTheme.panelBackground)
         .background(TitlebarMenuAccessory().frame(width: 0, height: 0))
+        .background(appleFileTranslationHost.frame(width: 0, height: 0))
         .foregroundStyle(.primary)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
@@ -187,7 +195,9 @@ struct ContentView: View {
             }
         }
         .onChange(of: targetLanguage) { _, _ in
-            normalizeSourceLanguageForTarget()
+            if selectedMode == .text {
+                normalizeSourceLanguageForTarget()
+            }
             comparisonViewModel.resetForInputChange()
             if selectedMode != .comparison {
                 scheduleAutoTranslation()
@@ -236,6 +246,9 @@ struct ContentView: View {
             }
             if newMode == .comparison {
                 viewModel.cancelPendingTranslation()
+            } else if newMode == .files {
+                viewModel.cancelPendingTranslation()
+                showTools = false
             } else if newMode == .text {
                 runStartupChecks()
                 scheduleAutoTranslation()
@@ -405,6 +418,13 @@ struct ContentView: View {
         let translatedText = viewModel.translatedText
         Task { @MainActor in
             viewModel.statusMessage = await pasteBackTarget.paste(translatedText)
+        }
+    }
+
+    @ViewBuilder
+    private var appleFileTranslationHost: some View {
+        if #available(macOS 15.0, *) {
+            AppleFileTranslationTaskHost(viewModel: fileTranslationViewModel)
         }
     }
 }
@@ -953,10 +973,10 @@ private struct RichTextEditor: NSViewRepresentable {
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
-        textView.font = NSFont.systemFont(ofSize: fontSize)
+        textView.font = AppFont.uiFont(size: fontSize)
         textView.textColor = .labelColor
         textView.typingAttributes = [
-            .font: NSFont.systemFont(ofSize: fontSize),
+            .font: AppFont.uiFont(size: fontSize),
             .foregroundColor: NSColor.labelColor
         ]
         textView.textContainerInset = NSSize(width: 0, height: 0)
@@ -1036,10 +1056,10 @@ private struct RichTextEditor: NSViewRepresentable {
                 textView.textStorage?.setAttributedString(displayed)
                 textView.selectedRanges = selectedRanges
             }
-            textView.font = NSFont.systemFont(ofSize: fontSize)
+            textView.font = AppFont.uiFont(size: fontSize)
             textView.textColor = .labelColor
             textView.typingAttributes = [
-                .font: NSFont.systemFont(ofSize: fontSize),
+                .font: AppFont.uiFont(size: fontSize),
                 .foregroundColor: NSColor.labelColor
             ]
             isApplyingProgrammaticUpdate = false
@@ -1122,7 +1142,7 @@ struct MarkdownText: View {
 
     var body: some View {
         Text(attributedText)
-            .font(.system(size: fontSize, weight: weight))
+            .font(AppFont.swiftUIFont(size: fontSize, weight: weight))
             .lineSpacing(6)
             .lineLimit(lineLimit)
     }

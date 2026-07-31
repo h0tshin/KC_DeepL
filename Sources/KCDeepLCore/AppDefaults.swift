@@ -13,6 +13,8 @@ public enum PreferenceKeys {
     public static let speechSpeed = "kc.accessibility.speechSpeed"
     public static let downloadLocation = "kc.files.downloadLocation"
     public static let historyEnabled = "kc.files.historyEnabled"
+    public static let fileTranslationEngine = "kc.files.translationEngine"
+    public static let fileAPIModelID = "kc.files.apiModelID"
     public static let translationBackend = "kc.advanced.translationBackend"
     public static let provider = "kc.advanced.provider"
     public static let modelID = "kc.advanced.modelID"
@@ -43,6 +45,8 @@ public enum AppDefaults {
     public static let defaultModelID = "gemini-2.5-flash-lite"
     public static let defaultCodexModelID = ""
     public static let defaultGeminiAPIKey = ""
+    public static let defaultFileTranslationEngine = FileTranslationEngine.apple
+    public static let defaultFileAPIModelID = defaultModelID
     public static let defaultLiveModelID = "gemini-3.5-live-translate-preview"
     public static let defaultLiveListeningAPIKey = ""
 
@@ -69,6 +73,8 @@ public extension UserDefaults {
             PreferenceKeys.speechSpeed: "1.0",
             PreferenceKeys.downloadLocation: "desktop",
             PreferenceKeys.historyEnabled: true,
+            PreferenceKeys.fileTranslationEngine: AppDefaults.defaultFileTranslationEngine.rawValue,
+            PreferenceKeys.fileAPIModelID: AppDefaults.defaultFileAPIModelID,
             PreferenceKeys.translationBackend: AppDefaults.defaultTranslationBackend.rawValue,
             PreferenceKeys.provider: AppDefaults.defaultProvider.rawValue,
             PreferenceKeys.modelID: AppDefaults.defaultModelID,

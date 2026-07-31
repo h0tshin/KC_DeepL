@@ -38,7 +38,9 @@ public protocol TranslationClient: Sendable {
 
 public final class GeminiTranslationClient: TranslationClient, @unchecked Sendable {
     private static let defaultBaseURL = URL(string: "https://generativelanguage.googleapis.com")!
-    private static let defaultRequestTimeout: TimeInterval = 30
+    // Every selectable stable Gemini 2.5 text model supports this output limit.
+    // It prevents a dense PDF page from being truncated while remaining only a cap.
+    private static let maximumOutputTokens = 65_536
 
     private let session: URLSession
     private let baseURL: URL
@@ -46,11 +48,14 @@ public final class GeminiTranslationClient: TranslationClient, @unchecked Sendab
     private let retryPolicy: GeminiTranslationRetryPolicy
     private let sleep: GeminiTranslationSleep
 
-    public convenience init(session: URLSession = .shared) {
+    public convenience init(
+        session: URLSession = .shared,
+        requestTimeout: TimeInterval = 30
+    ) {
         self.init(
             session: session,
             baseURL: Self.defaultBaseURL,
-            requestTimeout: Self.defaultRequestTimeout,
+            requestTimeout: requestTimeout,
             retryPolicy: .standard,
             sleep: Self.defaultSleep
         )
@@ -111,7 +116,7 @@ public final class GeminiTranslationClient: TranslationClient, @unchecked Sendab
             ],
             generationConfig: GeminiGenerationConfig(
                 temperature: request.temperature,
-                maxOutputTokens: 8192
+                maxOutputTokens: Self.maximumOutputTokens
             )
         )
         urlRequest.httpBody = try JSONEncoder().encode(body)
