@@ -1466,6 +1466,38 @@ final class PDFDocumentServicesTests: XCTestCase {
         XCTAssertLessThan(lastMaskIndex, firstTranslationIndex)
     }
 
+    func testReplaceTextModeRecomposesPageContentWithoutTranslationAnnotations() throws {
+        let source = temporaryDirectory.appendingPathComponent("replace-source.pdf")
+        try makeDigitalPDF(
+            at: source,
+            pages: [[DrawnLine("Replace this text", x: 50, y: 700, size: 18)]]
+        )
+        let analysis = try PDFDocumentAnalysisService().analyze(sourceURL: source)
+        let line = try XCTUnwrap(analysis.pages.first?.lines.first)
+        let destination = temporaryDirectory.appendingPathComponent("replace-output.pdf")
+
+        let result = try PDFDocumentCompositionService().compose(
+            analysis: analysis,
+            translations: [line.id: "이 텍스트를 교체합니다"],
+            destinationURL: destination,
+            renderMode: .replaceText
+        )
+
+        XCTAssertEqual(result.translatedLineCount, 1)
+        let output = try XCTUnwrap(PDFDocument(url: destination))
+        let page = try XCTUnwrap(output.page(at: 0))
+        XCTAssertFalse(page.annotations.contains { annotation in
+            let name = annotation.userName ?? ""
+            return name.hasPrefix("KCDeepL Mask:")
+                || name.hasPrefix("KCDeepL Translation:")
+        })
+        XCTAssertGreaterThan(try Data(contentsOf: destination).count, 0)
+        try preserveQAFixtureIfRequested(
+            sourceURL: source,
+            translatedURL: destination
+        )
+    }
+
     func testComposeRejectsMissingOrOverflowingTranslationWithoutOutput() throws {
         let source = temporaryDirectory.appendingPathComponent("source.pdf")
         try makeDigitalPDF(

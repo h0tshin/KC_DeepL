@@ -15,6 +15,8 @@ public enum PreferenceKeys {
     public static let historyEnabled = "kc.files.historyEnabled"
     public static let fileTranslationEngine = "kc.files.translationEngine"
     public static let fileAPIModelID = "kc.files.apiModelID"
+    public static let fileTranslationRenderMode = "kc.files.translationRenderMode"
+    public static let fileTranslationContinueOnError = "kc.files.translationContinueOnError"
     public static let translationBackend = "kc.advanced.translationBackend"
     public static let provider = "kc.advanced.provider"
     public static let modelID = "kc.advanced.modelID"
@@ -75,6 +77,8 @@ public extension UserDefaults {
             PreferenceKeys.historyEnabled: true,
             PreferenceKeys.fileTranslationEngine: AppDefaults.defaultFileTranslationEngine.rawValue,
             PreferenceKeys.fileAPIModelID: AppDefaults.defaultFileAPIModelID,
+            PreferenceKeys.fileTranslationRenderMode: "preserveOriginalWithLayer",
+            PreferenceKeys.fileTranslationContinueOnError: true,
             PreferenceKeys.translationBackend: AppDefaults.defaultTranslationBackend.rawValue,
             PreferenceKeys.provider: AppDefaults.defaultProvider.rawValue,
             PreferenceKeys.modelID: AppDefaults.defaultModelID,

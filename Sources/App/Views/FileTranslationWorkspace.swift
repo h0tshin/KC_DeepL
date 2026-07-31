@@ -20,10 +20,13 @@ struct FileTranslationWorkspace: View {
     @State private var apiKey = ""
     @AppStorage(PreferenceKeys.temperature) private var temperature = 0.2
     @AppStorage(PreferenceKeys.downloadLocation) private var downloadLocation = "desktop"
+    @AppStorage(PreferenceKeys.fileTranslationRenderMode)
+    private var renderModeRawValue = PDFTranslationRenderMode.preserveOriginalWithLayer.rawValue
+    @AppStorage(PreferenceKeys.fileTranslationContinueOnError)
+    private var continueOnError = true
 
     @State private var isShowingImporter = false
     @State private var isDropTargeted = false
-    @State private var previewSelection = FilePreviewSelection.source
     @State private var allowsPotentiallyIncompleteOCR = false
 
     private var engine: FileTranslationEngine {
@@ -40,15 +43,31 @@ struct FileTranslationWorkspace: View {
         Binding(get: { engine }, set: { engine = $0 })
     }
 
+    private var renderMode: PDFTranslationRenderMode {
+        get {
+            PDFTranslationRenderMode(rawValue: renderModeRawValue)
+                ?? .preserveOriginalWithLayer
+        }
+        nonmutating set {
+            renderModeRawValue = newValue.rawValue
+        }
+    }
+
+    private var renderModeBinding: Binding<PDFTranslationRenderMode> {
+        Binding(get: { renderMode }, set: { renderMode = $0 })
+    }
+
     private var activeModelID: String {
         engine == .codexAppServer ? codexModelID : apiModelID
     }
 
     private var canStartTranslation: Bool {
         hasRunnableDocumentAndEngine
-            && viewModel.preflightBlockingMessage == nil
+            && (viewModel.preflightBlockingMessage == nil
+                || viewModel.canUseBestEffortTranslation)
             && (!viewModel.requiresIncompleteOCRAcknowledgement
-                || allowsPotentiallyIncompleteOCR)
+                || allowsPotentiallyIncompleteOCR
+                || continueOnError)
     }
 
     private var hasRunnableDocumentAndEngine: Bool {
@@ -130,11 +149,6 @@ struct FileTranslationWorkspace: View {
         .onChange(of: viewModel.codexModels) { _, _ in
             normalizeCodexModelSelection()
         }
-        .onChange(of: viewModel.outputURL) { _, outputURL in
-            if outputURL != nil {
-                previewSelection = .translated
-            }
-        }
         .onChange(of: viewModel.sourceDocumentVersion) { _, _ in
             allowsPotentiallyIncompleteOCR = false
         }
@@ -204,12 +218,8 @@ struct FileTranslationWorkspace: View {
         if let sourceData = viewModel.sourceData {
             VStack(spacing: 0) {
                 HStack {
-                    Picker("미리보기", selection: $previewSelection) {
-                        Text("원본").tag(FilePreviewSelection.source)
-                        Text("번역본").tag(FilePreviewSelection.translated)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 190)
+                    Label("문서 미리보기", systemImage: "rectangle.split.2x1")
+                        .font(.headline)
 
                     Spacer()
 
@@ -231,29 +241,21 @@ struct FileTranslationWorkspace: View {
 
                 Divider()
 
-                Group {
-                    if previewSelection == .translated,
-                       let translatedData = viewModel.outputData {
-                        PDFPreview(
-                            data: translatedData,
-                            version: viewModel.outputDocumentVersion
-                        )
-                    } else {
-                        PDFPreview(
-                            data: sourceData,
-                            version: viewModel.sourceDocumentVersion
-                        )
-                    }
-                }
-                .overlay {
-                    if previewSelection == .translated, viewModel.outputData == nil {
-                        ContentUnavailableView(
-                            "번역본이 아직 없습니다",
-                            systemImage: "doc.text.magnifyingglass",
-                            description: Text("번역을 완료하면 원본 위치에 배치된 결과를 미리 볼 수 있습니다.")
-                        )
-                        .background(.ultraThinMaterial)
-                    }
+                HSplitView {
+                    documentPreview(
+                        title: "원본",
+                        subtitle: "원문 PDF",
+                        data: sourceData,
+                        version: viewModel.sourceDocumentVersion,
+                        isTranslated: false
+                    )
+                    documentPreview(
+                        title: "번역본",
+                        subtitle: translatedPreviewSubtitle,
+                        data: viewModel.outputData,
+                        version: viewModel.outputDocumentVersion,
+                        isTranslated: true
+                    )
                 }
                 .dropDestination(for: URL.self) { urls, _ in
                     guard !viewModel.isBusy else {
@@ -299,6 +301,72 @@ struct FileTranslationWorkspace: View {
         }
     }
 
+    private var translatedPreviewSubtitle: String {
+        if viewModel.outputData == nil {
+            return "번역을 시작하면 페이지별로 표시됩니다"
+        }
+        return "\(viewModel.translatedPageCount)/\(max(1, viewModel.pageCount))페이지 번역됨"
+    }
+
+    @ViewBuilder
+    private func documentPreview(
+        title: String,
+        subtitle: String,
+        data: Data?,
+        version: UInt,
+        isTranslated: Bool
+    ) -> some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title)
+                    .font(.headline)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                if isTranslated, viewModel.skippedPageCount > 0 {
+                    Text("\(viewModel.skippedPageCount)페이지 건너뜀")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+
+            Divider()
+
+            Group {
+                if let data {
+                    PDFPreview(data: data, version: version)
+                } else {
+                    ContentUnavailableView(
+                        "번역본이 아직 없습니다",
+                        systemImage: "doc.text.magnifyingglass",
+                        description: Text("페이지 번역이 끝날 때마다 이 영역이 갱신됩니다.")
+                    )
+                }
+            }
+            .overlay {
+                if isTranslated, viewModel.isBusy {
+                    VStack(spacing: 8) {
+                        ProgressView(value: viewModel.progress)
+                            .progressViewStyle(.linear)
+                        Text(viewModel.statusMessage)
+                            .font(.caption)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: 260)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                    .padding(12)
+                }
+            }
+        }
+        .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private var inspectorPane: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
@@ -339,10 +407,21 @@ struct FileTranslationWorkspace: View {
             Label(filename, systemImage: "doc.richtext")
                 .font(.headline)
                 .lineLimit(2)
-            Text("원본 content stream 위에 마스크와 번역 레이어를 추가하며, 저장 후 PDF 구조를 다시 검증합니다.")
+            Text(renderModeSummary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var renderModeSummary: String {
+        switch renderMode {
+        case .replaceText:
+            "원본 텍스트를 번역문으로 교체하는 콘텐츠 재구성 방식으로 저장합니다."
+        case .preserveOriginalWithLayer:
+            "원본 페이지를 보존하고 번역 레이어를 추가해 이미지와 배치를 안정적으로 유지합니다."
+        case .hybrid:
+            "네이티브 텍스트는 교체하고 OCR·이미지 영역은 번역 레이어로 보완합니다."
         }
     }
 
@@ -454,6 +533,35 @@ struct FileTranslationWorkspace: View {
 
     private var outputSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("번역 결과")
+                .font(.headline)
+
+            Picker("결과 방식", selection: renderModeBinding) {
+                ForEach(PDFTranslationRenderMode.allCases) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+
+            Text(renderMode.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle(
+                "레이아웃·번역 오류가 나도 건너뛰고 계속",
+                isOn: $continueOnError
+            )
+            .toggleStyle(.checkbox)
+
+            Text("문제가 난 페이지나 영역은 원문으로 남기고, 나머지 페이지의 번역과 미리보기를 계속합니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
             Text("저장 위치")
                 .font(.headline)
 
@@ -469,7 +577,7 @@ struct FileTranslationWorkspace: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Text("페이지 레이아웃 보존을 위해 번역 레이어를 추가하므로 원문 텍스트 데이터는 PDF 내부 검색에 남을 수 있습니다.")
+            Text("원본 파일은 절대 덮어쓰지 않으며, 선택한 결과 방식에 따라 PDF 내부 텍스트 검색 결과가 달라질 수 있습니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -552,11 +660,17 @@ struct FileTranslationWorkspace: View {
                     viewModel.cancelTranslation()
                 }
                 .frame(maxWidth: .infinity)
+                Text("번역 완료 \(viewModel.translatedPageCount)페이지 · 건너뜀 \(viewModel.skippedPageCount)페이지")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             } else {
                 Button {
                     startTranslation(bestEffort: false)
                 } label: {
-                    Label("PDF 번역 시작", systemImage: "character.book.closed")
+                    Label(
+                        continueOnError ? "PDF 번역 시작 (오류 건너뛰기)" : "PDF 번역 시작",
+                        systemImage: "character.book.closed"
+                    )
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -606,6 +720,10 @@ struct FileTranslationWorkspace: View {
             Text(viewModel.statusMessage)
                 .lineLimit(1)
             Spacer()
+            if viewModel.translatedPageCount > 0 || viewModel.skippedPageCount > 0 {
+                Text("완료 \(viewModel.translatedPageCount) · 건너뜀 \(viewModel.skippedPageCount)")
+                    .foregroundStyle(.secondary)
+            }
             if viewModel.stage == .completed {
                 Text("출력 PDF 구조 재검증 완료")
                     .foregroundStyle(AppTheme.success)
@@ -669,8 +787,11 @@ struct FileTranslationWorkspace: View {
             downloadLocation: downloadLocation,
             explicitlySelectedDestination: explicitDestination,
             allowsPotentiallyIncompleteOCR: bestEffort
-                || allowsPotentiallyIncompleteOCR,
-            compositionPolicy: bestEffort ? .bestEffort : .strict
+                || allowsPotentiallyIncompleteOCR
+                || continueOnError,
+            compositionPolicy: bestEffort || continueOnError ? .bestEffort : .strict,
+            renderMode: renderMode,
+            continueOnError: continueOnError
         )
 
         if engine == .apple {
@@ -681,7 +802,6 @@ struct FileTranslationWorkspace: View {
     }
 
     private func importPDF(_ url: URL) {
-        previewSelection = .source
         viewModel.importPDF(from: url, sourceLanguage: sourceLanguage)
     }
 
@@ -727,11 +847,6 @@ struct FileTranslationWorkspace: View {
         }
         engine = .codexAppServer
     }
-}
-
-private enum FilePreviewSelection: String, Hashable {
-    case source
-    case translated
 }
 
 private struct LanguageSelectionLabel: View {

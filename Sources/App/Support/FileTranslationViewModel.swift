@@ -34,6 +34,8 @@ struct FileTranslationConfiguration: Equatable, Sendable {
     let explicitlySelectedDestination: URL?
     let allowsPotentiallyIncompleteOCR: Bool
     let compositionPolicy: PDFDocumentCompositionPolicy
+    let renderMode: PDFTranslationRenderMode
+    let continueOnError: Bool
 }
 
 enum FileTranslationViewModelError: LocalizedError, Equatable {
@@ -76,6 +78,8 @@ final class FileTranslationViewModel: ObservableObject {
     @Published private(set) var outputData: Data?
     @Published private(set) var sourceDocumentVersion: UInt = 0
     @Published private(set) var outputDocumentVersion: UInt = 0
+    @Published private(set) var translatedPageCount = 0
+    @Published private(set) var skippedPageCount = 0
     @Published private(set) var progress = 0.0
     @Published private(set) var statusMessage = "PDF 파일을 선택하거나 끌어다 놓으세요."
     @Published private(set) var errorMessage: String?
@@ -154,6 +158,8 @@ final class FileTranslationViewModel: ObservableObject {
         preflightBlockingMessage = nil
         canUseBestEffortTranslation = false
         progress = 0
+        translatedPageCount = 0
+        skippedPageCount = 0
         stage = .analyzing
         statusMessage = "PDF 페이지와 텍스트 위치를 분석하는 중입니다."
 
@@ -258,7 +264,9 @@ final class FileTranslationViewModel: ObservableObject {
                 client: client,
                 sourceLanguage: configuration.sourceLanguage,
                 targetLanguage: configuration.targetLanguage,
-                compositionPolicy: configuration.compositionPolicy
+                compositionPolicy: configuration.compositionPolicy,
+                renderMode: configuration.renderMode,
+                continueOnError: configuration.continueOnError
             )
         } catch {
             fail(with: error)
@@ -302,6 +310,8 @@ final class FileTranslationViewModel: ObservableObject {
                 sourceLanguage: configuration.sourceLanguage,
                 targetLanguage: configuration.targetLanguage,
                 compositionPolicy: configuration.compositionPolicy,
+                renderMode: configuration.renderMode,
+                continueOnError: configuration.continueOnError,
                 generation: generation
             )
         } catch is CancellationError {
@@ -328,6 +338,8 @@ final class FileTranslationViewModel: ObservableObject {
         preflightBlockingMessage = nil
         canUseBestEffortTranslation = false
         progress = 0
+        translatedPageCount = 0
+        skippedPageCount = 0
         stage = .idle
         statusMessage = "PDF 파일을 선택하거나 끌어다 놓으세요."
     }
@@ -383,13 +395,17 @@ final class FileTranslationViewModel: ObservableObject {
         client: any DocumentPageTranslationClient,
         sourceLanguage: LanguageOption,
         targetLanguage: LanguageOption,
-        compositionPolicy: PDFDocumentCompositionPolicy
+        compositionPolicy: PDFDocumentCompositionPolicy,
+        renderMode: PDFTranslationRenderMode,
+        continueOnError: Bool
     ) {
         cancelCurrentOperation(setCancelledStage: false)
         let generation = nextOperationGeneration()
         let translatablePages = analysis.pages.filter { !$0.blocks.isEmpty }
         errorMessage = nil
         progress = 0
+        translatedPageCount = 0
+        skippedPageCount = 0
         stage = .translating(page: 1, total: translatablePages.count)
         let firstPageNumber = (translatablePages.first?.pageIndex ?? 0) + 1
         statusMessage = "\(firstPageNumber)페이지를 문맥 단위로 번역하는 중입니다."
@@ -404,6 +420,8 @@ final class FileTranslationViewModel: ObservableObject {
                 sourceLanguage: sourceLanguage,
                 targetLanguage: targetLanguage,
                 compositionPolicy: compositionPolicy,
+                renderMode: renderMode,
+                continueOnError: continueOnError,
                 generation: generation
             )
         }
@@ -416,6 +434,8 @@ final class FileTranslationViewModel: ObservableObject {
         sourceLanguage: LanguageOption,
         targetLanguage: LanguageOption,
         compositionPolicy: PDFDocumentCompositionPolicy,
+        renderMode: PDFTranslationRenderMode,
+        continueOnError: Bool,
         generation: UInt
     ) async {
         errorMessage = nil
@@ -423,6 +443,8 @@ final class FileTranslationViewModel: ObservableObject {
         outputData = nil
         outputDocumentVersion &+= 1
         progress = 0
+        translatedPageCount = 0
+        skippedPageCount = 0
 
         do {
             let translatablePages = analysis.pages.filter { !$0.blocks.isEmpty }
@@ -451,15 +473,58 @@ final class FileTranslationViewModel: ObservableObject {
                     sourceLanguage: sourceLanguage,
                     targetLanguage: targetLanguage
                 )
-                let result = try await client.translatePage(request)
-                let validated = try DocumentPageTranslationValidator.validateAndOrder(
-                    result,
-                    for: request
-                )
+                do {
+                    let result = try await client.translatePage(request)
+                    let validated = try DocumentPageTranslationValidator.validateAndOrder(
+                        result,
+                        for: request
+                    )
 
-                for translation in validated.translations {
-                    translatedBlocks[translation.id] = translation.translatedText
+                    for translation in validated.translations {
+                        translatedBlocks[translation.id] = translation.translatedText
+                    }
+                    translatedPageCount += 1
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    guard continueOnError else {
+                        throw error
+                    }
+                    skippedPageCount += 1
+                    warnings = Self.deduplicated(
+                        warnings + [
+                            "(page.pageIndex + 1)페이지 번역 오류를 건너뛰었습니다: (Self.userFacingMessage(for: error))"
+                        ]
+                    )
+                    statusMessage = "(page.pageIndex + 1)페이지 번역 오류를 건너뛰고 계속하는 중입니다."
                 }
+
+                if !translatedBlocks.isEmpty {
+                    do {
+                        let previewData = try await composePreviewData(
+                            analysis: analysis,
+                            translations: translatedBlocks,
+                            destinationURL: destinationURL,
+                            renderMode: renderMode
+                        )
+                        outputData = previewData
+                        outputDocumentVersion &+= 1
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        guard continueOnError else {
+                            throw error
+                        }
+                        warnings = Self.deduplicated(
+                            warnings + [
+                                "(page.pageIndex + 1)페이지 미리보기 합성 오류를 건너뛰었습니다: (Self.userFacingMessage(for: error))"
+                            ]
+                        )
+                        statusMessage = "미리보기 합성 오류를 건너뛰고 (page.pageIndex + 1)페이지를 계속하는 중입니다."
+                    }
+                }
+
+                progress = Double(offset + 1) / Double(max(1, translatablePages.count + 1))
             }
 
             try Task.checkCancellation()
@@ -493,7 +558,9 @@ final class FileTranslationViewModel: ObservableObject {
                         analysis: analysis,
                         translations: translatedBlocks,
                         destinationURL: temporaryURL,
-                        policy: compositionPolicy
+                        policy: continueOnError ? .bestEffort : compositionPolicy,
+                        renderMode: renderMode,
+                        allowMissingTranslations: continueOnError
                     )
                     didCreateTemporaryFile = true
                     try Task.checkCancellation()
@@ -618,6 +685,34 @@ final class FileTranslationViewModel: ObservableObject {
         return (analysis, destinationURL)
     }
 
+    private func composePreviewData(
+        analysis: PDFDocumentAnalysis,
+        translations: [String: String],
+        destinationURL: URL,
+        renderMode: PDFTranslationRenderMode
+    ) async throws -> Data {
+        let previewURL = Self.temporaryOutputURL(beside: destinationURL)
+        let compositionTask = Task.detached(priority: .userInitiated) {
+            defer {
+                try? FileManager.default.removeItem(at: previewURL)
+            }
+            _ = try PDFDocumentCompositionService().compose(
+                analysis: analysis,
+                translations: translations,
+                destinationURL: previewURL,
+                policy: .bestEffort,
+                renderMode: renderMode,
+                allowMissingTranslations: true
+            )
+            return try Data(contentsOf: previewURL, options: .mappedIfSafe)
+        }
+        return try await withTaskCancellationHandler {
+            try await compositionTask.value
+        } onCancel: {
+            compositionTask.cancel()
+        }
+    }
+
     private static func isBestEffortEligible(_ error: Error) -> Bool {
         guard let error = error as? PDFDocumentServiceError else {
             return false
@@ -692,8 +787,12 @@ final class FileTranslationViewModel: ObservableObject {
     private func fail(with error: Error) {
         errorMessage = Self.userFacingMessage(for: error)
         stage = .failed
-        statusMessage = "파일 번역을 완료하지 못했습니다."
-        progress = 0
+        if outputData == nil {
+            statusMessage = "파일 번역을 완료하지 못했습니다."
+            progress = 0
+        } else {
+            statusMessage = "오류가 발생했지만 현재까지 번역된 미리보기는 유지됩니다."
+        }
     }
 
     static func warningMessages(in analysis: PDFDocumentAnalysis) -> [String] {

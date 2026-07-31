@@ -108,6 +108,37 @@ enum PDFDocumentCompositionPolicy: Equatable, Sendable {
     case bestEffort
 }
 
+/// Controls how translated text is written back to the result PDF.
+enum PDFTranslationRenderMode: String, CaseIterable, Codable, Sendable, Identifiable {
+    case replaceText
+    case preserveOriginalWithLayer
+    case hybrid
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .replaceText:
+            "원본 텍스트 교체"
+        case .preserveOriginalWithLayer:
+            "원본 이미지 유지 (번역 레이어)"
+        case .hybrid:
+            "하이브리드 사용"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .replaceText:
+            "페이지 콘텐츠로 번역문을 다시 그려 별도 번역 레이어를 만들지 않습니다."
+        case .preserveOriginalWithLayer:
+            "원본 PDF를 보존하고 번역문을 별도 레이어로 추가합니다."
+        case .hybrid:
+            "네이티브 텍스트는 콘텐츠로 교체하고 OCR·이미지 영역은 번역 레이어를 사용합니다."
+        }
+    }
+}
+
 enum PDFDocumentWarning: Error, LocalizedError, Equatable, Sendable {
     case ocrApplied(pageIndex: Int)
     case hybridOCRApplied(pageIndex: Int, addedLineCount: Int)

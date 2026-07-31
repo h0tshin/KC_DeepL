@@ -40,7 +40,9 @@ struct PDFDocumentCompositionService: Sendable {
         analysis: PDFDocumentAnalysis,
         translations: [String: String],
         destinationURL: URL,
-        policy: PDFDocumentCompositionPolicy = .strict
+        policy: PDFDocumentCompositionPolicy = .strict,
+        renderMode: PDFTranslationRenderMode = .preserveOriginalWithLayer,
+        allowMissingTranslations: Bool = false
     ) throws -> PDFCompositionResult {
         guard destinationURL.isFileURL,
               destinationURL.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame
@@ -70,6 +72,7 @@ struct PDFDocumentCompositionService: Sendable {
             analysis: analysis
         )
         var expectedOverlays: [OverlayExpectation] = []
+        var directOverlaysByPage: [Int: [PreparedOverlay]] = [:]
         var warnings: [PDFDocumentWarning] = []
         var translatedLineCount = 0
 
@@ -84,7 +87,8 @@ struct PDFDocumentCompositionService: Sendable {
             let resolved = try resolvedTranslations(
                 for: pageAnalysis,
                 translations: translations,
-                warnings: &warnings
+                warnings: &warnings,
+                allowMissingTranslations: allowMissingTranslations
             )
             var preparedOverlays: [PreparedOverlay] = []
             preparedOverlays.reserveCapacity(pageAnalysis.lines.count)
@@ -109,6 +113,17 @@ struct PDFDocumentCompositionService: Sendable {
                         pageIndex: pageAnalysis.pageIndex,
                         lineID: line.id
                     )
+                }
+                // In the explicit continue-on-error path, an untranslated line
+                // must remain visible as source content. Do not paint a white
+                // mask with an empty translation over it.
+                if allowMissingTranslations,
+                   !hasTranslation(
+                       for: line.id,
+                       in: pageAnalysis,
+                       translations: translations
+                   ) {
+                    continue
                 }
 
                 let textBounds = Self.overlayBounds(
@@ -283,13 +298,21 @@ struct PDFDocumentCompositionService: Sendable {
                         requiresBakedAppearance: carrierPageIndices[
                             pageAnalysis.pageIndex
                         ] != nil,
-                        linkURL: preservedLinkURL?.absoluteString
+                        linkURL: preservedLinkURL?.absoluteString,
+                        renderedAsAnnotation: !Self.shouldRenderInContent(
+                            renderMode: renderMode,
+                            page: pageAnalysis,
+                            line: line
+                        )
                     )
+                let rendersInContent = !expectation.renderedAsAnnotation
                 preparedOverlays.append(
                     PreparedOverlay(
                         maskAnnotation: mask,
                         textAnnotation: textAnnotation,
-                        expectation: expectation
+                        expectation: expectation,
+                        font: textAnnotation?.font,
+                        rendersInContent: rendersInContent
                     )
                 )
             }
@@ -299,7 +322,12 @@ struct PDFDocumentCompositionService: Sendable {
             // cover a translation that was already placed.
             for overlay in preparedOverlays {
                 try Task.checkCancellation()
-                page.addAnnotation(overlay.maskAnnotation)
+                if overlay.rendersInContent {
+                    directOverlaysByPage[pageAnalysis.pageIndex, default: []]
+                        .append(overlay)
+                } else {
+                    page.addAnnotation(overlay.maskAnnotation)
+                }
             }
             let textPage: PDFPage
             if let carrierPageIndex = carrierPageIndices[
@@ -311,7 +339,8 @@ struct PDFDocumentCompositionService: Sendable {
             }
             for overlay in preparedOverlays {
                 try Task.checkCancellation()
-                if let textAnnotation = overlay.textAnnotation {
+                if !overlay.rendersInContent,
+                   let textAnnotation = overlay.textAnnotation {
                     textPage.addAnnotation(textAnnotation)
                 }
             }
@@ -331,8 +360,41 @@ struct PDFDocumentCompositionService: Sendable {
             )
         }
         try Task.checkCancellation()
-        guard let outputData = document.dataRepresentation() else {
-            throw PDFDocumentServiceError.cannotSerializeOutput
+        var outputData: Data
+        if directOverlaysByPage.isEmpty {
+            guard let data = document.dataRepresentation() else {
+                throw PDFDocumentServiceError.cannotSerializeOutput
+            }
+            outputData = data
+        } else {
+            outputData = try makeContentRecomposedData(
+                document: document,
+                analysis: analysis,
+                directOverlaysByPage: directOverlaysByPage
+            )
+            guard let recomposed = PDFDocument(data: outputData) else {
+                throw PDFDocumentServiceError.cannotSerializeOutput
+            }
+            for pageAnalysis in analysis.pages {
+                guard let page = recomposed.page(at: pageAnalysis.pageIndex) else {
+                    throw PDFDocumentServiceError.cannotSerializeOutput
+                }
+                page.setBounds(pageAnalysis.mediaBox, for: .mediaBox)
+                page.setBounds(pageAnalysis.cropBox, for: .cropBox)
+                page.setBounds(pageAnalysis.bleedBox, for: .bleedBox)
+                page.setBounds(pageAnalysis.trimBox, for: .trimBox)
+                page.setBounds(pageAnalysis.artBox, for: .artBox)
+                page.rotation = pageAnalysis.rotation
+            }
+            try restoreAnnotations(
+                from: document,
+                to: recomposed,
+                expectedOverlays: expectedOverlays
+            )
+            guard let data = recomposed.dataRepresentation() else {
+                throw PDFDocumentServiceError.cannotSerializeOutput
+            }
+            outputData = data
         }
 
         let destinationDirectory = destinationURL.deletingLastPathComponent()
@@ -463,12 +525,15 @@ private extension PDFDocumentCompositionService {
         let shouldPrint: Bool
         let requiresBakedAppearance: Bool
         let linkURL: String?
+        let renderedAsAnnotation: Bool
     }
 
     struct PreparedOverlay {
         let maskAnnotation: PDFAnnotation
         let textAnnotation: PDFAnnotation?
         let expectation: OverlayExpectation
+        let font: NSFont?
+        let rendersInContent: Bool
     }
 
     enum FontFitResult {
@@ -481,6 +546,142 @@ private extension PDFDocumentCompositionService {
         case none
         case url(URL)
         case unsupported
+    }
+
+    static func shouldRenderInContent(
+        renderMode: PDFTranslationRenderMode,
+        page: PDFPageAnalysis,
+        line: PDFTextLine
+    ) -> Bool {
+        guard page.rotation == 0 else {
+            // The annotation path has a dedicated, validated appearance bake
+            // for quarter-turn pages. Keep that path for rotated content.
+            return false
+        }
+        switch renderMode {
+        case .replaceText:
+            return true
+        case .preserveOriginalWithLayer:
+            return false
+        case .hybrid:
+            return line.extractionSource == .native
+        }
+    }
+
+    func paragraphStyle(for alignment: PDFTextAlignment?) -> NSParagraphStyle {
+        let paragraph = NSMutableParagraphStyle()
+        switch alignment ?? .left {
+        case .left:
+            paragraph.alignment = .left
+        case .center:
+            paragraph.alignment = .center
+        case .right:
+            paragraph.alignment = .right
+        }
+        return paragraph
+    }
+
+    func makeContentRecomposedData(
+        document: PDFDocument,
+        analysis: PDFDocumentAnalysis,
+        directOverlaysByPage: [Int: [PreparedOverlay]]
+    ) throws -> Data {
+        let data = NSMutableData()
+        guard let consumer = CGDataConsumer(data: data),
+              let context = CGContext(
+                  consumer: consumer,
+                  mediaBox: nil,
+                  nil
+              )
+        else {
+            throw PDFDocumentServiceError.cannotSerializeOutput
+        }
+
+        for pageAnalysis in analysis.pages {
+            try Task.checkCancellation()
+            let mediaBox = pageAnalysis.mediaBox
+            context.beginPDFPage([
+                kCGPDFContextMediaBox: NSValue(rect: mediaBox)
+            ] as CFDictionary)
+            context.saveGState()
+            if let page = document.page(at: pageAnalysis.pageIndex) {
+                page.draw(with: .mediaBox, to: context)
+            }
+            context.restoreGState()
+
+            let overlays = directOverlaysByPage[pageAnalysis.pageIndex] ?? []
+            let graphicsContext = NSGraphicsContext(cgContext: context, flipped: false)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = graphicsContext
+            for overlay in overlays {
+                try Task.checkCancellation()
+                let expectation = overlay.expectation
+                let maskColor = Self.platformColor(expectation.maskInteriorColor)
+                maskColor.setFill()
+                expectation.maskBounds.fill()
+
+                guard !expectation.text.isEmpty,
+                      let font = overlay.font else {
+                    continue
+                }
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: font,
+                    .foregroundColor: Self.platformColor(
+                        expectation.textColor ?? .black
+                    ),
+                    .paragraphStyle: paragraphStyle(for: expectation.alignment)
+                ]
+                let attributedText = NSAttributedString(
+                    string: expectation.text,
+                    attributes: attributes
+                )
+                attributedText.draw(
+                    with: expectation.textBounds,
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                )
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            context.endPDFPage()
+        }
+        context.closePDF()
+        return data as Data
+    }
+
+    func restoreAnnotations(
+        from source: PDFDocument,
+        to destination: PDFDocument,
+        expectedOverlays: [OverlayExpectation]
+    ) throws {
+        for pageIndex in 0..<min(source.pageCount, destination.pageCount) {
+            try Task.checkCancellation()
+            guard let sourcePage = source.page(at: pageIndex),
+                  let destinationPage = destination.page(at: pageIndex)
+            else {
+                continue
+            }
+            let expected = Set(
+                expectedOverlays
+                    .filter { $0.pageIndex == pageIndex && $0.renderedAsAnnotation }
+                    .map(\.lineID)
+            )
+            for annotation in sourcePage.annotations {
+                let name = annotation.userName ?? ""
+                let isTranslationAnnotation = name.hasPrefix("KCDeepL Translation:")
+                    || name.hasPrefix("KCDeepL Mask:")
+                if isTranslationAnnotation {
+                    let identifier = name.split(separator: ":", maxSplits: 1)
+                        .dropFirst().first.map(String.init) ?? ""
+                    guard expected.contains(identifier) else {
+                        continue
+                    }
+                }
+                guard let copy = annotation.copy() as? PDFAnnotation else {
+                    continue
+                }
+                destinationPage.addAnnotation(copy)
+            }
+        }
     }
 
     func makeQuarterTurnCarrierPages(
@@ -790,7 +991,8 @@ private extension PDFDocumentCompositionService {
     func resolvedTranslations(
         for page: PDFPageAnalysis,
         translations: [String: String],
-        warnings: inout [PDFDocumentWarning]
+        warnings: inout [PDFDocumentWarning],
+        allowMissingTranslations: Bool = false
     ) throws -> [String: String] {
         var resolved: [String: String] = [:]
         let linesByID = Dictionary(uniqueKeysWithValues: page.lines.map { ($0.id, $0) })
@@ -835,12 +1037,36 @@ private extension PDFDocumentCompositionService {
 
         for line in page.lines where resolved[line.id] == nil {
             try Task.checkCancellation()
+            if allowMissingTranslations {
+                resolved[line.id] = ""
+                warnings.append(
+                    .bestEffortLineSkipped(
+                        pageIndex: page.pageIndex,
+                        lineID: line.id,
+                        reason: "아직 번역되지 않아"
+                    )
+                )
+                continue
+            }
             throw PDFDocumentServiceError.missingTranslation(
                 pageIndex: page.pageIndex,
                 lineID: line.id
             )
         }
         return resolved
+    }
+
+    func hasTranslation(
+        for lineID: String,
+        in page: PDFPageAnalysis,
+        translations: [String: String]
+    ) -> Bool {
+        if translations[lineID] != nil {
+            return true
+        }
+        return page.blocks.contains { block in
+            block.lineIDs.contains(lineID) && translations[block.id] != nil
+        }
     }
 
     func reflow(
@@ -1162,6 +1388,9 @@ private extension PDFDocumentCompositionService {
 
         for expectation in expectedOverlays {
             try Task.checkCancellation()
+            if !expectation.renderedAsAnnotation {
+                continue
+            }
             guard let page = output.page(at: expectation.pageIndex) else {
                 throw PDFDocumentServiceError.outputValidationFailed(
                     "번역 주석의 페이지를 확인할 수 없습니다."
@@ -1233,7 +1462,7 @@ private extension PDFDocumentCompositionService {
             try Task.checkCancellation()
             guard let page = output.page(at: pageIndex) else { continue }
             let pageExpectations = expectedOverlays.filter {
-                $0.pageIndex == pageIndex
+                $0.pageIndex == pageIndex && $0.renderedAsAnnotation
             }
             let lineIDs = Set(pageExpectations.map(\.lineID))
             let maskIndices = page.annotations.enumerated().compactMap {

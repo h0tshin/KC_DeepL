@@ -524,7 +524,9 @@ final class FileTranslationViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.stage, .cancelled)
         XCTAssertNil(viewModel.outputURL)
-        XCTAssertNil(viewModel.outputData)
+        // Page-level previews are intentionally retained after cancellation so
+        // a long translation never loses work that was already composed.
+        XCTAssertNotNil(viewModel.outputData)
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
     }
 }
@@ -561,7 +563,9 @@ private extension FileTranslationViewModelTests {
         temperature: Double = 0.2,
         destinationURL: URL,
         allowsPotentiallyIncompleteOCR: Bool = true,
-        compositionPolicy: PDFDocumentCompositionPolicy = .strict
+        compositionPolicy: PDFDocumentCompositionPolicy = .strict,
+        renderMode: PDFTranslationRenderMode = .preserveOriginalWithLayer,
+        continueOnError: Bool = false
     ) -> FileTranslationConfiguration {
         FileTranslationConfiguration(
             engine: engine,
@@ -573,7 +577,9 @@ private extension FileTranslationViewModelTests {
             downloadLocation: FileTranslationOutputLocation.ask.rawValue,
             explicitlySelectedDestination: destinationURL,
             allowsPotentiallyIncompleteOCR: allowsPotentiallyIncompleteOCR,
-            compositionPolicy: compositionPolicy
+            compositionPolicy: compositionPolicy,
+            renderMode: renderMode,
+            continueOnError: continueOnError
         )
     }
 
