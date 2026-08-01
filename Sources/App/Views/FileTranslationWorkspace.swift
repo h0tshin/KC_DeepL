@@ -24,6 +24,8 @@ struct FileTranslationWorkspace: View {
     private var renderModeRawValue = PDFTranslationRenderMode.preserveOriginalWithLayer.rawValue
     @AppStorage(PreferenceKeys.fileTranslationContinueOnError)
     private var continueOnError = true
+    @AppStorage(PreferenceKeys.fileTranslationIncludeOCR)
+    private var includeOCR = true
 
     @State private var isShowingImporter = false
     @State private var isDropTargeted = false
@@ -151,6 +153,9 @@ struct FileTranslationWorkspace: View {
         }
         .onChange(of: viewModel.sourceDocumentVersion) { _, _ in
             allowsPotentiallyIncompleteOCR = false
+        }
+        .onChange(of: includeOCR) { _, _ in
+            reanalyzeForOCRSetting()
         }
         .onAppear {
             normalizeEngineAvailability()
@@ -533,6 +538,23 @@ struct FileTranslationWorkspace: View {
 
     private var outputSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("텍스트 인식")
+                .font(.headline)
+
+            Toggle("이미지 영역 OCR 포함", isOn: $includeOCR)
+                .toggleStyle(.checkbox)
+
+            Text(
+                includeOCR
+                    ? "네이티브 PDF 텍스트와 이미지 안의 글자를 함께 분석합니다."
+                    : "PDF에 포함된 네이티브 텍스트만 분석합니다. OCR을 실행하지 않으므로 이미지 안의 글자는 번역하지 않습니다."
+            )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
             Text("번역 결과")
                 .font(.headline)
 
@@ -791,7 +813,8 @@ struct FileTranslationWorkspace: View {
                 || continueOnError,
             compositionPolicy: bestEffort || continueOnError ? .bestEffort : .strict,
             renderMode: renderMode,
-            continueOnError: continueOnError
+            continueOnError: continueOnError,
+            includeOCR: includeOCR
         )
 
         if engine == .apple {
@@ -802,7 +825,23 @@ struct FileTranslationWorkspace: View {
     }
 
     private func importPDF(_ url: URL) {
-        viewModel.importPDF(from: url, sourceLanguage: sourceLanguage)
+        viewModel.importPDF(
+            from: url,
+            sourceLanguage: sourceLanguage,
+            includeOCR: includeOCR
+        )
+    }
+
+    private func reanalyzeForOCRSetting() {
+        guard let sourceURL = viewModel.sourceURL,
+              !viewModel.isBusy else {
+            return
+        }
+        viewModel.importPDF(
+            from: sourceURL,
+            sourceLanguage: sourceLanguage,
+            includeOCR: includeOCR
+        )
     }
 
     private func isPDF(_ url: URL) -> Bool {

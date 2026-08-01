@@ -565,7 +565,8 @@ private extension FileTranslationViewModelTests {
         allowsPotentiallyIncompleteOCR: Bool = true,
         compositionPolicy: PDFDocumentCompositionPolicy = .strict,
         renderMode: PDFTranslationRenderMode = .preserveOriginalWithLayer,
-        continueOnError: Bool = false
+        continueOnError: Bool = false,
+        includeOCR: Bool = true
     ) -> FileTranslationConfiguration {
         FileTranslationConfiguration(
             engine: engine,
@@ -579,7 +580,8 @@ private extension FileTranslationViewModelTests {
             allowsPotentiallyIncompleteOCR: allowsPotentiallyIncompleteOCR,
             compositionPolicy: compositionPolicy,
             renderMode: renderMode,
-            continueOnError: continueOnError
+            continueOnError: continueOnError,
+            includeOCR: includeOCR
         )
     }
 

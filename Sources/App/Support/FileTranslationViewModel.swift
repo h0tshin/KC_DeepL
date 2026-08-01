@@ -36,6 +36,7 @@ struct FileTranslationConfiguration: Equatable, Sendable {
     let compositionPolicy: PDFDocumentCompositionPolicy
     let renderMode: PDFTranslationRenderMode
     let continueOnError: Bool
+    let includeOCR: Bool
 }
 
 enum FileTranslationViewModelError: LocalizedError, Equatable {
@@ -146,7 +147,11 @@ final class FileTranslationViewModel: ObservableObject {
         } ?? false
     }
 
-    func importPDF(from sourceURL: URL, sourceLanguage: LanguageOption) {
+    func importPDF(
+        from sourceURL: URL,
+        sourceLanguage: LanguageOption,
+        includeOCR: Bool = true
+    ) {
         cancelCurrentOperation(setCancelledStage: false)
         let generation = nextOperationGeneration()
 
@@ -176,7 +181,8 @@ final class FileTranslationViewModel: ObservableObject {
                 let analysisTask = Task.detached(priority: .userInitiated) {
                     try Task.checkCancellation()
                     return try PDFDocumentAnalysisService(
-                        ocrLanguages: ocrLanguages
+                        ocrLanguages: ocrLanguages,
+                        includeOCR: includeOCR
                     ).analyze(sourceURL: sourceURL)
                 }
                 let analyzedDocument = try await withTaskCancellationHandler {

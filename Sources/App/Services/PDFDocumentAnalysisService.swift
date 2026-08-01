@@ -6,15 +6,18 @@ import Vision
 /// Extracts text together with page-space geometry without mutating the source PDF.
 struct PDFDocumentAnalysisService: Sendable {
     private let ocrLanguages: [String]
+    private let includeOCR: Bool
     private let ocrMinimumConfidence: Float
     private let maximumOCRImageDimension: CGFloat
 
     init(
         ocrLanguages: [String] = [],
+        includeOCR: Bool = true,
         ocrMinimumConfidence: Float = 0.55,
         maximumOCRImageDimension: CGFloat = 3_200
     ) {
         self.ocrLanguages = ocrLanguages
+        self.includeOCR = includeOCR
         self.ocrMinimumConfidence = min(max(ocrMinimumConfidence, 0), 1)
         self.maximumOCRImageDimension = max(1_024, maximumOCRImageDimension)
     }
@@ -82,70 +85,74 @@ struct PDFDocumentAnalysisService: Sendable {
             var candidates = nativeCandidates
             var pageWarnings: [PDFDocumentWarning] = []
 
-            let ocrResult = try visionTextCandidates(
-                on: page,
-                cropBox: cropBox,
-                rotation: rotation
-            )
-            if nativeCandidates.isEmpty {
-                candidates = ocrResult.candidates
-                if !candidates.isEmpty {
-                    pageWarnings.append(.ocrApplied(pageIndex: pageIndex))
-                    if let minimumConfidence = ocrResult.minimumConfidence,
-                       minimumConfidence < ocrMinimumConfidence {
-                        pageWarnings.append(
-                            .lowOCRConfidence(
-                                pageIndex: pageIndex,
-                                confidence: minimumConfidence
+            if includeOCR {
+                let ocrResult = try visionTextCandidates(
+                    on: page,
+                    cropBox: cropBox,
+                    rotation: rotation
+                )
+                if nativeCandidates.isEmpty {
+                    candidates = ocrResult.candidates
+                    if !candidates.isEmpty {
+                        pageWarnings.append(.ocrApplied(pageIndex: pageIndex))
+                        if let minimumConfidence = ocrResult.minimumConfidence,
+                           minimumConfidence < ocrMinimumConfidence {
+                            pageWarnings.append(
+                                .lowOCRConfidence(
+                                    pageIndex: pageIndex,
+                                    confidence: minimumConfidence
+                                )
                             )
-                        )
+                        }
+                    } else {
+                        if rotation != 0, ocrResult.didFail {
+                            pageWarnings.append(
+                                .rotatedOCRUnsupported(
+                                    pageIndex: pageIndex,
+                                    rotation: rotation
+                                )
+                            )
+                        }
+                        pageWarnings.append(.ocrRequired(pageIndex: pageIndex))
                     }
-                } else {
-                    if rotation != 0, ocrResult.didFail {
+                } else if ocrResult.didFail {
+                    if rotation == 0 {
+                        pageWarnings.append(.hybridOCRUnavailable(pageIndex: pageIndex))
+                    } else {
                         pageWarnings.append(
-                            .rotatedOCRUnsupported(
+                            .rotatedHybridOCRUnsupported(
                                 pageIndex: pageIndex,
                                 rotation: rotation
                             )
                         )
                     }
-                    pageWarnings.append(.ocrRequired(pageIndex: pageIndex))
-                }
-            } else if ocrResult.didFail {
-                if rotation == 0 {
-                    pageWarnings.append(.hybridOCRUnavailable(pageIndex: pageIndex))
                 } else {
-                    pageWarnings.append(
-                        .rotatedHybridOCRUnsupported(
-                            pageIndex: pageIndex,
-                            rotation: rotation
-                        )
-                    )
-                }
-            } else {
-                let supplementalOCR = ocrResult.candidates.filter { ocrCandidate in
-                    !nativeCandidates.contains {
-                        Self.areDuplicate($0, ocrCandidate)
+                    let supplementalOCR = ocrResult.candidates.filter { ocrCandidate in
+                        !nativeCandidates.contains {
+                            Self.areDuplicate($0, ocrCandidate)
+                        }
                     }
-                }
-                if !supplementalOCR.isEmpty {
-                    candidates.append(contentsOf: supplementalOCR)
-                    pageWarnings.append(
-                        .hybridOCRApplied(
-                            pageIndex: pageIndex,
-                            addedLineCount: supplementalOCR.count
-                        )
-                    )
-                    if let minimumConfidence = ocrResult.minimumConfidence,
-                       minimumConfidence < ocrMinimumConfidence {
+                    if !supplementalOCR.isEmpty {
+                        candidates.append(contentsOf: supplementalOCR)
                         pageWarnings.append(
-                            .lowOCRConfidence(
+                            .hybridOCRApplied(
                                 pageIndex: pageIndex,
-                                confidence: minimumConfidence
+                                addedLineCount: supplementalOCR.count
                             )
                         )
+                        if let minimumConfidence = ocrResult.minimumConfidence,
+                           minimumConfidence < ocrMinimumConfidence {
+                            pageWarnings.append(
+                                .lowOCRConfidence(
+                                    pageIndex: pageIndex,
+                                    confidence: minimumConfidence
+                                )
+                            )
+                        }
                     }
                 }
+            } else if nativeCandidates.isEmpty {
+                pageWarnings.append(.ocrDisabled(pageIndex: pageIndex))
             }
 
             let orderedCandidates = spatiallyOrdered(

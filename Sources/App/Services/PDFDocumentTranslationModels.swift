@@ -141,6 +141,7 @@ enum PDFTranslationRenderMode: String, CaseIterable, Codable, Sendable, Identifi
 
 enum PDFDocumentWarning: Error, LocalizedError, Equatable, Sendable {
     case ocrApplied(pageIndex: Int)
+    case ocrDisabled(pageIndex: Int)
     case hybridOCRApplied(pageIndex: Int, addedLineCount: Int)
     case hybridOCRUnavailable(pageIndex: Int)
     case rotatedHybridOCRUnsupported(pageIndex: Int, rotation: Int)
@@ -166,6 +167,7 @@ enum PDFDocumentWarning: Error, LocalizedError, Equatable, Sendable {
              .pageHasNoTranslatableText:
             return true
         case .ocrApplied,
+             .ocrDisabled,
              .hybridOCRApplied,
              .blockTranslationReflowed,
              .complexBackground,
@@ -180,6 +182,8 @@ enum PDFDocumentWarning: Error, LocalizedError, Equatable, Sendable {
         switch self {
         case let .ocrApplied(pageIndex):
             return "\(pageIndex + 1)페이지는 이미지 문서여서 Vision OCR로 텍스트를 인식했습니다."
+        case let .ocrDisabled(pageIndex):
+            return "\(pageIndex + 1)페이지는 OCR을 제외해 PDF에 포함된 네이티브 텍스트만 분석했습니다. 이미지 안의 글자는 번역하지 않습니다."
         case let .hybridOCRApplied(pageIndex, addedLineCount):
             return "\(pageIndex + 1)페이지의 이미지 영역에서 OCR 문장 \(addedLineCount)개를 추가로 인식했습니다."
         case let .hybridOCRUnavailable(pageIndex):

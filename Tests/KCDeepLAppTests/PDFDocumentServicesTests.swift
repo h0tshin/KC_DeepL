@@ -62,6 +62,7 @@ final class PDFDocumentServicesTests: XCTestCase {
 
         let nonAcknowledgementWarnings: [PDFDocumentWarning] = [
             .ocrApplied(pageIndex: 0),
+            .ocrDisabled(pageIndex: 0),
             .hybridOCRApplied(pageIndex: 0, addedLineCount: 1),
             .blockTranslationReflowed(blockID: "block"),
             .complexBackground(pageIndex: 0, lineID: "line"),
@@ -238,6 +239,25 @@ final class PDFDocumentServicesTests: XCTestCase {
                 || page.sourceText.uppercased().contains("OCR")
         )
         XCTAssertTrue(page.warnings.contains(.ocrApplied(pageIndex: 0)))
+    }
+
+    func testAnalyzeSkipsVisionOCRWhenDisabled() throws {
+        let source = temporaryDirectory.appendingPathComponent("scan-without-ocr.pdf")
+        try makeImageOnlyPDF(at: source, text: "NO OCR")
+
+        let analysis = try PDFDocumentAnalysisService(
+            ocrLanguages: ["en-US"],
+            includeOCR: false
+        ).analyze(sourceURL: source)
+
+        let page = try XCTUnwrap(analysis.pages.first)
+        XCTAssertTrue(page.lines.isEmpty)
+        XCTAssertTrue(page.warnings.contains(.ocrDisabled(pageIndex: 0)))
+        XCTAssertFalse(page.warnings.contains(.ocrApplied(pageIndex: 0)))
+        XCTAssertFalse(page.warnings.contains { warning in
+            if case .lowOCRConfidence = warning { return true }
+            return false
+        })
     }
 
     func testRotatedImageOCRRestoresGeometryAndComposesEveryRightAngle() throws {
@@ -1464,6 +1484,36 @@ final class PDFDocumentServicesTests: XCTestCase {
             }
         )
         XCTAssertLessThan(lastMaskIndex, firstTranslationIndex)
+    }
+
+    func testLayerModeKeepsSourceContentAndOnlyAddsTranslationAnnotations() throws {
+        let source = temporaryDirectory.appendingPathComponent("layer-source.pdf")
+        try makeDigitalPDF(
+            at: source,
+            pages: [[DrawnLine("Layer source text", x: 50, y: 700, size: 18)]]
+        )
+        let sourceData = try Data(contentsOf: source)
+        let analysis = try PDFDocumentAnalysisService().analyze(sourceURL: source)
+        let line = try XCTUnwrap(analysis.pages.first?.lines.first)
+        let destination = temporaryDirectory.appendingPathComponent("layer-output.pdf")
+
+        _ = try PDFDocumentCompositionService().compose(
+            analysis: analysis,
+            translations: [line.id: "레이어 번역문"],
+            destinationURL: destination,
+            renderMode: .preserveOriginalWithLayer
+        )
+
+        XCTAssertEqual(try Data(contentsOf: source), sourceData)
+        let output = try XCTUnwrap(PDFDocument(url: destination))
+        let page = try XCTUnwrap(output.page(at: 0))
+        XCTAssertTrue(
+            page.attributedString?.string.contains("Layer source text") == true
+        )
+        XCTAssertTrue(page.annotations.contains { annotation in
+            annotation.userName == "KCDeepL Translation:\(line.id)"
+                && annotation.contents == "레이어 번역문"
+        })
     }
 
     func testReplaceTextModeRecomposesPageContentWithoutTranslationAnnotations() throws {
