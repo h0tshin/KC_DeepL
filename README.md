@@ -74,7 +74,8 @@ swift test
 - 7개 Codex 모델의 탭 기반 번역 품질 비교
 - 페이지 단위 문맥·안정적 위치 ID를 사용하는 PDF 파일 번역
 - PDFKit 텍스트/좌표 추출, Vision OCR, 비파괴 번역 레이어 합성
-- 원문 마스크와 번역 컨테이너를 분리하고, 열 경계·glyph 폭 측정 기반으로 긴 한글 번역을 reflow하여 글자 가로 압축과 짧은 continuation 조각의 초소형 글꼴을 방지
+- 원문 마스크와 번역 컨테이너를 분리하고, 목록의 줄바꿈 continuation을 하나의 문단으로 묶어 페이지 단위 번역
+- 열 경계·glyph 폭 측정 기반으로 문단 전체를 자연스럽게 reflow하여 `Plex는퍼블릭`처럼 좁은 줄에 갇히는 현상, 문장 끝 기호만 남는 고아 줄, 짧은 continuation 조각의 초소형 글꼴을 방지
 - PDFKit의 stale paragraph alignment를 glyph geometry와 목록 블록 문맥으로 교정하여 bullet/답변의 왼쪽 시작점과 가운데·오른쪽 정렬을 보존
 - Apple 내장 / Codex App Server / Gemini API 파일 번역 엔진 선택
 - 원본 덮어쓰기 방지, 진행률·취소·경고·원본/결과 PDF 미리보기

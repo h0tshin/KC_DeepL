@@ -1575,15 +1575,27 @@ private extension PDFDocumentAnalysisService {
     }
 
     static func canJoin(_ previous: PDFTextLine, _ current: PDFTextLine) -> Bool {
-        guard previous.columnIndex == current.columnIndex,
-              previous.columnIndex >= 0,
-              previous.extractionSource == current.extractionSource,
+        guard previous.extractionSource == current.extractionSource,
               // A fresh list item starts a new translation unit.  A wrapped
               // continuation line has no marker and can safely share the
               // preceding block even when PDFKit reports a different font
               // resource for that run.
               !startsWithListMarker(current.text)
         else {
+            return false
+        }
+
+        let sameColumn = previous.columnIndex >= 0
+            && previous.columnIndex == current.columnIndex
+        // A long list line can be classified as a page-spanning candidate
+        // while its short wrapped continuation is assigned to the nearest
+        // body column.  Treat that specific geometry as one text block; if it
+        // is not joined, the translation engine receives `Cloud?` or `data`
+        // as an independent unit and the composer must squeeze the translated
+        // sentence into a tiny source glyph box.
+        let spanningListContinuation = previous.columnIndex < 0
+            && startsWithListMarker(previous.text)
+        guard sameColumn || spanningListContinuation else {
             return false
         }
 

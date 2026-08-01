@@ -1017,6 +1017,45 @@ private extension PDFDocumentCompositionService {
             resolved[line.id] = direct
         }
 
+        // Some older page translators (and a few third-party adapters) return
+        // one response per extracted line even though the analysis has already
+        // identified a multi-line paragraph.  Do not let those responses lock
+        // each sentence fragment into its narrow source glyph box.  Merge all
+        // direct responses for the paragraph, then run the same measured
+        // reflow used for a native block response.  This is deliberately done
+        // only when every line is present; a partial response must still take
+        // the normal missing-translation path instead of silently dropping
+        // content.
+        for block in page.blocks where block.lineIDs.count > 1 {
+            try Task.checkCancellation()
+            let blockLines = block.lineIDs.compactMap { linesByID[$0] }
+            guard blockLines.count == block.lineIDs.count else { continue }
+            let directTranslations = blockLines.compactMap { resolved[$0.id] }
+            guard directTranslations.count == blockLines.count else { continue }
+
+            let mergedTranslation = directTranslations
+                .map(Self.normalizedLineText)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            guard !mergedTranslation.isEmpty else {
+                throw PDFDocumentServiceError.emptyTranslation(
+                    pageIndex: page.pageIndex,
+                    lineID: block.id
+                )
+            }
+
+            let chunks = try reflow(
+                mergedTranslation,
+                across: blockLines,
+                in: page
+            )
+            for (line, chunk) in zip(blockLines, chunks) {
+                try Task.checkCancellation()
+                resolved[line.id] = chunk
+            }
+            warnings.append(.blockTranslationReflowed(blockID: block.id))
+        }
+
         for block in page.blocks where block.lineIDs.contains(where: { resolved[$0] == nil }) {
             try Task.checkCancellation()
             let directlyTranslatedCount = block.lineIDs.reduce(into: 0) {
@@ -1088,12 +1127,12 @@ private extension PDFDocumentCompositionService {
     ) throws -> [String] {
         guard lines.count > 1 else { return [text] }
 
-        let explicitLines = text.components(separatedBy: .newlines)
-            .map(Self.normalizedLineText)
-        if explicitLines.count == lines.count {
-            return explicitLines
-        }
-
+        // Newlines in a translation are not authoritative layout markers. The
+        // source block is already a semantic paragraph whose original PDF
+        // lines were merely glyph-wrap fragments. Flatten model-inserted line
+        // breaks and place the result by measured width below; this prevents a
+        // target-language phrase from inheriting an English line break such as
+        // `Plex는퍼블릭` / `클라우드에서...`.
         var remaining = Array(Self.normalizedLineText(text))
         var chunks: [String] = []
 
@@ -1147,6 +1186,34 @@ private extension PDFDocumentCompositionService {
                     by: -1
                 ).first(where: { remaining[$0 - 1].isWhitespace }) {
                     splitIndex = whitespaceIndex
+                }
+            }
+
+            // Do not strand a closing question mark, period, bracket, or
+            // similar two-character tail on its own continuation line. A
+            // source line can end just a few points before the target phrase
+            // ends; allowing that tiny punctuation tail to remain with the
+            // preceding chunk is visually preferable and the normal fitting
+            // pass can reduce the font by one point if necessary.
+            if splitIndex < remaining.count {
+                let tail = String(remaining.dropFirst(splitIndex))
+                    .trimmingCharacters(in: .whitespaces)
+                let punctuation = CharacterSet.punctuationCharacters
+                    .union(.symbols)
+                let isPunctuationTail = !tail.isEmpty
+                    && tail.count <= 2
+                    && tail.unicodeScalars.allSatisfy {
+                        punctuation.contains($0)
+                    }
+                if isPunctuationTail {
+                    let wholeText = String(remaining)
+                    let wholeWidth = (wholeText as NSString).size(
+                        withAttributes: [.font: measuringFont]
+                    ).width
+                    let overflowAllowance = max(12, line.fontSize * 1.5)
+                    if wholeWidth <= availableWidth + overflowAllowance {
+                        splitIndex = remaining.count
+                    }
                 }
             }
 

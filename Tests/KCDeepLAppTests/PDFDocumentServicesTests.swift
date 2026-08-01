@@ -166,6 +166,93 @@ final class PDFDocumentServicesTests: XCTestCase {
         )
     }
 
+    func testAnalyzeJoinsSpanningListLineWithIndentedContinuation() throws {
+        let source = temporaryDirectory.appendingPathComponent(
+            "spanning-list-continuation.pdf"
+        )
+        try makeDigitalPDF(
+            at: source,
+            pages: [[
+                DrawnLine(
+                    "• How does Plex handle data transfers across EU borders to support the products on the Public",
+                    x: 90,
+                    y: 720,
+                    size: 10
+                ),
+                DrawnLine("Cloud?", x: 108, y: 706, size: 10),
+                DrawnLine("Right column", x: 360, y: 720, size: 10),
+                DrawnLine("Right continuation", x: 360, y: 706, size: 10)
+            ]]
+        )
+
+        let analysis = try PDFDocumentAnalysisService().analyze(sourceURL: source)
+        let page = try XCTUnwrap(analysis.pages.first)
+        let question = try XCTUnwrap(
+            page.blocks.first { $0.text.contains("How does Plex handle") }
+        )
+        XCTAssertEqual(question.lineIDs.count, 2)
+        XCTAssertTrue(question.text.hasSuffix("Public Cloud?"))
+    }
+
+    func testComposeReflowsDirectLineTranslationsAcrossOneParagraph() throws {
+        let source = temporaryDirectory.appendingPathComponent(
+            "direct-line-reflow.pdf"
+        )
+        try makeDigitalPDF(
+            at: source,
+            pages: [[
+                DrawnLine("o First source fragment", x: 80, y: 720, size: 14),
+                DrawnLine("continuation fragment", x: 98, y: 704, size: 14)
+            ]]
+        )
+        let analysis = try PDFDocumentAnalysisService().analyze(sourceURL: source)
+        let page = try XCTUnwrap(analysis.pages.first)
+        let block = try XCTUnwrap(page.blocks.first)
+        XCTAssertEqual(block.lineIDs.count, 2)
+
+        let firstLineID = try XCTUnwrap(block.lineIDs.first)
+        let secondLineID = try XCTUnwrap(block.lineIDs.last)
+        let firstDirect = "o 첫 번째 번역 내용이 충분히 길어서 다음 조각까지 자연스럽게 이어집니다"
+        let secondDirect = "두 번째 번역 조각도 함께 연결되어야 합니다"
+        let destination = temporaryDirectory.appendingPathComponent(
+            "direct-line-reflow-output.pdf"
+        )
+        let result = try PDFDocumentCompositionService().compose(
+            analysis: analysis,
+            translations: [
+                firstLineID: firstDirect,
+                secondLineID: secondDirect
+            ],
+            destinationURL: destination,
+            renderMode: .preserveOriginalWithLayer
+        )
+
+        let output = try XCTUnwrap(PDFDocument(url: destination))
+        let outputPage = try XCTUnwrap(output.page(at: 0))
+        let firstTranslation = try XCTUnwrap(
+            outputPage.annotations.first {
+                $0.userName == "KCDeepL Translation:\(firstLineID)"
+            }
+        )
+        let secondTranslation = try XCTUnwrap(
+            outputPage.annotations.first {
+                $0.userName == "KCDeepL Translation:\(secondLineID)"
+            }
+        )
+        XCTAssertNotEqual(firstTranslation.contents, firstDirect)
+        XCTAssertNotEqual(secondTranslation.contents, secondDirect)
+        XCTAssertFalse(firstTranslation.contents?.contains("\n") == true)
+        XCTAssertFalse(secondTranslation.contents?.contains("\n") == true)
+        XCTAssertTrue(
+            result.warnings.contains {
+                if case .blockTranslationReflowed(blockID: block.id) = $0 {
+                    return true
+                }
+                return false
+            }
+        )
+    }
+
     func testTranslationContainerUsesColumnWidthWithoutExpandingSourceMask() throws {
         let source = temporaryDirectory.appendingPathComponent(
             "wide-translation-container.pdf"
