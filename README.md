@@ -75,6 +75,7 @@ swift test
 - 페이지 단위 문맥·안정적 위치 ID를 사용하는 PDF 파일 번역
 - PDFKit 텍스트/좌표 추출, Vision OCR, 비파괴 번역 레이어 합성
 - 원문 마스크와 번역 컨테이너를 분리하고, 열 경계·glyph 폭 측정 기반으로 긴 한글 번역을 reflow하여 글자 가로 압축과 짧은 continuation 조각의 초소형 글꼴을 방지
+- PDFKit의 stale paragraph alignment를 glyph geometry와 목록 블록 문맥으로 교정하여 bullet/답변의 왼쪽 시작점과 가운데·오른쪽 정렬을 보존
 - Apple 내장 / Codex App Server / Gemini API 파일 번역 엔진 선택
 - 원본 덮어쓰기 방지, 진행률·취소·경고·원본/결과 PDF 미리보기
 - Barlow/Noto Sans KR/D2Coding 정적 폰트 번들, 프로세스 등록과 PDF 저장 후 glyph 검증

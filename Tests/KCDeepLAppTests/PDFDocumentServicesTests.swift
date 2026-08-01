@@ -1797,6 +1797,28 @@ final class PDFDocumentServicesTests: XCTestCase {
         XCTAssertEqual(rightOverlay.alignment, .right)
     }
 
+    func testAnalyzeUsesMeasuredGeometryWhenParagraphStyleIsStale() throws {
+        let source = temporaryDirectory.appendingPathComponent(
+            "stale-paragraph-alignment.pdf"
+        )
+        try makeDigitalPDF(
+            at: source,
+            pages: [[
+                DrawnLine(
+                    "o This answer is positioned as a left-indented list item",
+                    x: 126,
+                    y: 700,
+                    size: 14,
+                    paragraphAlignment: .right
+                )
+            ]]
+        )
+
+        let analysis = try PDFDocumentAnalysisService().analyze(sourceURL: source)
+        let line = try XCTUnwrap(analysis.pages.first?.lines.first)
+        XCTAssertEqual(line.alignment, .left)
+    }
+
     func testAnalyzeRejectsLockedDocument() throws {
         let unlocked = temporaryDirectory.appendingPathComponent("unlocked.pdf")
         try makeDigitalPDF(
@@ -1911,6 +1933,7 @@ private extension PDFDocumentServicesTests {
         let color: NSColor
         let size: CGFloat
         let fontName: String?
+        let paragraphAlignment: NSTextAlignment?
 
         init(
             _ text: String,
@@ -1918,13 +1941,15 @@ private extension PDFDocumentServicesTests {
             y: CGFloat,
             color: NSColor = .black,
             size: CGFloat = 14,
-            fontName: String? = nil
+            fontName: String? = nil,
+            paragraphAlignment: NSTextAlignment? = nil
         ) {
             self.text = text
             self.point = CGPoint(x: x, y: y)
             self.color = color
             self.size = size
             self.fontName = fontName
+            self.paragraphAlignment = paragraphAlignment
         }
     }
 
@@ -2035,14 +2060,20 @@ private extension PDFDocumentServicesTests {
                 flipped: false
             )
             for line in lines {
+                var attributes: [NSAttributedString.Key: Any] = [
+                    .font: line.fontName.flatMap {
+                        NSFont(name: $0, size: line.size)
+                    } ?? NSFont.systemFont(ofSize: line.size),
+                    .foregroundColor: line.color
+                ]
+                if let paragraphAlignment = line.paragraphAlignment {
+                    let paragraphStyle = NSMutableParagraphStyle()
+                    paragraphStyle.alignment = paragraphAlignment
+                    attributes[.paragraphStyle] = paragraphStyle
+                }
                 (line.text as NSString).draw(
                     at: line.point,
-                    withAttributes: [
-                        .font: line.fontName.flatMap {
-                            NSFont(name: $0, size: line.size)
-                        } ?? NSFont.systemFont(ofSize: line.size),
-                        .foregroundColor: line.color
-                    ]
+                    withAttributes: attributes
                 )
             }
             NSGraphicsContext.restoreGraphicsState()

@@ -167,29 +167,36 @@ struct PDFDocumentAnalysisService: Sendable {
                 rotation: rotation
             )
             backgroundResult = Self.applyingOCRContrast(to: backgroundResult)
-            let lines = try makeLines(
+            let extractedLines = try makeLines(
                 from: backgroundResult.candidates,
                 pageIndex: pageIndex
             )
             for index in backgroundResult.complexCandidateIndices
-            where lines.indices.contains(index) {
+            where extractedLines.indices.contains(index) {
                 pageWarnings.append(
                     .complexBackground(
                         pageIndex: pageIndex,
-                        lineID: lines[index].id
+                        lineID: extractedLines[index].id
                     )
                 )
             }
             for index in backgroundResult.unavailableCandidateIndices
-            where lines.indices.contains(index) {
+            where extractedLines.indices.contains(index) {
                 pageWarnings.append(
                     .backgroundSamplingUnavailable(
                         pageIndex: pageIndex,
-                        lineID: lines[index].id
+                        lineID: extractedLines[index].id
                     )
                 )
             }
-            let blocks = try makeBlocks(from: lines, pageIndex: pageIndex)
+            let blocks = try makeBlocks(
+                from: extractedLines,
+                pageIndex: pageIndex
+            )
+            let lines = Self.alignListBlockLines(
+                extractedLines,
+                blocks: blocks
+            )
 
             pageWarnings.append(
                 contentsOf: Self.linkOverlapWarnings(
@@ -1237,8 +1244,10 @@ private extension PDFDocumentAnalysisService {
         guard input.count > 1 else {
             return input.map { candidate in
                 var copy = candidate
-                copy.alignment = copy.alignment
-                    ?? Self.inferredAlignment(for: copy, within: pageBounds)
+                copy.alignment = Self.resolvedAlignment(
+                    for: copy,
+                    within: pageBounds
+                )
                 return copy
             }
         }
@@ -1259,8 +1268,10 @@ private extension PDFDocumentAnalysisService {
         guard !bodyIndices.isEmpty else {
             return input.map { candidate in
                 var copy = candidate
-                copy.alignment = copy.alignment
-                    ?? Self.inferredAlignment(for: copy, within: pageBounds)
+                copy.alignment = Self.resolvedAlignment(
+                    for: copy,
+                    within: pageBounds
+                )
                 return copy
             }.sorted(by: verticalOrder)
         }
@@ -1333,15 +1344,14 @@ private extension PDFDocumentAnalysisService {
                     var copy = candidate
                     let columnIndex = columnByCandidateIndex[index] ?? 0
                     copy.columnIndex = columnIndex
-                    let cluster = clusters[columnIndex]
-                    let alignmentBounds = cluster.candidateIndices.count > 1
-                        ? cluster.bounds
-                        : pageBounds
-                    copy.alignment = copy.alignment
-                        ?? Self.inferredAlignment(
-                            for: copy,
-                            within: alignmentBounds
-                        )
+                    copy.alignment = Self.resolvedAlignment(
+                        for: copy,
+                        // With one body column the cluster's maxX is merely
+                        // the longest glyph run, not the column's right edge.
+                        // Use the page bounds so a line ending at that run is
+                        // not falsely classified as right-aligned.
+                        within: pageBounds
+                    )
                     return copy
                 }
                 .sorted(by: verticalOrder)
@@ -1350,6 +1360,33 @@ private extension PDFDocumentAnalysisService {
         let spanning = spanningIndices.sorted { verticalOrder(input[$0], input[$1]) }
         var outputIndices: [Int] = []
         var unusedBody = Set(bodyIndices)
+
+        func alignmentBounds(for columnIndex: Int) -> CGRect {
+            guard clusters.indices.contains(columnIndex) else {
+                return pageBounds
+            }
+            let cluster = clusters[columnIndex]
+            let leftBoundary: CGFloat
+            if columnIndex > clusters.startIndex {
+                let previous = clusters[columnIndex - 1]
+                leftBoundary = (previous.bounds.maxX + cluster.bounds.minX) / 2
+            } else {
+                leftBoundary = pageBounds.minX
+            }
+            let rightBoundary: CGFloat
+            if columnIndex + 1 < clusters.endIndex {
+                let next = clusters[columnIndex + 1]
+                rightBoundary = (cluster.bounds.maxX + next.bounds.minX) / 2
+            } else {
+                rightBoundary = pageBounds.maxX
+            }
+            return CGRect(
+                x: leftBoundary,
+                y: pageBounds.minY,
+                width: max(1, rightBoundary - leftBoundary),
+                height: pageBounds.height
+            )
+        }
 
         func appendRegion(above lowerY: CGFloat, below upperY: CGFloat) {
             let region = unusedBody.filter { index in
@@ -1386,23 +1423,17 @@ private extension PDFDocumentAnalysisService {
             var candidate = input[index]
             if spanningIndices.contains(index) {
                 candidate.columnIndex = -1
-                candidate.alignment = candidate.alignment
-                    ?? Self.inferredAlignment(
-                        for: candidate,
-                        within: pageBounds
-                    )
+                candidate.alignment = Self.resolvedAlignment(
+                    for: candidate,
+                    within: pageBounds
+                )
             } else {
                 let columnIndex = columnByCandidateIndex[index] ?? 0
                 candidate.columnIndex = columnIndex
-                let cluster = clusters[columnIndex]
-                let alignmentBounds = cluster.candidateIndices.count > 1
-                    ? cluster.bounds
-                    : pageBounds
-                candidate.alignment = candidate.alignment
-                    ?? Self.inferredAlignment(
-                        for: candidate,
-                        within: alignmentBounds
-                    )
+                candidate.alignment = Self.resolvedAlignment(
+                    for: candidate,
+                    within: alignmentBounds(for: columnIndex)
+                )
             }
             return candidate
         }
@@ -1498,6 +1529,49 @@ private extension PDFDocumentAnalysisService {
             ))
         }
         return blocks
+    }
+
+    static func alignListBlockLines(
+        _ lines: [PDFTextLine],
+        blocks: [PDFTextBlock]
+    ) -> [PDFTextLine] {
+        let listBlockLineIDs = Set(
+            blocks
+                .filter { block in
+                    guard let firstLineID = block.lineIDs.first,
+                          let firstLine = lines.first(where: {
+                              $0.id == firstLineID
+                          })
+                    else {
+                        return false
+                    }
+                    return startsWithListMarker(firstLine.text)
+                }
+                .flatMap(\.lineIDs)
+        )
+        guard !listBlockLineIDs.isEmpty else { return lines }
+
+        return lines.map { line in
+            guard listBlockLineIDs.contains(line.id),
+                  line.alignment != .left
+            else {
+                return line
+            }
+            return PDFTextLine(
+                id: line.id,
+                text: line.text,
+                bounds: line.bounds,
+                sourceMaskBounds: line.sourceMaskBounds,
+                fontName: line.fontName,
+                fontSize: line.fontSize,
+                textColor: line.textColor,
+                backgroundColor: line.backgroundColor,
+                alignment: .left,
+                readingOrder: line.readingOrder,
+                columnIndex: line.columnIndex,
+                extractionSource: line.extractionSource
+            )
+        }
     }
 
     static func canJoin(_ previous: PDFTextLine, _ current: PDFTextLine) -> Bool {
@@ -2036,22 +2110,44 @@ private extension PDFDocumentAnalysisService {
         from alignment: NSTextAlignment?
     ) -> PDFTextAlignment? {
         switch alignment {
-        case .center:
-            return .center
-        case .right:
-            return .right
+        case .center, .right:
+            // PDFKit often copies a paragraph's alignment onto every visual
+            // glyph run. In Word-exported PDFs that style can be stale or
+            // synthetic: the FAQ answer runs visibly start at x=126, yet
+            // PDFKit reports `.right`. Do not trust the style until it agrees
+            // with the measured glyph geometry in `resolvedAlignment`.
+            return nil
         default:
             // PDFKit frequently synthesizes `.left` for positioned glyph runs
             // even when the visual line is centered or right-aligned. Let the
-            // page/column geometry disambiguate that default.
+            // page/column geometry disambiguate every default.
             return nil
         }
+    }
+
+    static func resolvedAlignment(
+        for candidate: TextCandidate,
+        within container: CGRect
+    ) -> PDFTextAlignment {
+        // The actual glyph edges are authoritative for positioned PDF text.
+        // This prevents a stale paragraph style from turning a left-indented
+        // answer into a centered translation annotation. It also keeps true
+        // centered/right text working because the same geometry is used by the
+        // existing alignment regression test.
+        return inferredAlignment(for: candidate, within: container)
     }
 
     static func inferredAlignment(
         for candidate: TextCandidate,
         within container: CGRect
     ) -> PDFTextAlignment {
+        // Bullet and numbered runs are list geometry, not paragraph geometry.
+        // A long bullet line can happen to have equal page-side whitespace and
+        // look mathematically centered; translating it as centered would move
+        // the whole question away from its bullet and its following answer.
+        if startsWithListMarker(candidate.text) {
+            return .left
+        }
         guard container.width > candidate.bounds.width else { return .left }
         let tolerance = max(5, min(18, candidate.fontSize * 0.8))
         let leftGap = candidate.bounds.minX - container.minX
