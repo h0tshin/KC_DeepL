@@ -1503,7 +1503,12 @@ private extension PDFDocumentAnalysisService {
     static func canJoin(_ previous: PDFTextLine, _ current: PDFTextLine) -> Bool {
         guard previous.columnIndex == current.columnIndex,
               previous.columnIndex >= 0,
-              previous.extractionSource == current.extractionSource
+              previous.extractionSource == current.extractionSource,
+              // A fresh list item starts a new translation unit.  A wrapped
+              // continuation line has no marker and can safely share the
+              // preceding block even when PDFKit reports a different font
+              // resource for that run.
+              !startsWithListMarker(current.text)
         else {
             return false
         }
@@ -1518,7 +1523,15 @@ private extension PDFDocumentAnalysisService {
 
         let overlap = horizontalOverlap(previous.bounds, current.bounds)
         let minimumWidth = max(1, min(previous.bounds.width, current.bounds.width))
-        let leftEdgeTolerance = max(8, max(previous.fontSize, current.fontSize) * 1.35)
+        // Word/PDF exports commonly indent a wrapped continuation by 18pt
+        // (the FAQ fixture does exactly this).  The old 8–13pt threshold split
+        // those lines into independent blocks and sent a short fragment such
+        // as “process.” to the model by itself, which then had to be squeezed
+        // into a 38pt source box.
+        let leftEdgeTolerance = max(
+            24,
+            max(previous.fontSize, current.fontSize) * 2.5
+        )
         guard overlap / minimumWidth >= 0.35,
               abs(previous.bounds.minX - current.bounds.minX) <= leftEdgeTolerance,
               abs(previous.fontSize - current.fontSize)
@@ -1527,8 +1540,32 @@ private extension PDFDocumentAnalysisService {
             return false
         }
 
-        return previous.fontName == current.fontName
-            && previous.textColor == current.textColor
+        // The font resource name is not a semantic style boundary. Microsoft
+        // Word exports the first indented answer run as CourierNewPSMT and its
+        // wrapped continuation as ArialMT even though both are visually the
+        // same size and colour. Keep the block together when those observable
+        // metrics match; the composer will choose one stable target font for
+        // the translated block.
+        return previous.textColor == current.textColor
+    }
+
+    static func startsWithListMarker(_ text: String) -> Bool {
+        let normalized = normalizedText(text)
+        guard let token = normalized.split(separator: " ").first else {
+            return false
+        }
+        let marker = String(token)
+        let listMarkers = [
+            "•", "◦", "○", "●", "▪", "▫", "‣", "⁃",
+            "-", "–", "—", "*", "o", "O", "0", ""
+        ]
+        if listMarkers.contains(marker) {
+            return true
+        }
+        let digits = marker.drop(while: { $0.isNumber })
+        return !digits.isEmpty
+            && digits.allSatisfy { $0 == "." || $0 == ")" }
+            && marker.dropLast(digits.count).allSatisfy(\.isNumber)
     }
 
     /// PowerPoint PDFs can place a hidden white animation run in the same

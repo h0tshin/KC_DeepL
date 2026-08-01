@@ -121,6 +121,113 @@ final class PDFDocumentServicesTests: XCTestCase {
         )
     }
 
+    func testAnalyzeJoinsWrappedContinuationAcrossExportFontRuns() throws {
+        let source = temporaryDirectory.appendingPathComponent(
+            "wrapped-font-runs.pdf"
+        )
+        try makeDigitalPDF(
+            at: source,
+            pages: [[
+                DrawnLine("• Question", x: 60, y: 720, size: 14),
+                DrawnLine(
+                    "o Answer starts here",
+                    x: 90,
+                    y: 700,
+                    size: 14,
+                    fontName: "CourierNewPSMT"
+                ),
+                DrawnLine(
+                    "continuation text",
+                    x: 108,
+                    y: 684,
+                    size: 14,
+                    fontName: "ArialMT"
+                ),
+                DrawnLine(
+                    "o Separate item",
+                    x: 90,
+                    y: 668,
+                    size: 14,
+                    fontName: "CourierNewPSMT"
+                )
+            ]]
+        )
+
+        let analysis = try PDFDocumentAnalysisService().analyze(sourceURL: source)
+        let page = try XCTUnwrap(analysis.pages.first)
+        let continuation = try XCTUnwrap(
+            page.blocks.first { $0.text.contains("Answer starts here") }
+        )
+        XCTAssertEqual(continuation.lineIDs.count, 2)
+        XCTAssertTrue(continuation.text.contains("continuation text"))
+        XCTAssertEqual(
+            page.blocks.filter { $0.text.hasPrefix("o Separate") }.count,
+            1
+        )
+    }
+
+    func testTranslationContainerUsesColumnWidthWithoutExpandingSourceMask() throws {
+        let source = temporaryDirectory.appendingPathComponent(
+            "wide-translation-container.pdf"
+        )
+        try makeDigitalPDF(
+            at: source,
+            pages: [[
+                DrawnLine("o Narrow", x: 70, y: 720, size: 14),
+                DrawnLine(
+                    "continuation",
+                    x: 88,
+                    y: 704,
+                    size: 14,
+                    fontName: "ArialMT"
+                ),
+                DrawnLine(
+                    "A much wider neighbouring source line",
+                    x: 88,
+                    y: 680,
+                    size: 14
+                )
+            ]]
+        )
+        let analysis = try PDFDocumentAnalysisService().analyze(sourceURL: source)
+        let page = try XCTUnwrap(analysis.pages.first)
+        let line = try XCTUnwrap(
+            page.lines.first { $0.text.contains("continuation") }
+        )
+        let destination = temporaryDirectory.appendingPathComponent(
+            "wide-translation-container-output.pdf"
+        )
+        var translations = Dictionary(
+            uniqueKeysWithValues: page.lines.map { ($0.id, "번역") }
+        )
+        translations[line.id] = "이 문장은 원래의 좁은 조각보다 훨씬 긴 번역문입니다"
+        _ = try PDFDocumentCompositionService().compose(
+            analysis: analysis,
+            translations: translations,
+            destinationURL: destination,
+            renderMode: .preserveOriginalWithLayer
+        )
+
+        let output = try XCTUnwrap(PDFDocument(url: destination))
+        let outputPage = try XCTUnwrap(output.page(at: 0))
+        let mask = try XCTUnwrap(
+            outputPage.annotations.first {
+                $0.userName == "KCDeepL Mask:\(line.id)"
+            }
+        )
+        let translation = try XCTUnwrap(
+            outputPage.annotations.first {
+                $0.userName == "KCDeepL Translation:\(line.id)"
+            }
+        )
+        XCTAssertGreaterThan(translation.bounds.width, mask.bounds.width)
+        XCTAssertGreaterThanOrEqual(
+            try XCTUnwrap(translation.font).pointSize,
+            line.fontSize * 0.6
+        )
+        assertEqual(mask.bounds, line.sourceMaskBounds)
+    }
+
     func testAnalyzeSplitsDistantSameBaselineTextRuns() throws {
         let source = temporaryDirectory.appendingPathComponent(
             "same-baseline-runs.pdf"

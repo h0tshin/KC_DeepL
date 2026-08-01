@@ -197,7 +197,11 @@ Apple 경로도 같은 XML envelope 전체를 하나의 `TranslationSession.Requ
 1. 주변에서 추정한 배경색의 사각형 마스크
 2. 원래 정렬과 전경색을 따르는 free-text 번역 주석
 
-CoreText로 원래 크기부터 최소 5pt까지 맞추고 대상 문자의 glyph를 모두 지원하는 serialization-stable 공개 글꼴만 선택한다. 전체 번역 glyph를 지원하는 신뢰 가능한 공개 원본 글꼴은 원래 line metrics 보존을 위해 우선하고, private dot-prefixed 시스템 이름과 PDFKit이 Times로 대체한 private SF 리소스는 제외한다. 원본 글꼴을 쓸 수 없으면 라틴은 Barlow, 한글은 Noto Sans KR, 고정폭은 D2Coding을 선택하며 일본어 가나는 Hiragino, 한자 중심 중국어는 PingFang SC/TC 공개 이름으로 분기한다. 동적 private fallback은 재개방 시 Times로 대체될 수 있어 PDF 직렬화 후보로 쓰지 않는다. 최소 크기에서도 들어가지 않거나 표시할 수 없는 문자가 있으면 조용히 잘라내지 않고 출력 전체를 실패시킨다. 번역문은 문단 단위 결과를 원래 줄 영역에 다시 reflow한다.
+CoreText로 원래 크기부터 최소 5pt까지 맞추고 대상 문자의 glyph를 모두 지원하는 serialization-stable 공개 글꼴만 선택한다. 전체 번역 glyph를 지원하는 신뢰 가능한 공개 원본 글꼴은 원래 line metrics 보존을 위해 우선하고, private dot-prefixed 시스템 이름과 PDFKit이 Times로 대체한 private SF 리소스는 제외한다. 원본 글꼴을 쓸 수 없으면 라틴은 Barlow, 한글은 Noto Sans KR, 고정폭은 D2Coding을 선택하며 일본어 가나는 Hiragino, 한자 중심 중국어는 PingFang SC/TC 공개 이름으로 분기한다. 동적 private fallback은 재개방 시 Times로 대체될 수 있어 PDF 직렬화 후보로 쓰지 않는다.
+
+레이아웃 피팅은 글자를 가로로 비율 변환하지 않는다. 원문 glyph를 지우는 마스크는 `sourceMaskBounds`에만 남기고, 번역문 컨테이너는 같은 감지 열(column)의 안전한 오른쪽 경계까지 확장한다. 따라서 짧은 영문 glyph 박스에 긴 한글을 억지로 넣어 5pt로 축소하지 않고, 원래 시작점·정렬·줄 높이를 유지한 채 사용 가능한 여백을 먼저 사용한다. 가운데 정렬 제목은 페이지/열 중심을 고정하고, 90°/270° 페이지는 기존 carrier appearance 경로를 위해 원래 bounds를 유지한다. 최소 크기에서도 들어가지 않거나 표시할 수 없는 문자가 있으면 조용히 잘라내지 않고 출력 전체를 실패시킨다.
+
+PDFKit이 줄바꿈 continuation을 서로 다른 font resource로 내보내는 경우에도 같은 크기·색·열·수직 간격이면 하나의 문단 블록으로 묶는다. 새 목록 기호로 시작하는 줄은 별도 블록으로 남겨 bullet/번호 위치를 보존한다. 블록 번역 결과는 원문 glyph 폭의 문자 수 비례가 아니라 실제 Barlow/Noto Sans KR/D2Coding glyph advance를 측정해 각 줄의 확장된 컨테이너에 greedy reflow하며, 공백 경계가 있으면 단어 단위로 끊고 한국어·URL처럼 공백이 없는 문자열은 glyph 단위로 안전하게 끊는다. 최소 크기에서도 들어가지 않거나 표시할 수 없는 문자가 있으면 조용히 잘라내지 않고 출력 전체를 실패시킨다.
 
 출력은 원본과 다른 임시 URL에서 직렬화하고 다시 열어 다음을 검증한 뒤 최종 URL로 move한다.
 

@@ -126,9 +126,18 @@ struct PDFDocumentCompositionService: Sendable {
                     continue
                 }
 
-                let textBounds = Self.overlayBounds(
-                    for: line.bounds,
-                    constrainedTo: pageAnalysis.cropBox
+                let normalizedTranslation = Self.normalizedLineText(translatedText)
+
+                // A PDF text selection usually reports only the visible glyph
+                // run.  That is a useful mask, but it is not a safe translation
+                // container: a short English question can map to a much longer
+                // Korean phrase and would otherwise be forced down to 5pt. Use
+                // the detected column's right edge for the text container while
+                // keeping the source mask at the exact glyph geometry.
+                let textBounds = translationTextBounds(
+                    for: line,
+                    in: pageAnalysis,
+                    text: normalizedTranslation
                 )
                 let maskBounds = line.sourceMaskBounds
                     .intersection(pageAnalysis.cropBox)
@@ -165,7 +174,6 @@ struct PDFDocumentCompositionService: Sendable {
                     )
                     continue
                 }
-                let normalizedTranslation = Self.normalizedLineText(translatedText)
                 let preservedLinkURL: URL?
                 switch Self.overlappingLink(
                     on: page,
@@ -1027,7 +1035,11 @@ private extension PDFDocumentCompositionService {
             }
 
             let blockLines = block.lineIDs.compactMap { linesByID[$0] }
-            let chunks = try reflow(blockTranslation, across: blockLines)
+            let chunks = try reflow(
+                blockTranslation,
+                across: blockLines,
+                in: page
+            )
             for (line, chunk) in zip(blockLines, chunks) {
                 try Task.checkCancellation()
                 resolved[line.id] = chunk
@@ -1071,7 +1083,8 @@ private extension PDFDocumentCompositionService {
 
     func reflow(
         _ text: String,
-        across lines: [PDFTextLine]
+        across lines: [PDFTextLine],
+        in page: PDFPageAnalysis
     ) throws -> [String] {
         guard lines.count > 1 else { return [text] }
 
@@ -1083,9 +1096,6 @@ private extension PDFDocumentCompositionService {
 
         var remaining = Array(Self.normalizedLineText(text))
         var chunks: [String] = []
-        var remainingWidth = lines.reduce(CGFloat.zero) {
-            $0 + max(1, $1.bounds.width)
-        }
 
         for (index, line) in lines.enumerated() {
             try Task.checkCancellation()
@@ -1095,16 +1105,41 @@ private extension PDFDocumentCompositionService {
                 continue
             }
 
-            let lineWidth = max(1, line.bounds.width)
-            let proportionalCount = max(
-                1,
-                Int((CGFloat(remaining.count) * lineWidth / remainingWidth).rounded())
-            )
             let reservedCharacters = max(0, lines.count - index - 1)
             let upperBound = max(1, remaining.count - reservedCharacters)
-            var splitIndex = min(proportionalCount, upperBound)
+            let availableWidth = max(
+                1,
+                translationContainerBounds(for: line, in: page).width - 3
+            )
+            let measuringFont = translationFont(
+                for: String(remaining),
+                sourceFontName: line.fontName,
+                size: max(minimumFontSize, min(line.fontSize, 144))
+            ) ?? NSFont.systemFont(ofSize: max(minimumFontSize, line.fontSize))
 
-            if splitIndex < remaining.count {
+            // Split by measured glyph width instead of character count. Latin
+            // spaces and Korean syllables have very different advances, so a
+            // proportional character split routinely leaves the final source
+            // line with a tiny fallback font. Prefer a word boundary when one
+            // exists, but allow an unbroken Korean/URL run to break by glyph.
+            var lower = 1
+            var upper = upperBound
+            var best = 0
+            while lower <= upper {
+                let candidate = (lower + upper) / 2
+                let candidateText = String(remaining.prefix(candidate))
+                let measuredWidth = (candidateText as NSString).size(
+                    withAttributes: [.font: measuringFont]
+                ).width
+                if measuredWidth <= availableWidth + 0.5 {
+                    best = candidate
+                    lower = candidate + 1
+                } else {
+                    upper = candidate - 1
+                }
+            }
+            var splitIndex = max(1, best)
+            if splitIndex < upperBound {
                 let searchLowerBound = max(1, splitIndex / 2)
                 if let whitespaceIndex = stride(
                     from: splitIndex,
@@ -1122,7 +1157,6 @@ private extension PDFDocumentCompositionService {
             while remaining.first?.isWhitespace == true {
                 remaining.removeFirst()
             }
-            remainingWidth -= lineWidth
         }
 
         while chunks.count < lines.count {
@@ -1692,6 +1726,125 @@ private extension PDFDocumentCompositionService {
             for: lineBounds,
             constrainedTo: cropBox
         )
+    }
+
+    /// Returns a translation container that follows the detected text column,
+    /// not just the source glyph run.  The original mask is intentionally not
+    /// expanded: only translated text may use the spare horizontal space.
+    /// This prevents narrow continuation fragments such as `process.` from
+    /// producing a nearly unreadable minimum-size Korean annotation.
+    func translationTextBounds(
+        for line: PDFTextLine,
+        in page: PDFPageAnalysis,
+        text: String? = nil
+    ) -> CGRect {
+        let base = Self.overlayBounds(
+            for: line.bounds,
+            constrainedTo: page.cropBox
+        )
+        guard page.rotation == 0,
+              line.extractionSource == .native,
+              base.width > 0,
+              base.height > 0
+        else {
+            return base
+        }
+
+        // Keep exact source geometry for short translations.  Expansion is a
+        // fallback for text that genuinely cannot fit, so ordinary words such
+        // as “안녕” do not move the annotation or break existing PDF geometry
+        // contracts.
+        if let text,
+           let font = translationFont(
+               for: text,
+               sourceFontName: line.fontName,
+               size: max(minimumFontSize, min(line.fontSize, 144))
+           ) {
+            let availableWidth = max(1, base.width - 3)
+            let measuredWidth = (text as NSString).size(
+                withAttributes: [.font: font]
+            ).width
+            if measuredWidth <= availableWidth + 0.5 {
+                return base
+            }
+        }
+
+        return translationContainerBounds(for: line, in: page)
+    }
+
+    func translationContainerBounds(
+        for line: PDFTextLine,
+        in page: PDFPageAnalysis
+    ) -> CGRect {
+        let base = Self.overlayBounds(
+            for: line.bounds,
+            constrainedTo: page.cropBox
+        )
+        guard page.rotation == 0,
+              line.extractionSource == .native,
+              base.width > 0,
+              base.height > 0
+        else {
+            return base
+        }
+
+        let peers = page.lines.filter {
+            $0.columnIndex == line.columnIndex
+                && $0.extractionSource == line.extractionSource
+        }
+        let columnLines = peers.isEmpty ? [line] : peers
+        let columnMinX = columnLines.map(\.bounds.minX).min() ?? base.minX
+        let columnMaxX = columnLines.map(\.bounds.maxX).max() ?? base.maxX
+        let edgePadding = min(8, max(2, line.fontSize * 0.45))
+        let safeMinX = page.cropBox.minX + edgePadding
+        let safeMaxX = page.cropBox.maxX - edgePadding
+
+        switch line.alignment {
+        case .left:
+            let maxX = min(
+                safeMaxX,
+                max(base.maxX, columnMaxX + edgePadding)
+            )
+            return CGRect(
+                x: base.minX,
+                y: base.minY,
+                width: max(base.width, maxX - base.minX),
+                height: base.height
+            )
+        case .right:
+            let minX = max(
+                safeMinX,
+                min(base.minX, columnMinX - edgePadding)
+            )
+            return CGRect(
+                x: minX,
+                y: base.minY,
+                width: max(base.width, base.maxX - minX),
+                height: base.height
+            )
+        case .center:
+            let center: CGFloat
+            if columnLines.count > 1 {
+                center = (columnMinX + columnMaxX) / 2
+            } else {
+                center = page.cropBox.midX
+            }
+            let columnWidth = columnMaxX - columnMinX
+            let maximumWidth = line.columnIndex < 0
+                || columnWidth < page.cropBox.width * 0.5
+                ? page.cropBox.width - edgePadding * 2
+                : min(
+                    page.cropBox.width - edgePadding * 2,
+                    max(base.width, columnWidth + edgePadding * 2)
+                )
+            let width = max(base.width, maximumWidth)
+            return CGRect(
+                x: max(safeMinX, min(center - width / 2, safeMaxX - width)),
+                y: base.minY,
+                width: min(width, safeMaxX - safeMinX),
+                height: base.height
+            )
+        }
     }
 
     /// PDFKit clips CJK glyphs when a one-line FreeText annotation has exactly
