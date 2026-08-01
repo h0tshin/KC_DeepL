@@ -15,11 +15,11 @@ enum FileTranslationOutputURLResolverError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .destinationRequired:
-            "번역 PDF를 저장할 위치를 선택해 주세요."
+            "번역 파일을 저장할 위치를 선택해 주세요."
         case .invalidSourceURL:
-            "원본 PDF 파일 이름을 확인할 수 없습니다."
+            "원본 파일 이름을 확인할 수 없습니다."
         case .sourceWouldBeOverwritten:
-            "원본 PDF는 덮어쓸 수 없습니다. 다른 파일 이름을 선택해 주세요."
+            "원본 파일은 덮어쓸 수 없습니다. 다른 파일 이름을 선택해 주세요."
         }
     }
 }
@@ -33,33 +33,38 @@ struct FileTranslationOutputURLResolver {
 
     func suggestedFilename(
         for sourceURL: URL,
-        targetLanguage: LanguageOption
+        targetLanguage: LanguageOption,
+        kind: SupportedFileDocumentKind = .pdf
     ) throws -> String {
         let basename = sourceURL.deletingPathExtension().lastPathComponent
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !basename.isEmpty else {
             throw FileTranslationOutputURLResolverError.invalidSourceURL
         }
-        return "\(basename).\(targetLanguage.code).translated.pdf"
+        return "\(basename).\(targetLanguage.code).translated.\(kind.defaultOutputExtension)"
     }
 
     func resolve(
         sourceURL: URL,
         targetLanguage: LanguageOption,
         locationRawValue: String,
-        explicitlySelectedURL: URL? = nil
+        explicitlySelectedURL: URL? = nil,
+        kind: SupportedFileDocumentKind = .pdf
     ) throws -> URL {
         let location = FileTranslationOutputLocation(rawValue: locationRawValue) ?? .ask
         let destination: URL
 
         if let explicitlySelectedURL {
-            destination = explicitlySelectedURL.pathExtension.lowercased() == "pdf"
+            destination = Self.acceptedExtensions(for: kind).contains(
+                explicitlySelectedURL.pathExtension.lowercased()
+            )
                 ? explicitlySelectedURL
-                : explicitlySelectedURL.appendingPathExtension("pdf")
+                : explicitlySelectedURL.appendingPathExtension(kind.defaultOutputExtension)
         } else {
             let filename = try suggestedFilename(
                 for: sourceURL,
-                targetLanguage: targetLanguage
+                targetLanguage: targetLanguage,
+                kind: kind
             )
             switch location {
             case .desktop:
@@ -102,5 +107,18 @@ struct FileTranslationOutputURLResolver {
         return directory
             .appendingPathComponent("\(basename)-\(UUID().uuidString)", isDirectory: false)
             .appendingPathExtension(pathExtension)
+    }
+
+    private static func acceptedExtensions(
+        for kind: SupportedFileDocumentKind
+    ) -> Set<String> {
+        switch kind {
+        case .pdf:
+            ["pdf"]
+        case .plainText:
+            ["txt", "text", "log", "csv", "tsv"]
+        case .markdown:
+            ["md", "markdown", "mdown", "mkd"]
+        }
     }
 }

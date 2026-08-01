@@ -18,6 +18,9 @@ public enum PreferenceKeys {
     public static let fileTranslationRenderMode = "kc.files.translationRenderMode"
     public static let fileTranslationContinueOnError = "kc.files.translationContinueOnError"
     public static let fileTranslationIncludeOCR = "kc.files.translationIncludeOCR"
+    public static let fileTranslationPreserveMarkdown = "kc.files.translationPreserveMarkdown"
+    public static let fileTranslationTranslateCode = "kc.files.translationTranslateCode"
+    public static let fileTranslationTextChunkProfile = "kc.files.translationTextChunkProfile"
     public static let translationBackend = "kc.advanced.translationBackend"
     public static let provider = "kc.advanced.provider"
     public static let modelID = "kc.advanced.modelID"
@@ -81,6 +84,9 @@ public extension UserDefaults {
             PreferenceKeys.fileTranslationRenderMode: "preserveOriginalWithLayer",
             PreferenceKeys.fileTranslationContinueOnError: true,
             PreferenceKeys.fileTranslationIncludeOCR: true,
+            PreferenceKeys.fileTranslationPreserveMarkdown: true,
+            PreferenceKeys.fileTranslationTranslateCode: false,
+            PreferenceKeys.fileTranslationTextChunkProfile: TextDocumentChunkingProfile.balanced.rawValue,
             PreferenceKeys.translationBackend: AppDefaults.defaultTranslationBackend.rawValue,
             PreferenceKeys.provider: AppDefaults.defaultProvider.rawValue,
             PreferenceKeys.modelID: AppDefaults.defaultModelID,

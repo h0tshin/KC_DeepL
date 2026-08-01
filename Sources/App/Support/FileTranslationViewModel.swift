@@ -37,6 +37,48 @@ struct FileTranslationConfiguration: Equatable, Sendable {
     let renderMode: PDFTranslationRenderMode
     let continueOnError: Bool
     let includeOCR: Bool
+
+    /// Text/Markdown-only policies. They have defaults so existing PDF
+    /// callers keep the same configuration surface.
+    let preserveMarkdownStructure: Bool
+    let translateMarkdownCodeBlocks: Bool
+    let textChunkingProfile: TextDocumentChunkingProfile
+
+    init(
+        engine: FileTranslationEngine,
+        sourceLanguage: LanguageOption,
+        targetLanguage: LanguageOption,
+        modelID: String,
+        apiKey: String,
+        temperature: Double,
+        downloadLocation: String,
+        explicitlySelectedDestination: URL?,
+        allowsPotentiallyIncompleteOCR: Bool,
+        compositionPolicy: PDFDocumentCompositionPolicy,
+        renderMode: PDFTranslationRenderMode,
+        continueOnError: Bool,
+        includeOCR: Bool,
+        preserveMarkdownStructure: Bool = true,
+        translateMarkdownCodeBlocks: Bool = false,
+        textChunkingProfile: TextDocumentChunkingProfile = .balanced
+    ) {
+        self.engine = engine
+        self.sourceLanguage = sourceLanguage
+        self.targetLanguage = targetLanguage
+        self.modelID = modelID
+        self.apiKey = apiKey
+        self.temperature = temperature
+        self.downloadLocation = downloadLocation
+        self.explicitlySelectedDestination = explicitlySelectedDestination
+        self.allowsPotentiallyIncompleteOCR = allowsPotentiallyIncompleteOCR
+        self.compositionPolicy = compositionPolicy
+        self.renderMode = renderMode
+        self.continueOnError = continueOnError
+        self.includeOCR = includeOCR
+        self.preserveMarkdownStructure = preserveMarkdownStructure
+        self.translateMarkdownCodeBlocks = translateMarkdownCodeBlocks
+        self.textChunkingProfile = textChunkingProfile
+    }
 }
 
 enum FileTranslationViewModelError: LocalizedError, Equatable {
@@ -52,9 +94,9 @@ enum FileTranslationViewModelError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .documentNotLoaded:
-            "먼저 번역할 PDF 파일을 선택해 주세요."
+            "먼저 번역할 파일을 선택해 주세요."
         case .noTranslatableText:
-            "이 PDF에서 번역할 텍스트를 찾지 못했습니다. OCR 경고를 확인해 주세요."
+            "이 문서에서 번역할 텍스트를 찾지 못했습니다."
         case .sourceAndTargetMatch:
             "원문 언어와 번역 언어가 같습니다. 서로 다른 언어를 선택해 주세요."
         case .missingModel:
@@ -66,23 +108,44 @@ enum FileTranslationViewModelError: LocalizedError, Equatable {
         case .incompleteOCRRequiresConfirmation:
             "OCR 경고로 일부 이미지 글자가 누락될 수 있습니다. 경고를 확인하고 계속 진행에 동의해 주세요."
         case let .destinationDirectoryUnavailable(path):
-            "번역 PDF를 저장할 폴더에 쓸 수 없습니다: \(path)"
+            "번역 파일을 저장할 폴더에 쓸 수 없습니다: \(path)"
         }
     }
+}
+
+private enum LoadedFileTranslationDocument: Sendable {
+    case pdf(PDFDocumentAnalysis)
+    case text(TextDocumentAnalysis)
+
+    var kind: SupportedFileDocumentKind {
+        switch self {
+        case .pdf:
+            .pdf
+        case let .text(analysis):
+            analysis.kind
+        }
+    }
+}
+
+private struct ValidatedFileTranslationInput: Sendable {
+    let document: LoadedFileTranslationDocument
+    let destinationURL: URL
 }
 
 @MainActor
 final class FileTranslationViewModel: ObservableObject {
     @Published private(set) var stage: FileTranslationStage = .idle
     @Published private(set) var analysis: PDFDocumentAnalysis?
+    @Published private(set) var textAnalysis: TextDocumentAnalysis?
     @Published private(set) var outputURL: URL?
     @Published private(set) var outputData: Data?
+    @Published private(set) var textOutput: String?
     @Published private(set) var sourceDocumentVersion: UInt = 0
     @Published private(set) var outputDocumentVersion: UInt = 0
     @Published private(set) var translatedPageCount = 0
     @Published private(set) var skippedPageCount = 0
     @Published private(set) var progress = 0.0
-    @Published private(set) var statusMessage = "PDF 파일을 선택하거나 끌어다 놓으세요."
+    @Published private(set) var statusMessage = "번역할 PDF, TXT 또는 Markdown 파일을 선택하거나 끌어다 놓으세요."
     @Published private(set) var errorMessage: String?
     @Published private(set) var preflightBlockingMessage: String?
     @Published private(set) var canUseBestEffortTranslation = false
@@ -118,11 +181,34 @@ final class FileTranslationViewModel: ObservableObject {
     }
 
     var sourceData: Data? {
-        analysis?.sourceData
+        analysis?.sourceData ?? textAnalysis?.sourceData
     }
 
     var sourceURL: URL? {
-        analysis?.sourceURL
+        analysis?.sourceURL ?? textAnalysis?.sourceURL
+    }
+
+    var documentKind: SupportedFileDocumentKind? {
+        if analysis != nil {
+            return .pdf
+        }
+        return textAnalysis?.kind
+    }
+
+    var isTextDocument: Bool {
+        textAnalysis != nil
+    }
+
+    var isPDFDocument: Bool {
+        analysis != nil
+    }
+
+    var sourceText: String? {
+        textAnalysis?.sourceText
+    }
+
+    var translatedText: String? {
+        textOutput
     }
 
     var filename: String? {
@@ -134,7 +220,16 @@ final class FileTranslationViewModel: ObservableObject {
     }
 
     var translatableBlockCount: Int {
-        analysis?.pages.reduce(0) { $0 + $1.blocks.count } ?? 0
+        if let analysis {
+            return analysis.pages.reduce(0) { $0 + $1.blocks.count }
+        }
+        return textAnalysis?.translatableSegmentCount ?? 0
+    }
+
+    var translationItemCount: Int {
+        analysis?.pages.filter { !$0.blocks.isEmpty }.count
+            ?? textAnalysis?.chunks.count
+            ?? 0
     }
 
     var isBusy: Bool {
@@ -147,7 +242,11 @@ final class FileTranslationViewModel: ObservableObject {
         } ?? false
     }
 
-    func importPDF(
+    var textChunkCount: Int {
+        textAnalysis?.chunks.count ?? 0
+    }
+
+    func importFile(
         from sourceURL: URL,
         sourceLanguage: LanguageOption,
         includeOCR: Bool = true
@@ -156,8 +255,10 @@ final class FileTranslationViewModel: ObservableObject {
         let generation = nextOperationGeneration()
 
         analysis = nil
+        textAnalysis = nil
         outputURL = nil
         outputData = nil
+        textOutput = nil
         warnings = []
         errorMessage = nil
         preflightBlockingMessage = nil
@@ -166,7 +267,8 @@ final class FileTranslationViewModel: ObservableObject {
         translatedPageCount = 0
         skippedPageCount = 0
         stage = .analyzing
-        statusMessage = "PDF 페이지와 텍스트 위치를 분석하는 중입니다."
+        statusMessage = "파일 형식과 텍스트 구조를 분석하는 중입니다."
+        let ocrLanguages = Self.ocrLanguages(for: sourceLanguage)
 
         operationTask = Task { [weak self] in
             let didAccess = sourceURL.startAccessingSecurityScopedResource()
@@ -177,18 +279,38 @@ final class FileTranslationViewModel: ObservableObject {
             }
 
             do {
-                let ocrLanguages = Self.ocrLanguages(for: sourceLanguage)
-                let analysisTask = Task.detached(priority: .userInitiated) {
+                let analyzedDocumentTask = Task.detached(priority: .userInitiated) {
                     try Task.checkCancellation()
-                    return try PDFDocumentAnalysisService(
-                        ocrLanguages: ocrLanguages,
-                        includeOCR: includeOCR
-                    ).analyze(sourceURL: sourceURL)
+                    let sourceData = try Data(
+                        contentsOf: sourceURL,
+                        options: .mappedIfSafe
+                    )
+                    let detection = try TextDocumentFileDetector().detect(
+                        sourceURL: sourceURL,
+                        data: sourceData
+                    )
+                    switch detection.kind {
+                    case .pdf:
+                        return LoadedFileTranslationDocument.pdf(
+                            try PDFDocumentAnalysisService(
+                                ocrLanguages: ocrLanguages,
+                                includeOCR: includeOCR
+                            ).analyze(sourceURL: sourceURL)
+                        )
+                    case .plainText, .markdown:
+                        return LoadedFileTranslationDocument.text(
+                            try TextDocumentAnalyzer().analyze(
+                                sourceURL: sourceURL,
+                                sourceData: sourceData,
+                                detection: detection
+                            )
+                        )
+                    }
                 }
                 let analyzedDocument = try await withTaskCancellationHandler {
-                    try await analysisTask.value
+                    try await analyzedDocumentTask.value
                 } onCancel: {
-                    analysisTask.cancel()
+                    analyzedDocumentTask.cancel()
                 }
                 try Task.checkCancellation()
 
@@ -196,29 +318,45 @@ final class FileTranslationViewModel: ObservableObject {
                     return
                 }
                 self.sourceDocumentVersion &+= 1
-                self.analysis = analyzedDocument
-                self.warnings = Self.warningMessages(in: analyzedDocument)
-                do {
-                    try PDFDocumentCompositionService().validateReadiness(
-                        analysis: analyzedDocument
-                    )
+                self.analysis = nil
+                self.textAnalysis = nil
+                switch analyzedDocument {
+                case let .pdf(pdfAnalysis):
+                    self.analysis = pdfAnalysis
+                    self.warnings = Self.warningMessages(in: pdfAnalysis)
+                    do {
+                        try PDFDocumentCompositionService().validateReadiness(
+                            analysis: pdfAnalysis
+                        )
+                        self.preflightBlockingMessage = nil
+                        self.canUseBestEffortTranslation = false
+                    } catch {
+                        self.preflightBlockingMessage = Self.userFacingMessage(
+                            for: error
+                        )
+                        self.canUseBestEffortTranslation = Self
+                            .isBestEffortEligible(error)
+                    }
+                case let .text(textAnalysis):
+                    self.textAnalysis = textAnalysis
+                    self.warnings = []
                     self.preflightBlockingMessage = nil
                     self.canUseBestEffortTranslation = false
-                } catch {
-                    self.preflightBlockingMessage = Self.userFacingMessage(
-                        for: error
-                    )
-                    self.canUseBestEffortTranslation = Self
-                        .isBestEffortEligible(error)
                 }
                 self.progress = 0
                 self.stage = .ready
-                if self.preflightBlockingMessage == nil {
-                    self.statusMessage = "\(analyzedDocument.pageCount)페이지에서 \(analyzedDocument.pages.reduce(0) { $0 + $1.blocks.count })개 텍스트 영역을 찾았습니다."
-                } else if self.canUseBestEffortTranslation {
-                    self.statusMessage = "PDF 분석을 마쳤습니다. 보존 불가 영역은 원문으로 남기고 번역할 수 있습니다."
-                } else {
-                    self.statusMessage = "PDF 분석을 마쳤지만 레이아웃 보존 문제를 먼저 해결해야 합니다."
+                switch analyzedDocument {
+                case let .pdf(pdfAnalysis):
+                    if self.preflightBlockingMessage == nil {
+                        self.statusMessage = "\(pdfAnalysis.pageCount)페이지에서 \(pdfAnalysis.pages.reduce(0) { $0 + $1.blocks.count })개 텍스트 영역을 찾았습니다."
+                    } else if self.canUseBestEffortTranslation {
+                        self.statusMessage = "PDF 분석을 마쳤습니다. 보존 불가 영역은 원문으로 남기고 번역할 수 있습니다."
+                    } else {
+                        self.statusMessage = "PDF 분석을 마쳤지만 레이아웃 보존 문제를 먼저 해결해야 합니다."
+                    }
+                case let .text(textAnalysis):
+                    let typeName = textAnalysis.kind == .markdown ? "Markdown" : "텍스트"
+                    self.statusMessage = "\(typeName)에서 \(textAnalysis.translatableSegmentCount)개 영역, \(textAnalysis.chunks.count)개 번역 청크를 준비했습니다."
                 }
                 self.operationTask = nil
             } catch is CancellationError {
@@ -226,7 +364,7 @@ final class FileTranslationViewModel: ObservableObject {
                     return
                 }
                 self.stage = .cancelled
-                self.statusMessage = "PDF 분석을 취소했습니다."
+                self.statusMessage = "파일 분석을 취소했습니다."
                 self.operationTask = nil
             } catch {
                 guard let self, self.operationGeneration == generation else {
@@ -238,9 +376,21 @@ final class FileTranslationViewModel: ObservableObject {
         }
     }
 
+    func importPDF(
+        from sourceURL: URL,
+        sourceLanguage: LanguageOption,
+        includeOCR: Bool = true
+    ) {
+        importFile(
+            from: sourceURL,
+            sourceLanguage: sourceLanguage,
+            includeOCR: includeOCR
+        )
+    }
+
     func startTranslation(configuration: FileTranslationConfiguration) {
         do {
-            let (analysis, destinationURL) = try validatedInputs(for: configuration)
+            let input = try validatedInputs(for: configuration)
             let client: TranslationClientDocumentPageAdapter
 
             switch configuration.engine {
@@ -264,16 +414,31 @@ final class FileTranslationViewModel: ObservableObject {
                 throw FileTranslationViewModelError.wrongEngine
             }
 
-            beginTranslation(
-                analysis: analysis,
-                destinationURL: destinationURL,
-                client: client,
-                sourceLanguage: configuration.sourceLanguage,
-                targetLanguage: configuration.targetLanguage,
-                compositionPolicy: configuration.compositionPolicy,
-                renderMode: configuration.renderMode,
-                continueOnError: configuration.continueOnError
-            )
+            switch input.document {
+            case let .pdf(analysis):
+                beginTranslation(
+                    analysis: analysis,
+                    destinationURL: input.destinationURL,
+                    client: client,
+                    sourceLanguage: configuration.sourceLanguage,
+                    targetLanguage: configuration.targetLanguage,
+                    compositionPolicy: configuration.compositionPolicy,
+                    renderMode: configuration.renderMode,
+                    continueOnError: configuration.continueOnError
+                )
+            case let .text(textAnalysis):
+                beginTextTranslation(
+                    analysis: textAnalysis,
+                    destinationURL: input.destinationURL,
+                    client: client,
+                    sourceLanguage: configuration.sourceLanguage,
+                    targetLanguage: configuration.targetLanguage,
+                    chunkingProfile: configuration.textChunkingProfile,
+                    preserveMarkdownStructure: configuration.preserveMarkdownStructure,
+                    translateMarkdownCodeBlocks: configuration.translateMarkdownCodeBlocks,
+                    continueOnError: configuration.continueOnError
+                )
+            }
         } catch {
             fail(with: error)
         }
@@ -306,20 +471,36 @@ final class FileTranslationViewModel: ObservableObject {
         }
 
         do {
-            let (analysis, destinationURL) = try validatedInputs(for: configuration)
+            let input = try validatedInputs(for: configuration)
             pendingAppleConfiguration = nil
             let generation = nextOperationGeneration()
-            await performTranslation(
-                analysis: analysis,
-                destinationURL: destinationURL,
-                client: client,
-                sourceLanguage: configuration.sourceLanguage,
-                targetLanguage: configuration.targetLanguage,
-                compositionPolicy: configuration.compositionPolicy,
-                renderMode: configuration.renderMode,
-                continueOnError: configuration.continueOnError,
-                generation: generation
-            )
+            switch input.document {
+            case let .pdf(analysis):
+                await performTranslation(
+                    analysis: analysis,
+                    destinationURL: input.destinationURL,
+                    client: client,
+                    sourceLanguage: configuration.sourceLanguage,
+                    targetLanguage: configuration.targetLanguage,
+                    compositionPolicy: configuration.compositionPolicy,
+                    renderMode: configuration.renderMode,
+                    continueOnError: configuration.continueOnError,
+                    generation: generation
+                )
+            case let .text(textAnalysis):
+                await performTextTranslation(
+                    analysis: textAnalysis,
+                    destinationURL: input.destinationURL,
+                    client: client,
+                    sourceLanguage: configuration.sourceLanguage,
+                    targetLanguage: configuration.targetLanguage,
+                    chunkingProfile: configuration.textChunkingProfile,
+                    preserveMarkdownStructure: configuration.preserveMarkdownStructure,
+                    translateMarkdownCodeBlocks: configuration.translateMarkdownCodeBlocks,
+                    continueOnError: configuration.continueOnError,
+                    generation: generation
+                )
+            }
         } catch is CancellationError {
             stage = .cancelled
             statusMessage = "파일 번역을 취소했습니다."
@@ -335,8 +516,10 @@ final class FileTranslationViewModel: ObservableObject {
     func clearDocument() {
         cancelCurrentOperation(setCancelledStage: false)
         analysis = nil
+        textAnalysis = nil
         outputURL = nil
         outputData = nil
+        textOutput = nil
         sourceDocumentVersion &+= 1
         outputDocumentVersion &+= 1
         warnings = []
@@ -347,7 +530,7 @@ final class FileTranslationViewModel: ObservableObject {
         translatedPageCount = 0
         skippedPageCount = 0
         stage = .idle
-        statusMessage = "PDF 파일을 선택하거나 끌어다 놓으세요."
+        statusMessage = "번역할 PDF, TXT 또는 Markdown 파일을 선택하거나 끌어다 놓으세요."
     }
 
     func reportFileSelectionError(_ error: Error) {
@@ -355,11 +538,11 @@ final class FileTranslationViewModel: ObservableObject {
         if analysis == nil {
             stage = .failed
         }
-        statusMessage = "PDF 파일을 열지 못했습니다."
+        statusMessage = "파일을 열지 못했습니다."
     }
 
     func reportUnsupportedDrop() {
-        errorMessage = "PDF 파일만 번역할 수 있습니다."
+        errorMessage = "PDF, TXT 또는 Markdown 파일만 번역할 수 있습니다."
         if analysis == nil {
             stage = .failed
         }
@@ -433,6 +616,249 @@ final class FileTranslationViewModel: ObservableObject {
         }
     }
 
+    private func beginTextTranslation(
+        analysis: TextDocumentAnalysis,
+        destinationURL: URL,
+        client: any DocumentPageTranslationClient,
+        sourceLanguage: LanguageOption,
+        targetLanguage: LanguageOption,
+        chunkingProfile: TextDocumentChunkingProfile,
+        preserveMarkdownStructure: Bool,
+        translateMarkdownCodeBlocks: Bool,
+        continueOnError: Bool
+    ) {
+        cancelCurrentOperation(setCancelledStage: false)
+        let preparedAnalysis = analysis
+            .withMarkdownStructurePreserved(preserveMarkdownStructure)
+            .withMarkdownCodeBlocksTranslated(translateMarkdownCodeBlocks)
+            .rechunked(using: chunkingProfile.configuration)
+        let generation = nextOperationGeneration()
+        let total = preparedAnalysis.chunks.count
+        errorMessage = nil
+        progress = 0
+        translatedPageCount = 0
+        skippedPageCount = 0
+        stage = .translating(page: 1, total: total)
+        statusMessage = "텍스트를 문맥 단위 청크로 나누는 중입니다. (총 \(total)개)"
+        operationTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            await self.performTextTranslation(
+                analysis: preparedAnalysis,
+                destinationURL: destinationURL,
+                client: client,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                chunkingProfile: chunkingProfile,
+                preserveMarkdownStructure: preserveMarkdownStructure,
+                translateMarkdownCodeBlocks: translateMarkdownCodeBlocks,
+                continueOnError: continueOnError,
+                generation: generation
+            )
+        }
+    }
+
+    private func performTextTranslation(
+        analysis: TextDocumentAnalysis,
+        destinationURL: URL,
+        client: any DocumentPageTranslationClient,
+        sourceLanguage: LanguageOption,
+        targetLanguage: LanguageOption,
+        chunkingProfile: TextDocumentChunkingProfile,
+        preserveMarkdownStructure: Bool,
+        translateMarkdownCodeBlocks: Bool,
+        continueOnError: Bool,
+        generation: UInt
+    ) async {
+        errorMessage = nil
+        outputURL = nil
+        outputData = nil
+        textOutput = nil
+        outputDocumentVersion &+= 1
+        progress = 0
+        translatedPageCount = 0
+        skippedPageCount = 0
+
+        do {
+            let preparedAnalysis = analysis
+                .withMarkdownStructurePreserved(preserveMarkdownStructure)
+                .withMarkdownCodeBlocksTranslated(translateMarkdownCodeBlocks)
+                .rechunked(using: chunkingProfile.configuration)
+            guard !preparedAnalysis.chunks.isEmpty else {
+                throw TextDocumentTranslationError.noTranslatableText
+            }
+
+            var translatedSegments: [String: String] = [:]
+            translatedSegments.reserveCapacity(preparedAnalysis.translatableSegmentCount)
+
+            for (offset, chunk) in preparedAnalysis.chunks.enumerated() {
+                try Task.checkCancellation()
+                guard operationGeneration == generation else {
+                    throw CancellationError()
+                }
+
+                stage = .translating(
+                    page: offset + 1,
+                    total: preparedAnalysis.chunks.count
+                )
+                statusMessage = "텍스트 청크 \(offset + 1)/\(preparedAnalysis.chunks.count) 번역 중 · \(chunk.characterCount)자"
+                progress = Double(offset) / Double(max(1, preparedAnalysis.chunks.count + 1))
+
+                let request = try preparedAnalysis.request(
+                    for: chunk,
+                    sourceLanguage: sourceLanguage,
+                    targetLanguage: targetLanguage
+                )
+                do {
+                    let result = try await client.translatePage(request)
+                    let validated = try DocumentPageTranslationValidator.validateAndOrder(
+                        result,
+                        for: request
+                    )
+                    for translation in validated.translations {
+                        translatedSegments[translation.id] = translation.translatedText
+                    }
+                    translatedPageCount += 1
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    guard continueOnError else {
+                        throw error
+                    }
+                    skippedPageCount += 1
+                    warnings = Self.deduplicated(
+                        warnings + [
+                            "텍스트 청크 \(offset + 1) 번역 오류를 건너뛰었습니다: \(Self.userFacingMessage(for: error))"
+                        ]
+                    )
+                    statusMessage = "텍스트 청크 \(offset + 1) 오류를 건너뛰고 계속하는 중입니다."
+                }
+
+                do {
+                    textOutput = preparedAnalysis.renderedText(
+                        translations: translatedSegments,
+                        preserveSourceForMissing: true
+                    )
+                    outputData = try encodedTextData(
+                        for: preparedAnalysis,
+                        translations: translatedSegments,
+                        preserveSourceForMissing: true
+                    )
+                    outputDocumentVersion &+= 1
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    guard continueOnError else {
+                        throw error
+                    }
+                    warnings = Self.deduplicated(
+                        warnings + [
+                            "텍스트 청크 \(offset + 1) 미리보기 생성 오류를 건너뛰었습니다: \(Self.userFacingMessage(for: error))"
+                        ]
+                    )
+                }
+                progress = Double(offset + 1) / Double(max(1, preparedAnalysis.chunks.count + 1))
+            }
+
+            try Task.checkCancellation()
+            guard operationGeneration == generation else {
+                throw CancellationError()
+            }
+
+            stage = .composing
+            statusMessage = "번역된 텍스트를 원본 인코딩과 구조로 저장하는 중입니다."
+            progress = 0.92
+            let finalData = try encodedTextData(
+                for: preparedAnalysis,
+                translations: translatedSegments,
+                preserveSourceForMissing: true
+            )
+            let temporaryURL = Self.temporaryOutputURL(beside: destinationURL)
+            var ownsTemporaryFile = false
+            defer {
+                if ownsTemporaryFile {
+                    try? FileManager.default.removeItem(at: temporaryURL)
+                }
+            }
+
+            try FileManager.default.createDirectory(
+                at: destinationURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try finalData.write(to: temporaryURL, options: .atomic)
+            ownsTemporaryFile = true
+            try Task.checkCancellation()
+            guard operationGeneration == generation else {
+                throw CancellationError()
+            }
+            do {
+                try FileManager.default.moveItem(at: temporaryURL, to: destinationURL)
+            } catch {
+                if FileManager.default.fileExists(atPath: destinationURL.path) {
+                    throw PDFDocumentServiceError.destinationAlreadyExists
+                }
+                throw PDFDocumentServiceError.cannotWriteOutput(error.localizedDescription)
+            }
+            ownsTemporaryFile = false
+
+            outputURL = destinationURL
+            outputData = finalData
+            textOutput = preparedAnalysis.renderedText(
+                translations: translatedSegments,
+                preserveSourceForMissing: true
+            )
+            outputDocumentVersion &+= 1
+            progress = 1
+            stage = .completed
+            statusMessage = "번역 \(preparedAnalysis.kind.displayName) 파일을 저장했습니다: \(destinationURL.lastPathComponent)"
+            operationTask = nil
+        } catch is CancellationError {
+            guard operationGeneration == generation else {
+                return
+            }
+            stage = .cancelled
+            statusMessage = "파일 번역을 취소했습니다."
+            operationTask = nil
+        } catch {
+            guard operationGeneration == generation else {
+                return
+            }
+            fail(with: error)
+            operationTask = nil
+        }
+    }
+
+    private func encodedTextData(
+        for analysis: TextDocumentAnalysis,
+        translations: [String: String],
+        preserveSourceForMissing: Bool
+    ) throws -> Data {
+        do {
+            return try analysis.encodedData(
+                translations: translations,
+                preserveSourceForMissing: preserveSourceForMissing
+            )
+        } catch TextDocumentTranslationError.cannotEncode {
+            // A legacy single-byte file (for example ISO-8859-1) cannot
+            // represent Korean, Japanese, or other translated glyphs. Keep
+            // the text and structure intact by promoting the output to UTF-8
+            // instead of failing the whole document after a long translation.
+            warnings = Self.deduplicated(
+                warnings + [
+                    "원본 인코딩(\(analysis.encoding.rawValue))으로 일부 번역 문자를 저장할 수 없어 UTF-8로 출력했습니다."
+                ]
+            )
+            guard let data = analysis.renderedText(
+                translations: translations,
+                preserveSourceForMissing: preserveSourceForMissing
+            ).data(using: .utf8) else {
+                throw TextDocumentTranslationError.cannotEncode("utf8")
+            }
+            return data
+        }
+    }
+
     private func performTranslation(
         analysis: PDFDocumentAnalysis,
         destinationURL: URL,
@@ -498,11 +924,11 @@ final class FileTranslationViewModel: ObservableObject {
                     }
                     skippedPageCount += 1
                     warnings = Self.deduplicated(
-                        warnings + [
-                            "(page.pageIndex + 1)페이지 번역 오류를 건너뛰었습니다: (Self.userFacingMessage(for: error))"
-                        ]
-                    )
-                    statusMessage = "(page.pageIndex + 1)페이지 번역 오류를 건너뛰고 계속하는 중입니다."
+                            warnings + [
+                                "\(page.pageIndex + 1)페이지 번역 오류를 건너뛰었습니다: \(Self.userFacingMessage(for: error))"
+                            ]
+                        )
+                    statusMessage = "\(page.pageIndex + 1)페이지 번역 오류를 건너뛰고 계속하는 중입니다."
                 }
 
                 if !translatedBlocks.isEmpty {
@@ -523,10 +949,10 @@ final class FileTranslationViewModel: ObservableObject {
                         }
                         warnings = Self.deduplicated(
                             warnings + [
-                                "(page.pageIndex + 1)페이지 미리보기 합성 오류를 건너뛰었습니다: (Self.userFacingMessage(for: error))"
+                                "\(page.pageIndex + 1)페이지 미리보기 합성 오류를 건너뛰었습니다: \(Self.userFacingMessage(for: error))"
                             ]
                         )
-                        statusMessage = "미리보기 합성 오류를 건너뛰고 (page.pageIndex + 1)페이지를 계속하는 중입니다."
+                        statusMessage = "미리보기 합성 오류를 건너뛰고 \(page.pageIndex + 1)페이지를 계속하는 중입니다."
                     }
                 }
 
@@ -642,22 +1068,30 @@ final class FileTranslationViewModel: ObservableObject {
 
     private func validatedInputs(
         for configuration: FileTranslationConfiguration
-    ) throws -> (PDFDocumentAnalysis, URL) {
-        guard let analysis else {
+    ) throws -> ValidatedFileTranslationInput {
+        let document: LoadedFileTranslationDocument
+        if let analysis {
+            document = .pdf(analysis)
+        } else if let textAnalysis {
+            document = .text(textAnalysis)
+        } else {
             throw FileTranslationViewModelError.documentNotLoaded
         }
         guard translatableBlockCount > 0 else {
             throw FileTranslationViewModelError.noTranslatableText
         }
-        try PDFDocumentCompositionService().validateReadiness(
-            analysis: analysis,
-            policy: configuration.compositionPolicy
-        )
-        guard !requiresIncompleteOCRAcknowledgement
-                || configuration.allowsPotentiallyIncompleteOCR
-                || configuration.compositionPolicy == .bestEffort
-        else {
-            throw FileTranslationViewModelError.incompleteOCRRequiresConfirmation
+
+        if case let .pdf(analysis) = document {
+            try PDFDocumentCompositionService().validateReadiness(
+                analysis: analysis,
+                policy: configuration.compositionPolicy
+            )
+            guard !requiresIncompleteOCRAcknowledgement
+                    || configuration.allowsPotentiallyIncompleteOCR
+                    || configuration.compositionPolicy == .bestEffort
+            else {
+                throw FileTranslationViewModelError.incompleteOCRRequiresConfirmation
+            }
         }
         guard configuration.sourceLanguage == .autoDetect
                 || configuration.sourceLanguage != configuration.targetLanguage
@@ -682,13 +1116,26 @@ final class FileTranslationViewModel: ObservableObject {
         }
 
         let destinationURL = try outputURLResolver.resolve(
-            sourceURL: analysis.sourceURL,
+            sourceURL: sourceURLFor(document),
             targetLanguage: configuration.targetLanguage,
             locationRawValue: configuration.downloadLocation,
-            explicitlySelectedURL: configuration.explicitlySelectedDestination
+            explicitlySelectedURL: configuration.explicitlySelectedDestination,
+            kind: document.kind
         )
         try validateDestinationDirectory(for: destinationURL)
-        return (analysis, destinationURL)
+        return ValidatedFileTranslationInput(
+            document: document,
+            destinationURL: destinationURL
+        )
+    }
+
+    private func sourceURLFor(_ document: LoadedFileTranslationDocument) -> URL {
+        switch document {
+        case let .pdf(analysis):
+            analysis.sourceURL
+        case let .text(analysis):
+            analysis.sourceURL
+        }
     }
 
     private func composePreviewData(

@@ -80,4 +80,25 @@ final class FileTranslationOutputURLResolverTests: XCTestCase {
 
         XCTAssertEqual(resolved.lastPathComponent, "translated (2).pdf")
     }
+
+    func testTextAndMarkdownDestinationsKeepTheirDocumentExtension() throws {
+        let sourceURL = temporaryDirectory.appendingPathComponent("notes.md")
+        let markdownDestination = try FileTranslationOutputURLResolver().resolve(
+            sourceURL: sourceURL,
+            targetLanguage: .korean,
+            locationRawValue: FileTranslationOutputLocation.ask.rawValue,
+            explicitlySelectedURL: temporaryDirectory.appendingPathComponent("notes.ko.md"),
+            kind: .markdown
+        )
+        XCTAssertEqual(markdownDestination.pathExtension, "md")
+
+        let textDestination = try FileTranslationOutputURLResolver().resolve(
+            sourceURL: temporaryDirectory.appendingPathComponent("notes.txt"),
+            targetLanguage: .korean,
+            locationRawValue: FileTranslationOutputLocation.ask.rawValue,
+            explicitlySelectedURL: temporaryDirectory.appendingPathComponent("notes.ko"),
+            kind: .plainText
+        )
+        XCTAssertEqual(textDestination.pathExtension, "txt")
+    }
 }
