@@ -88,6 +88,7 @@ enum FileTranslationViewModelError: LocalizedError, Equatable {
     case missingModel
     case missingAPIKey
     case wrongEngine
+    case appleLanguageModelPreparationTimedOut
     case incompleteOCRRequiresConfirmation
     case destinationDirectoryUnavailable(String)
 
@@ -105,6 +106,8 @@ enum FileTranslationViewModelError: LocalizedError, Equatable {
             "Gemini API 키를 입력해 주세요."
         case .wrongEngine:
             "선택한 번역 엔진으로 이 작업을 시작할 수 없습니다."
+        case .appleLanguageModelPreparationTimedOut:
+            "Apple 번역 언어 팩 준비가 제한 시간 안에 끝나지 않았습니다. 시스템의 언어 팩 다운로드 상태를 확인한 뒤 다시 시도하거나 다른 엔진을 선택해 주세요."
         case .incompleteOCRRequiresConfirmation:
             "OCR 경고로 일부 이미지 글자가 누락될 수 있습니다. 경고를 확인하고 계속 진행에 동의해 주세요."
         case let .destinationDirectoryUnavailable(path):
@@ -162,7 +165,13 @@ final class FileTranslationViewModel: ObservableObject {
     private let codexModelProvider: any CodexAppServerModelProviding
     private let outputURLResolver: FileTranslationOutputURLResolver
     private var operationTask: Task<Void, Never>?
+    private var appleLanguageModelWatchdogTask: Task<Void, Never>?
     private var operationGeneration: UInt = 0
+
+    /// Apple Translation can wait indefinitely while the system language pack
+    /// is being prepared. A bounded watchdog turns that silent wait into an
+    /// actionable error and leaves the user free to retry or switch engines.
+    private static let appleLanguageModelPreparationTimeout: Duration = .seconds(120)
 
     init(
         apiClient: any TranslationClient = GeminiTranslationClient(requestTimeout: 120),
@@ -178,6 +187,7 @@ final class FileTranslationViewModel: ObservableObject {
 
     deinit {
         operationTask?.cancel()
+        appleLanguageModelWatchdogTask?.cancel()
     }
 
     var sourceData: Data? {
@@ -208,7 +218,34 @@ final class FileTranslationViewModel: ObservableObject {
     }
 
     var translatedText: String? {
-        textOutput
+        if let textOutput {
+            return textOutput
+        }
+
+        // The preview is updated while each chunk is translated. If a view
+        // appears after the final commit (or a legacy path only populated
+        // outputData), decode that committed data so the right pane never
+        // remains blank merely because the transient string was unavailable.
+        guard textAnalysis != nil, let outputData else {
+            return nil
+        }
+        let encoding: String.Encoding
+        switch textAnalysis?.encoding {
+        case .utf8, .utf8WithBOM, .none:
+            encoding = .utf8
+        case .utf16LittleEndian:
+            encoding = .utf16LittleEndian
+        case .utf16BigEndian:
+            encoding = .utf16BigEndian
+        case .utf32LittleEndian:
+            encoding = .utf32LittleEndian
+        case .utf32BigEndian:
+            encoding = .utf32BigEndian
+        case .isoLatin1:
+            encoding = .isoLatin1
+        }
+        return String(data: outputData, encoding: encoding)
+            ?? String(data: outputData, encoding: .utf8)
     }
 
     var filename: String? {
@@ -458,6 +495,7 @@ final class FileTranslationViewModel: ObservableObject {
             progress = 0
             stage = .waitingForApple
             statusMessage = "Apple 번역 언어 모델을 준비하는 중입니다."
+            startAppleLanguageModelWatchdog()
         } catch {
             fail(with: error)
         }
@@ -468,6 +506,11 @@ final class FileTranslationViewModel: ObservableObject {
     ) async {
         guard let configuration = pendingAppleConfiguration else {
             return
+        }
+
+        defer {
+            appleLanguageModelWatchdogTask?.cancel()
+            appleLanguageModelWatchdogTask = nil
         }
 
         do {
@@ -1223,6 +1266,8 @@ final class FileTranslationViewModel: ObservableObject {
         operationGeneration &+= 1
         operationTask?.cancel()
         operationTask = nil
+        appleLanguageModelWatchdogTask?.cancel()
+        appleLanguageModelWatchdogTask = nil
         pendingAppleConfiguration = nil
         appleCancellationGeneration &+= 1
 
@@ -1235,6 +1280,33 @@ final class FileTranslationViewModel: ObservableObject {
     private func nextOperationGeneration() -> UInt {
         operationGeneration &+= 1
         return operationGeneration
+    }
+
+    private func startAppleLanguageModelWatchdog() {
+        appleLanguageModelWatchdogTask?.cancel()
+        appleLanguageModelWatchdogTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: Self.appleLanguageModelPreparationTimeout)
+            } catch {
+                return
+            }
+
+            guard let self,
+                  self.stage.isBusy,
+                  self.pendingAppleConfiguration != nil
+                      || self.translatedPageCount == 0
+            else {
+                return
+            }
+
+            self.cancelCurrentOperation(setCancelledStage: false)
+            let timeout = FileTranslationViewModelError
+                .appleLanguageModelPreparationTimedOut
+            self.errorMessage = Self.userFacingMessage(for: timeout)
+            self.stage = .failed
+            self.progress = 0
+            self.statusMessage = "Apple 언어 팩 준비가 120초를 초과했습니다. 다시 시도하거나 다른 번역 엔진을 선택해 주세요."
+        }
     }
 
     private func fail(with error: Error) {

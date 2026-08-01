@@ -16,8 +16,10 @@ struct FileTranslationWorkspace: View {
     private var apiModelID = AppDefaults.defaultFileAPIModelID
     @AppStorage(PreferenceKeys.codexModelID)
     private var codexModelID = AppDefaults.defaultCodexModelID
-    // File contents can be sensitive, so this workflow never persists its API key.
-    @State private var apiKey = ""
+    // File translation uses the same key that is managed in Settings. Keeping
+    // one source of truth prevents a successful text translation from using a
+    // different (or empty) key than the main translation workflow.
+    @AppStorage(PreferenceKeys.geminiAPIKey) private var apiKey = ""
     @AppStorage(PreferenceKeys.temperature) private var temperature = 0.2
     @AppStorage(PreferenceKeys.downloadLocation) private var downloadLocation = "desktop"
     @AppStorage(PreferenceKeys.fileTranslationRenderMode)
@@ -409,6 +411,13 @@ struct FileTranslationWorkspace: View {
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .topLeading)
                             .padding(18)
+                            // Recreate the text view for each committed
+                            // preview version. This avoids SwiftUI retaining
+                            // the initial nil-result branch of a large
+                            // HSplitView child after the first chunk arrives.
+                            .id(isTranslated
+                                ? "translated-(viewModel.outputDocumentVersion)"
+                                : "source-(viewModel.sourceDocumentVersion)")
                     }
                 } else {
                     ContentUnavailableView(
@@ -656,16 +665,17 @@ struct FileTranslationWorkspace: View {
             .labelsHidden()
             .frame(maxWidth: .infinity)
 
-            SecureField("Gemini API 키", text: $apiKey)
+            SecureField("설정에 저장된 Gemini API 키", text: $apiKey)
                 .textFieldStyle(.roundedBorder)
 
             Text("페이지 내용은 선택한 Gemini 모델로 전송됩니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Text("API 키는 이 화면의 메모리에만 유지되며 앱 설정에 저장하지 않습니다.")
+            Text("이 키는 설정 화면과 공유되며, 파일 번역도 설정에 저장된 키를 사용합니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1249,6 +1259,12 @@ struct AppleFileTranslationTaskHost: View {
 
     var body: some View {
         Color.clear
+            .onAppear {
+                // The host is mounted with the main window. If a request was
+                // queued before SwiftUI registered the change observer, make
+                // sure the pending configuration is still installed.
+                configureForPendingRequest()
+            }
             .onChange(of: viewModel.appleRequestGeneration) { _, _ in
                 configureForPendingRequest()
             }

@@ -60,6 +60,8 @@ final class TextFileTranslationViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.stage, .completed, viewModel.errorMessage ?? "")
         XCTAssertEqual(viewModel.outputURL, destinationURL)
+        XCTAssertTrue(viewModel.translatedText?.contains("[ko] Guide") == true)
+        XCTAssertTrue(viewModel.translatedText?.contains("[ko] Section 0") == true)
         let output = try String(contentsOf: destinationURL, encoding: .utf8)
         XCTAssertTrue(output.contains("[ko] Guide"))
         XCTAssertTrue(output.contains("[ko] Section 0"))
