@@ -78,6 +78,133 @@ final class TranslationViewModelTests: XCTestCase {
         )
     }
 
+    func testAppleResultIsShownImmediatelyThenLLMResultBecomesActive() async throws {
+        let viewModel = TranslationViewModel(
+            client: DelayedTranslationClient(),
+            historyStore: InMemoryTranslationHistoryStore()
+        )
+        try await Task.sleep(for: .milliseconds(30))
+        viewModel.setSourceText("Translate this")
+
+        let request = Task { @MainActor in
+            await viewModel.translate(
+                sourceLanguage: .english,
+                targetLanguage: .korean,
+                provider: .gemini,
+                modelID: "slow-model",
+                apiKey: "test-key",
+                temperature: 0.2,
+                historyEnabled: true
+            )
+        }
+
+        try await Task.sleep(for: .milliseconds(20))
+        let pending = try XCTUnwrap(viewModel.pendingAppleTranslation)
+        viewModel.reportAppleTranslationResult(
+            "Apple 번역 결과",
+            generation: pending.generation
+        )
+
+        XCTAssertEqual(viewModel.translatedText, "Apple 번역 결과")
+        XCTAssertEqual(viewModel.selectedTranslationEngine, .apple)
+        XCTAssertTrue(viewModel.isLLMTranslating)
+
+        await request.value
+
+        XCTAssertEqual(viewModel.translatedText, "old result")
+        XCTAssertEqual(viewModel.selectedTranslationEngine, .llm)
+        XCTAssertEqual(viewModel.appleTranslatedText, "Apple 번역 결과")
+
+        viewModel.selectTranslationEngine(.apple)
+        XCTAssertEqual(viewModel.translatedText, "Apple 번역 결과")
+    }
+
+    func testAppleFailureKeepsWaitingForTheLLMResult() async throws {
+        let viewModel = TranslationViewModel(
+            client: DelayedTranslationClient(),
+            historyStore: InMemoryTranslationHistoryStore()
+        )
+        try await Task.sleep(for: .milliseconds(30))
+        viewModel.setSourceText("Translate this")
+
+        let request = Task { @MainActor in
+            await viewModel.translate(
+                sourceLanguage: .english,
+                targetLanguage: .korean,
+                provider: .gemini,
+                modelID: "slow-model",
+                apiKey: "test-key",
+                temperature: 0.2,
+                historyEnabled: true
+            )
+        }
+
+        try await Task.sleep(for: .milliseconds(20))
+        let pending = try XCTUnwrap(viewModel.pendingAppleTranslation)
+        viewModel.reportAppleTranslationFailure(
+            AppleDocumentTranslationError.operatingSystemUnsupported,
+            generation: pending.generation
+        )
+
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertTrue(viewModel.isLLMTranslating)
+        XCTAssertEqual(viewModel.translatedText, "")
+
+        await request.value
+
+        XCTAssertEqual(viewModel.translatedText, "old result")
+        XCTAssertEqual(viewModel.selectedTranslationEngine, .llm)
+    }
+
+    func testStaleAppleResponseCannotOverwriteANewRequest() async throws {
+        let viewModel = TranslationViewModel(
+            client: DelayedTranslationClient(),
+            historyStore: InMemoryTranslationHistoryStore()
+        )
+        try await Task.sleep(for: .milliseconds(30))
+        viewModel.setSourceText("first source")
+
+        let firstRequest = Task { @MainActor in
+            await viewModel.translate(
+                sourceLanguage: .english,
+                targetLanguage: .korean,
+                provider: .gemini,
+                modelID: "slow-model",
+                apiKey: "test-key",
+                temperature: 0.2,
+                historyEnabled: true
+            )
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        let firstPending = try XCTUnwrap(viewModel.pendingAppleTranslation)
+
+        viewModel.setSourceText("second source")
+        let secondRequest = Task { @MainActor in
+            await viewModel.translate(
+                sourceLanguage: .english,
+                targetLanguage: .korean,
+                provider: .gemini,
+                modelID: "fast-model",
+                apiKey: "test-key",
+                temperature: 0.2,
+                historyEnabled: true
+            )
+        }
+
+        try await Task.sleep(for: .milliseconds(20))
+        viewModel.reportAppleTranslationResult(
+            "오래된 Apple 결과",
+            generation: firstPending.generation
+        )
+
+        await secondRequest.value
+        await firstRequest.value
+
+        XCTAssertEqual(viewModel.translatedText, "new result")
+        XCTAssertEqual(viewModel.selectedTranslationEngine, .llm)
+        XCTAssertEqual(viewModel.appleTranslatedText, "")
+    }
+
     func testComparisonTranslationRecordsCodexEngineMetadata() async throws {
         let viewModel = TranslationViewModel(
             client: RecordingTranslationClient(output: ""),

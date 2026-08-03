@@ -122,6 +122,8 @@ struct ContentView: View {
                             targetLanguage: targetLanguageBinding,
                             showTools: $showTools,
                             readingFontSizeRaw: $readingFontSizeRaw,
+                            selectedTranslationEngine: viewModel.selectedTranslationEngine,
+                            onSelectTranslationEngine: viewModel.selectTranslationEngine,
                             languageMenuWidth: 180,
                             usesCompactLayout: false,
                             onPaste: pasteClipboardIntoSource,
@@ -165,6 +167,7 @@ struct ContentView: View {
         }
         .background(AppTheme.panelBackground)
         .background(TitlebarMenuAccessory().frame(width: 0, height: 0))
+        .background(appleTextTranslationHost.frame(width: 0, height: 0))
         .background(appleFileTranslationHost.frame(width: 0, height: 0))
         .foregroundStyle(.primary)
         .toolbar {
@@ -427,6 +430,15 @@ struct ContentView: View {
             AppleFileTranslationTaskHost(viewModel: fileTranslationViewModel)
         }
     }
+
+    @ViewBuilder
+    private var appleTextTranslationHost: some View {
+        if #available(macOS 15.0, *) {
+            AppleTextTranslationTaskHost(viewModel: viewModel)
+        } else {
+            AppleTextTranslationUnavailableHost(viewModel: viewModel)
+        }
+    }
 }
 
 private enum TranslationMode: String, CaseIterable, Identifiable {
@@ -587,6 +599,8 @@ private struct TranslationComparisonToolbar: View {
                     targetLanguage: $targetLanguage,
                     showTools: $showTools,
                     readingFontSizeRaw: $readingFontSizeRaw,
+                    selectedTranslationEngine: nil,
+                    onSelectTranslationEngine: nil,
                     languageMenuWidth: 86,
                     usesCompactLayout: true,
                     onPaste: onPaste,
@@ -612,6 +626,8 @@ private struct LanguageBar: View {
     @Binding var targetLanguage: LanguageOption
     @Binding var showTools: Bool
     @Binding var readingFontSizeRaw: String
+    let selectedTranslationEngine: TranslationResultEngine?
+    let onSelectTranslationEngine: ((TranslationResultEngine) -> Void)?
     let languageMenuWidth: CGFloat
     let usesCompactLayout: Bool
     let onPaste: () -> Void
@@ -708,6 +724,14 @@ private struct LanguageBar: View {
 
     private var trailingControls: some View {
         HStack(spacing: 8) {
+            if let selectedTranslationEngine,
+               let onSelectTranslationEngine {
+                TranslationEngineSwitch(
+                    selectedEngine: selectedTranslationEngine,
+                    onSelect: onSelectTranslationEngine
+                )
+            }
+
             FontSizeControl(readingFontSizeRaw: $readingFontSizeRaw)
 
             if !showTools {
@@ -1190,11 +1214,11 @@ private struct ResultPane: View {
         ZStack(alignment: .bottomTrailing) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if isTranslating {
+                    if translatedText.isEmpty, isTranslating {
                         ProgressView("번역 중")
                             .controlSize(.small)
                             .padding()
-                    } else if let errorMessage {
+                    } else if translatedText.isEmpty, let errorMessage {
                         Label(errorMessage, systemImage: "exclamationmark.triangle")
                             .foregroundStyle(.orange)
                             .padding()
@@ -1205,10 +1229,25 @@ private struct ResultPane: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .padding(.top, 220)
                     } else {
+                        if isTranslating {
+                            Label("LLM 번역을 기다리는 중입니다", systemImage: "hourglass")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 28)
+                                .padding(.top, 18)
+                        }
+
                         MarkdownText(text: translatedText, fontSize: fontSize)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(28)
+
+                        if let errorMessage {
+                            Label("LLM 번역 실패: \(errorMessage)", systemImage: "exclamationmark.triangle")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.orange)
+                                .padding(.horizontal, 28)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

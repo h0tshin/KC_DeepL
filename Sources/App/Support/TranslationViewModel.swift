@@ -1,5 +1,43 @@
 import AppKit
 import KCDeepLCore
+import Translation
+
+enum TranslationResultEngine: String, CaseIterable, Identifiable, Sendable {
+    case apple
+    case llm
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .apple:
+            "Apple"
+        case .llm:
+            "LLM"
+        }
+    }
+}
+
+struct PendingAppleTextTranslation: Equatable, Sendable {
+    let generation: UInt
+    let sourceText: String
+    let sourceLanguage: LanguageOption
+    let targetLanguage: LanguageOption
+}
+
+enum AppleTextTranslationError: Error, Equatable, LocalizedError, Sendable {
+    case unexpectedResponseIdentifier(expected: String, actual: String?)
+    case unexpectedResponseCount(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case let .unexpectedResponseIdentifier(expected, actual):
+            "Apple 번역 응답 ID가 요청과 다릅니다. 예상: \(expected), 실제: \(actual ?? "없음")"
+        case let .unexpectedResponseCount(count):
+            "Apple 텍스트 번역이 \(count)개의 응답을 반환했습니다. 정확히 1개가 필요합니다."
+        }
+    }
+}
 
 @MainActor
 final class TranslationViewModel: ObservableObject {
@@ -7,6 +45,14 @@ final class TranslationViewModel: ObservableObject {
     @Published var sourceAttributedText = RichTextFormatting.plainAttributedString("")
     @Published var translatedText = ""
     @Published var isTranslating = false
+    @Published private(set) var isAppleTranslating = false
+    @Published private(set) var isLLMTranslating = false
+    @Published private(set) var appleTranslatedText = ""
+    @Published private(set) var llmTranslatedText = ""
+    @Published private(set) var appleErrorMessage: String?
+    @Published var selectedTranslationEngine: TranslationResultEngine = .apple
+    @Published private(set) var pendingAppleTranslation: PendingAppleTextTranslation?
+    @Published private(set) var appleRequestGeneration: UInt = 0
     @Published var statusMessage = "시스템과 API 상태를 확인하는 중입니다."
     @Published var errorMessage: String?
     @Published var captureState: CaptureState?
@@ -63,6 +109,7 @@ final class TranslationViewModel: ObservableObject {
     ) async {
         historyPreferenceEnabled = historyEnabled
         let generation = nextRequestGeneration()
+        resetTranslationResults()
         let translationText = RichTextFormatting.markdown(
             from: sourceAttributedText,
             fallback: sourceText
@@ -72,7 +119,7 @@ final class TranslationViewModel: ObservableObject {
             guard let self else {
                 return
             }
-            await self.translateSnapshot(
+            await self.startDualTranslation(
                 translationText,
                 expectedSourceText: expectedSourceText,
                 sourceLanguage: sourceLanguage,
@@ -110,12 +157,10 @@ final class TranslationViewModel: ObservableObject {
     ) {
         historyPreferenceEnabled = historyEnabled
         let generation = nextRequestGeneration()
-        isTranslating = false
+        resetTranslationResults()
 
         let expectedSourceText = sourceText
         guard !expectedSourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            translatedText = ""
-            errorMessage = nil
             runStartupChecks(
                 backend: backend,
                 modelID: modelID,
@@ -147,7 +192,7 @@ final class TranslationViewModel: ObservableObject {
                 from: self.sourceAttributedText,
                 fallback: expectedSourceText
             )
-            await self.translateSnapshot(
+            await self.startDualTranslation(
                 pendingText,
                 expectedSourceText: expectedSourceText,
                 sourceLanguage: sourceLanguage,
@@ -235,8 +280,7 @@ final class TranslationViewModel: ObservableObject {
         }
 
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            translatedText = ""
-            errorMessage = nil
+            resetTranslationResults()
             runStartupChecks(
                 backend: backend,
                 modelID: modelID,
@@ -247,13 +291,16 @@ final class TranslationViewModel: ObservableObject {
 
         guard backend == .codexAppServer || provider == .gemini else {
             errorMessage = nil
-            isTranslating = false
-            translatedText = "현재 목업에서는 Gemini 번역 호출만 연결되어 있습니다. \(provider.displayName) 연동은 고급 설정 설계 범위에 포함되어 있습니다."
+            llmTranslatedText = "현재 목업에서는 Gemini 번역 호출만 연결되어 있습니다. \(provider.displayName) 연동은 고급 설정 설계 범위에 포함되어 있습니다."
+            selectTranslationEngine(.llm)
             statusMessage = "선택한 공급자의 실제 호출은 다음 구현 단계에서 연결됩니다."
+            isLLMTranslating = false
+            updateTranslationActivityState()
             return
         }
 
-        isTranslating = true
+        isLLMTranslating = true
+        updateTranslationActivityState()
         errorMessage = nil
         statusMessage = backend == .codexAppServer
             ? "Codex App Server (\(modelID))로 번역 중입니다."
@@ -280,7 +327,8 @@ final class TranslationViewModel: ObservableObject {
                 return
             }
 
-            translatedText = output
+            llmTranslatedText = output
+            selectTranslationEngine(.llm)
             statusMessage = "번역 완료: \(modelID)"
 
             if historyPreferenceEnabled {
@@ -311,8 +359,227 @@ final class TranslationViewModel: ObservableObject {
         }
 
         if isCurrentRequest(generation, expectedSourceText: expectedSourceText) {
-            isTranslating = false
+            isLLMTranslating = false
+            updateTranslationActivityState()
         }
+    }
+
+    private func startDualTranslation(
+        _ text: String,
+        expectedSourceText: String,
+        sourceLanguage: LanguageOption,
+        targetLanguage: LanguageOption,
+        provider: LLMProvider,
+        modelID: String,
+        apiKey: String,
+        temperature: Double,
+        historyEnabled: Bool,
+        backend: TranslationBackend,
+        generation: UInt
+    ) async {
+        guard isCurrentRequest(generation, expectedSourceText: expectedSourceText) else {
+            return
+        }
+
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            resetTranslationResults()
+            runStartupChecks(
+                backend: backend,
+                modelID: modelID,
+                apiKey: apiKey
+            )
+            return
+        }
+
+        beginDualTranslation(
+            text: text,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            generation: generation
+        )
+
+        await translateSnapshot(
+            text,
+            expectedSourceText: expectedSourceText,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            provider: provider,
+            modelID: modelID,
+            apiKey: apiKey,
+            temperature: temperature,
+            historyEnabled: historyEnabled,
+            backend: backend,
+            generation: generation
+        )
+    }
+
+    private func beginDualTranslation(
+        text: String,
+        sourceLanguage: LanguageOption,
+        targetLanguage: LanguageOption,
+        generation: UInt
+    ) {
+        appleTranslatedText = ""
+        llmTranslatedText = ""
+        translatedText = ""
+        selectedTranslationEngine = .apple
+        appleErrorMessage = nil
+        errorMessage = nil
+        isAppleTranslating = true
+        isLLMTranslating = false
+        pendingAppleTranslation = PendingAppleTextTranslation(
+            generation: generation,
+            sourceText: text,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage
+        )
+        appleRequestGeneration &+= 1
+        updateTranslationActivityState()
+        statusMessage = "Apple 번역과 LLM 번역을 동시에 요청하는 중입니다."
+    }
+
+    func selectTranslationEngine(_ engine: TranslationResultEngine) {
+        selectedTranslationEngine = engine
+        refreshDisplayedTranslation()
+    }
+
+    private func refreshDisplayedTranslation() {
+        switch selectedTranslationEngine {
+        case .apple:
+            translatedText = appleTranslatedText
+        case .llm:
+            translatedText = llmTranslatedText
+        }
+    }
+
+    private func resetTranslationResults() {
+        appleRequestGeneration &+= 1
+        pendingAppleTranslation = nil
+        isAppleTranslating = false
+        isLLMTranslating = false
+        appleTranslatedText = ""
+        llmTranslatedText = ""
+        translatedText = ""
+        selectedTranslationEngine = .apple
+        appleErrorMessage = nil
+        errorMessage = nil
+        updateTranslationActivityState()
+    }
+
+    private func updateTranslationActivityState() {
+        isTranslating = isAppleTranslating || isLLMTranslating
+    }
+
+    @available(macOS 15.0, *)
+    func performPendingAppleTranslation(using session: TranslationSession) async {
+        guard let pending = pendingAppleTranslation else {
+            return
+        }
+
+        let generation = pending.generation
+        let clientIdentifier = "kc-text-\(generation)"
+
+        do {
+            try Task.checkCancellation()
+            try await session.prepareTranslation()
+            try Task.checkCancellation()
+
+            var translatedText: String?
+            for try await response in session.translate(
+                batch: [
+                    TranslationSession.Request(
+                        sourceText: pending.sourceText,
+                        clientIdentifier: clientIdentifier
+                    )
+                ]
+            ) {
+                try Task.checkCancellation()
+                guard response.clientIdentifier == clientIdentifier else {
+                    throw AppleTextTranslationError.unexpectedResponseIdentifier(
+                        expected: clientIdentifier,
+                        actual: response.clientIdentifier
+                    )
+                }
+                guard translatedText == nil else {
+                    throw AppleTextTranslationError.unexpectedResponseCount(2)
+                }
+                translatedText = response.targetText
+            }
+
+            guard let translatedText else {
+                throw AppleTextTranslationError.unexpectedResponseCount(0)
+            }
+
+            reportAppleTranslationResult(
+                translatedText,
+                generation: generation
+            )
+        } catch is CancellationError {
+            guard isCurrentAppleRequest(generation) else {
+                return
+            }
+            pendingAppleTranslation = nil
+            isAppleTranslating = false
+            updateTranslationActivityState()
+        } catch {
+            reportAppleTranslationFailure(error, generation: generation)
+        }
+    }
+
+    func markAppleTranslationUnavailable(for generation: UInt) {
+        guard isCurrentAppleRequest(generation) else {
+            return
+        }
+        reportAppleTranslationFailure(
+            AppleDocumentTranslationError.operatingSystemUnsupported,
+            generation: generation
+        )
+    }
+
+    func reportAppleTranslationFailure(_ error: Error, generation: UInt) {
+        guard isCurrentAppleRequest(generation) else {
+            return
+        }
+
+        pendingAppleTranslation = nil
+        isAppleTranslating = false
+        appleErrorMessage = (error as? LocalizedError)?.errorDescription
+            ?? error.localizedDescription
+
+        if llmTranslatedText.isEmpty, !isLLMTranslating {
+            errorMessage = appleErrorMessage
+            statusMessage = "Apple 번역 실패"
+        } else if isLLMTranslating {
+            statusMessage = "Apple 번역에 실패했습니다. LLM 번역을 기다리는 중입니다."
+        }
+        updateTranslationActivityState()
+    }
+
+    func reportAppleTranslationResult(
+        _ output: String,
+        generation: UInt
+    ) {
+        guard isCurrentAppleRequest(generation) else {
+            return
+        }
+
+        pendingAppleTranslation = nil
+        isAppleTranslating = false
+        appleTranslatedText = output
+        appleErrorMessage = nil
+
+        if llmTranslatedText.isEmpty {
+            selectTranslationEngine(.apple)
+            statusMessage = isLLMTranslating
+                ? "Apple 번역 완료 · LLM 번역을 기다리는 중입니다."
+                : "Apple 번역 완료"
+        }
+        updateTranslationActivityState()
+    }
+
+    private func isCurrentAppleRequest(_ generation: UInt) -> Bool {
+        requestGeneration == generation
+            && pendingAppleTranslation?.generation == generation
     }
 
     private func nextRequestGeneration() -> UInt {
@@ -320,6 +587,11 @@ final class TranslationViewModel: ObservableObject {
         debouncedTranslationTask = nil
         activeTranslationTask?.cancel()
         activeTranslationTask = nil
+        pendingAppleTranslation = nil
+        appleRequestGeneration &+= 1
+        isAppleTranslating = false
+        isLLMTranslating = false
+        updateTranslationActivityState()
         requestGeneration &+= 1
         return requestGeneration
     }
@@ -330,7 +602,11 @@ final class TranslationViewModel: ObservableObject {
         activeTranslationTask?.cancel()
         activeTranslationTask = nil
         requestGeneration &+= 1
-        isTranslating = false
+        pendingAppleTranslation = nil
+        appleRequestGeneration &+= 1
+        isAppleTranslating = false
+        isLLMTranslating = false
+        updateTranslationActivityState()
     }
 
     private func isCurrentRequest(_ generation: UInt, expectedSourceText: String) -> Bool {
@@ -403,8 +679,11 @@ final class TranslationViewModel: ObservableObject {
             return
         }
 
+        let currentTranslation = translatedText
+        cancelPendingTranslation()
         swap(&sourceLanguage, &targetLanguage)
-        swap(&sourceText, &translatedText)
+        setSourceText(currentTranslation)
+        resetTranslationResults()
         sourceAttributedText = RichTextFormatting.plainAttributedString(sourceText)
     }
 
@@ -413,8 +692,10 @@ final class TranslationViewModel: ObservableObject {
             return
         }
 
-        setSourceText(translatedText)
-        translatedText = ""
+        let currentTranslation = translatedText
+        cancelPendingTranslation()
+        setSourceText(currentTranslation)
+        resetTranslationResults()
     }
 
     func beginScreenCaptureMock() {
