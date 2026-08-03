@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageOps
@@ -31,6 +32,11 @@ MENUBAR_SYMBOL_SIZE = 24
 POPCLIP_CANVAS_SIZE = 1024
 POPCLIP_SYMBOL_SIZE = 800
 SYMBOL_SAFE_AREA_INSET_RATIO = 0.10
+# Full-tile artwork usually fills most of its source canvas (the rounded
+# background is the alpha shape), while a supplied transparent logo keeps
+# intentional outer padding. Crop only the former so that transparent-logo
+# composition is preserved in the generated app icon.
+SOURCE_CROP_MIN_COVERAGE = 0.65
 
 
 def square_image(path: Path) -> Image.Image:
@@ -103,7 +109,12 @@ def make_app_icon() -> None:
     if bounds is None:
         raise ValueError("App icon source is fully transparent")
 
-    tile = source.crop(bounds)
+    bounds_area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
+    source_area = source.width * source.height
+    if bounds_area / source_area >= SOURCE_CROP_MIN_COVERAGE:
+        tile = source.crop(bounds)
+    else:
+        tile = source
     tile = ImageOps.contain(
         tile,
         (APP_ICON_CONTENT_SIZE, APP_ICON_CONTENT_SIZE),
@@ -210,11 +221,53 @@ def make_icns() -> None:
         (512, "icon_512x512.png"),
         (1024, "icon_512x512@2x.png"),
     ]
-    for pixel_size, filename in sizes:
-        source.resize((pixel_size, pixel_size), Image.Resampling.LANCZOS).save(ICONSET / filename)
+    try:
+        for pixel_size, filename in sizes:
+            source.resize((pixel_size, pixel_size), Image.Resampling.LANCZOS).save(
+                ICONSET / filename
+            )
 
-    subprocess.run(["iconutil", "-c", "icns", str(ICONSET), "-o", str(ICNS)], check=True)
-    shutil.rmtree(ICONSET)
+        try:
+            subprocess.run(
+                ["iconutil", "-c", "icns", str(ICONSET), "-o", str(ICNS)],
+                check=True,
+            )
+        except subprocess.CalledProcessError as iconutil_error:
+            # macOS 26's iconutil rejects otherwise valid PNG iconsets in some
+            # environments. Fall back to the system TIFF converter, which
+            # produces a valid ICNS while retaining the same artwork and alpha.
+            fallback_sizes = (16, 32, 48, 128, 256, 512, 1024)
+            with tempfile.TemporaryDirectory(prefix="kcdeepl-icon-") as temporary_dir:
+                tiff_path = Path(temporary_dir) / "AppIcon.tiff"
+                frames = [
+                    source.resize(
+                        (pixel_size, pixel_size), Image.Resampling.LANCZOS
+                    ).convert("RGBA")
+                    for pixel_size in fallback_sizes
+                ]
+                frames[0].save(
+                    tiff_path,
+                    save_all=True,
+                    append_images=frames[1:],
+                )
+                try:
+                    subprocess.run(
+                        ["tiff2icns", str(tiff_path), str(ICNS)],
+                        check=True,
+                    )
+                except (FileNotFoundError, subprocess.CalledProcessError) as fallback_error:
+                    raise RuntimeError(
+                        "Unable to create AppIcon.icns with iconutil or tiff2icns"
+                    ) from fallback_error
+            print(
+                "iconutil rejected the iconset; generated AppIcon.icns with tiff2icns"
+            )
+            if not ICNS.is_file() or ICNS.stat().st_size == 0:
+                raise RuntimeError(
+                    "tiff2icns did not produce a non-empty AppIcon.icns"
+                ) from iconutil_error
+    finally:
+        shutil.rmtree(ICONSET, ignore_errors=True)
 
 
 def validate_png(
