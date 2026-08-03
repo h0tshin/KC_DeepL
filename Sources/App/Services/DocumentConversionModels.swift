@@ -161,12 +161,97 @@ struct PDFSceneImage {
     let hasAlpha: Bool
     let maskApplied: Bool
     let isBackdropIndependent: Bool
+
+    /// Native image placement is safe only when it cannot alter pixels that
+    /// are already represented by the full-page visual safety net.  An opaque
+    /// image can be painted over its identical raster pixels; a transparent
+    /// or masked image would blend a second time and become too dark or leave
+    /// a mask edge in Word/PowerPoint.
+    var canOverlayOnPageSafetyNet: Bool {
+        isBackdropIndependent && !hasAlpha && !maskApplied
+    }
+}
+
+/// Controls the relationship between a native Office text box and the visual
+/// fallback image. `replaceSourcePaint` is used only after the extractor has
+/// verified that the source glyphs can be rebuilt safely; otherwise the image
+/// remains authoritative and the text is retained as non-destructive metadata
+/// in the scene/report rather than risking a blank patch.
+enum PDFSceneTextVisualPolicy: String, Sendable {
+    case replaceSourcePaint
+    case preserveSourcePaint
+}
+
+/// A run retains the formatting boundary that PDFKit exposed inside one visual
+/// PDF line. Office writers serialize every run separately instead of applying
+/// the first glyph's font to an entire paragraph.
+struct PDFSceneTextRun {
+    let text: String
+    let fontName: String
+    let fontSize: CGFloat
+    let color: PDFTextColor
+    let isBold: Bool
+    let isItalic: Bool
+
+    init(_ run: PDFTextRun) {
+        self.text = run.text
+        self.fontName = run.fontName
+        self.fontSize = run.fontSize
+        self.color = run.textColor
+        self.isBold = run.isBold
+        self.isItalic = run.isItalic
+    }
+}
+
+/// A visual source line contained in a single editable Office text box. The
+/// surrounding box groups paragraph-like lines without discarding their
+/// original line breaks, bounds, or styling.
+struct PDFSceneTextLine {
+    let id: String
+    let text: String
+    let bounds: CGRect
+    let runs: [PDFSceneTextRun]
+    let sourceMaskBounds: CGRect
+    let sourceMaskIsSafe: Bool
+    let extractionSource: PDFTextExtractionSource
+    /// Offset, in source points from `bounds.minX`, of a list item's text tab
+    /// stop. PDFKit commonly collapses a PDF list tab to a normal space; the
+    /// writers restore it as a native Office tab instead of letting the
+    /// substituted marker font shift all following text left.
+    let listTabStop: CGFloat?
+
+    init(
+        id: String,
+        text: String,
+        bounds: CGRect,
+        runs: [PDFSceneTextRun],
+        sourceMaskBounds: CGRect,
+        sourceMaskIsSafe: Bool,
+        extractionSource: PDFTextExtractionSource,
+        listTabStop: CGFloat? = nil
+    ) {
+        self.id = id
+        self.text = text
+        self.bounds = bounds
+        self.runs = runs
+        self.sourceMaskBounds = sourceMaskBounds
+        self.sourceMaskIsSafe = sourceMaskIsSafe
+        self.extractionSource = extractionSource
+        self.listTabStop = listTabStop
+    }
 }
 
 struct PDFSceneTextBox {
     let id: String
     let text: String
+    /// Tight union of the source PDF glyph bounds.  This remains the reference
+    /// rectangle for source-paint masking and for diagnostics.
     let bounds: CGRect
+    /// A target-layout rectangle derived from the resolved Office fonts.  PDF
+    /// glyph bounds are often tighter than Word/PowerPoint's logical advance
+    /// and side bearings, so writers use this rectangle to avoid clipping a
+    /// valid final character.  It never changes the source mask rectangle.
+    let layoutBounds: CGRect?
     let fontName: String
     let fontSize: CGFloat
     let color: PDFTextColor
@@ -174,6 +259,56 @@ struct PDFSceneTextBox {
     let lineCount: Int
     let sourceLineIDs: [String]
     let extractionSource: PDFTextExtractionSource
+    let lines: [PDFSceneTextLine]
+    let visualPolicy: PDFSceneTextVisualPolicy
+
+    init(
+        id: String,
+        text: String,
+        bounds: CGRect,
+        layoutBounds: CGRect? = nil,
+        fontName: String,
+        fontSize: CGFloat,
+        color: PDFTextColor,
+        alignment: PDFTextAlignment,
+        lineCount: Int,
+        sourceLineIDs: [String],
+        extractionSource: PDFTextExtractionSource,
+        lines: [PDFSceneTextLine],
+        visualPolicy: PDFSceneTextVisualPolicy
+    ) {
+        self.id = id
+        self.text = text
+        self.bounds = bounds
+        self.layoutBounds = layoutBounds
+        self.fontName = fontName
+        self.fontSize = fontSize
+        self.color = color
+        self.alignment = alignment
+        self.lineCount = lineCount
+        self.sourceLineIDs = sourceLineIDs
+        self.extractionSource = extractionSource
+        self.lines = lines
+        self.visualPolicy = visualPolicy
+    }
+
+    var officeBounds: CGRect { layoutBounds ?? bounds }
+
+    /// Insets that retain the original PDF text origin after `officeBounds`
+    /// gains room for font side bearings.  A left-aligned paragraph needs a
+    /// leading inset; a right-aligned paragraph needs the corresponding
+    /// trailing inset.  Centered text remains centered in the expanded box.
+    var officeLeadingInset: CGFloat {
+        alignment == .left
+            ? max(0, bounds.minX - officeBounds.minX)
+            : 0
+    }
+
+    var officeTrailingInset: CGFloat {
+        alignment == .right
+            ? max(0, officeBounds.maxX - bounds.maxX)
+            : 0
+    }
 }
 
 enum PDFSceneVectorKind: String, Codable, Sendable {
@@ -192,6 +327,15 @@ struct PDFSceneVector {
     let rotation: CGFloat
     let paintOrder: Int
     let nativeEligible: Bool
+
+    /// The page safety net already contains the source vector. Repainting an
+    /// opaque vector is stable, but repainting a translucent stroke/fill would
+    /// apply alpha blending twice. Keep those vectors in the visual fallback.
+    var canOverlayOnPageSafetyNet: Bool {
+        nativeEligible
+            && stroke.alpha >= 0.999
+            && (fill?.alpha ?? 1) >= 0.999
+    }
 }
 
 enum PDFSceneTemplateRole: String, Codable, Sendable {

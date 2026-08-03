@@ -252,6 +252,7 @@ struct PDFDocumentAnalysisService: Sendable {
 private extension PDFDocumentAnalysisService {
     struct TextCandidate {
         let text: String
+        let runs: [PDFTextRun]
         let bounds: CGRect
         let fontName: String
         let fontSize: CGFloat
@@ -261,6 +262,7 @@ private extension PDFDocumentAnalysisService {
         var columnIndex: Int = 0
         var backgroundColor: PDFTextColor = .white
         var sourceMaskBounds: CGRect?
+        var sourceMaskIsSafe = false
         var alignment: PDFTextAlignment?
     }
 
@@ -375,23 +377,14 @@ private extension PDFDocumentAnalysisService {
         }
         return visualSelections.compactMap {
             lineSelection -> TextCandidate? in
-            let text = Self.normalizedText(lineSelection.string ?? "")
-            guard !text.isEmpty else { return nil }
-
             let rawBounds = lineSelection.bounds(for: page)
             let bounds = rawBounds.intersection(cropBox)
             guard !bounds.isNull, bounds.width > 0.25, bounds.height > 0.25 else {
                 return nil
             }
-            guard !Self.isFreeTextAnnotationAppearance(
-                text: text,
-                bounds: bounds,
-                on: page
-            ) else {
-                return nil
-            }
 
-            let attributes = lineSelection.attributedString.flatMap {
+            let attributedString = lineSelection.attributedString
+            let attributes = attributedString.flatMap {
                 attributedString -> [NSAttributedString.Key: Any]? in
                 guard attributedString.length > 0 else { return nil }
                 return attributedString.attributes(at: 0, effectiveRange: nil)
@@ -399,30 +392,49 @@ private extension PDFDocumentAnalysisService {
             let font = attributes[.font] as? NSFont
             let color = attributes[.foregroundColor] as? NSColor
             let trustedTextColor = Self.uniformTextColor(
-                in: lineSelection.attributedString
+                in: attributedString
             )
             let paragraphStyle = attributes[.paragraphStyle] as? NSParagraphStyle
             let inferredFontSize = max(5, min(144, bounds.height * 0.78))
-            let resolvedFontSize = font?.pointSize ?? inferredFontSize
             let extractedFontName = font?.fontName
-            let resolvedFontName: String
-            if containsPrivateSystemFontResource,
-               Self.isPDFKitPrivateFontFallback(extractedFontName) {
-                // PDFKit reports Times New Roman when it cannot reconstruct an
-                // embedded private .SFNS font. Preserve that fact as a private
-                // name so composition chooses Barlow/Noto rather than serializing
-                // the unrelated Times fallback.
-                resolvedFontName = NSFont.systemFont(
-                    ofSize: resolvedFontSize
-                ).fontName
+            let useSystemFallback = containsPrivateSystemFontResource
+                && Self.isPDFKitPrivateFontFallback(extractedFontName)
+            let fallbackName = extractedFontName
+                ?? NSFont.systemFont(ofSize: inferredFontSize).fontName
+            let fallbackColor = trustedTextColor ?? Self.textColor(from: color)
+            let runs: [PDFTextRun]
+            if let attributedString {
+                runs = PDFOfficeTextAppearance.runs(
+                    from: attributedString,
+                    fallbackFontName: fallbackName,
+                    fallbackFontSize: inferredFontSize,
+                    fallbackColor: fallbackColor,
+                    forceSystemFallback: useSystemFallback
+                )
             } else {
-                resolvedFontName = extractedFontName
-                    ?? NSFont.systemFont(ofSize: inferredFontSize).fontName
+                runs = [
+                    PDFOfficeTextAppearance.run(
+                        text: Self.normalizedText(lineSelection.string ?? ""),
+                        fontName: fallbackName,
+                        fontSize: inferredFontSize,
+                        color: fallbackColor,
+                        forceSystemFallback: useSystemFallback
+                    )
+                ]
+            }
+            let text = runs.map(\.text).joined()
+            guard !text.isEmpty, let primaryRun = runs.first else { return nil }
+            guard !Self.isFreeTextAnnotationAppearance(
+                text: text,
+                bounds: bounds,
+                on: page
+            ) else {
+                return nil
             }
             guard !Self.isPreservedDocumentChrome(
                 text: text,
                 bounds: bounds,
-                fontSize: resolvedFontSize,
+                fontSize: primaryRun.fontSize,
                 pageBounds: cropBox
             ) else {
                 return nil
@@ -430,10 +442,11 @@ private extension PDFDocumentAnalysisService {
 
             return TextCandidate(
                 text: text,
+                runs: runs,
                 bounds: bounds,
-                fontName: resolvedFontName,
-                fontSize: resolvedFontSize,
-                textColor: trustedTextColor ?? Self.textColor(from: color),
+                fontName: primaryRun.fontName,
+                fontSize: primaryRun.fontSize,
+                textColor: fallbackColor,
                 foregroundColorIsTrusted: trustedTextColor != nil,
                 extractionSource: .native,
                 alignment: Self.textAlignment(from: paragraphStyle?.alignment)
@@ -598,11 +611,20 @@ private extension PDFDocumentAnalysisService {
             ) else {
                 continue
             }
+            let systemFontName = NSFont.systemFont(ofSize: fontSize).fontName
             candidates.append(
                 TextCandidate(
                     text: text,
+                    runs: [
+                        PDFOfficeTextAppearance.run(
+                            text: text,
+                            fontName: systemFontName,
+                            fontSize: fontSize,
+                            color: .black
+                        )
+                    ],
                     bounds: bounds,
-                    fontName: NSFont.systemFont(ofSize: fontSize).fontName,
+                    fontName: systemFontName,
                     fontSize: fontSize,
                     textColor: .black,
                     foregroundColorIsTrusted: false,
@@ -684,6 +706,8 @@ private extension PDFDocumentAnalysisService {
             var candidate = sourceCandidate
             candidate.backgroundColor = estimate.color
             candidate.sourceMaskBounds = estimate.maskBounds
+            candidate.sourceMaskIsSafe = !estimate.isComplex
+                && candidate.extractionSource == .native
             let outputIndex = candidates.count
             candidates.append(candidate)
             if estimate.isComplex {
@@ -1462,9 +1486,11 @@ private extension PDFDocumentAnalysisService {
             lines.append(PDFTextLine(
                 id: "pdf-line-\(Self.stableHash(stableSeed))",
                 text: candidate.text,
+                runs: candidate.runs,
                 bounds: candidate.bounds,
                 sourceMaskBounds: candidate.sourceMaskBounds
                     ?? candidate.bounds,
+                sourceMaskIsSafe: candidate.sourceMaskIsSafe,
                 fontName: candidate.fontName,
                 fontSize: candidate.fontSize,
                 textColor: candidate.textColor,
@@ -1560,8 +1586,10 @@ private extension PDFDocumentAnalysisService {
             return PDFTextLine(
                 id: line.id,
                 text: line.text,
+                runs: line.runs,
                 bounds: line.bounds,
                 sourceMaskBounds: line.sourceMaskBounds,
+                sourceMaskIsSafe: line.sourceMaskIsSafe,
                 fontName: line.fontName,
                 fontSize: line.fontSize,
                 textColor: line.textColor,

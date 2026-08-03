@@ -92,7 +92,12 @@ struct WordprocessingMLWriter {
         parts.append(try OOXMLPart(name: "word/styles.xml", xml: Self.stylesXML))
         parts.append(try OOXMLPart(name: "word/settings.xml", xml: Self.settingsXML))
         parts.append(try OOXMLPart(name: "word/theme/theme1.xml", xml: Self.themeXML))
-        parts.append(try OOXMLPart(name: "word/fontTable.xml", xml: Self.fontTableXML))
+        parts.append(
+            try OOXMLPart(
+                name: "word/fontTable.xml",
+                xml: fontTableXML(scene: scene)
+            )
+        )
         parts.append(try OOXMLPart(name: "docProps/core.xml", xml: Self.coreProperties))
         parts.append(try OOXMLPart(name: "docProps/app.xml", xml: Self.appProperties))
         parts.append(try OOXMLPart(name: "_rels/.rels", xml: Self.rootRelationships))
@@ -140,12 +145,12 @@ private extension WordprocessingMLWriter {
             case image(PDFSceneImage, String)
             case vector(PDFSceneVector)
         }
-        let overlays = page.images.map { image in
+        let overlays = page.images.filter(\.canOverlayOnPageSafetyNet).map { image in
             Overlay.image(
                 image,
                 imageRelationships.first(where: { $0.image.id == image.id })?.id ?? ""
             )
-        } + page.vectors.filter(\.nativeEligible).map(Overlay.vector)
+        } + page.vectors.filter(\.canOverlayOnPageSafetyNet).map(Overlay.vector)
         func overlaySortKey(_ overlay: Overlay) -> (order: Int, kind: Int, id: String) {
             switch overlay {
             case let .image(image, _):
@@ -180,11 +185,13 @@ private extension WordprocessingMLWriter {
                 break
             }
         }
-        for textBox in page.textBoxes {
-            let x = emu((textBox.bounds.minX - page.cropBox.minX) * geometry.scale)
-            let y = emu((page.height - (textBox.bounds.maxY - page.cropBox.minY)) * geometry.scale)
-            let width = emu(max(1, textBox.bounds.width * geometry.scale))
-            let height = emu(max(1, textBox.bounds.height * geometry.scale))
+        for textBox in page.textBoxes
+        where textBox.visualPolicy == .replaceSourcePaint {
+            let bounds = textBox.officeBounds
+            let x = emu((bounds.minX - page.cropBox.minX) * geometry.scale)
+            let y = emu((page.height - (bounds.maxY - page.cropBox.minY)) * geometry.scale)
+            let width = emu(max(1, bounds.width * geometry.scale))
+            let height = emu(max(1, bounds.height * geometry.scale))
             result += "<w:r><w:drawing>\(textAnchor(textBox: textBox, x: x, y: y, width: width, height: height, docPrID: nextDocPrID))</w:drawing></w:r>"
             nextDocPrID += 1
         }
@@ -203,7 +210,11 @@ private extension WordprocessingMLWriter {
             y: 0,
             width: extent.cx,
             height: extent.cy,
-            relativeHeight: docPrID,
+            // Keep the page raster at the bottom of Word's drawing layer.
+            // Some Office renderers otherwise use the XML insertion order for
+            // transparent PNG pixels and allow an opaque source mask to cover
+            // a later textbox despite `behindDoc` being set.
+            relativeHeight: 0,
             behindDocument: true,
             locked: true
         ) + """
@@ -229,7 +240,7 @@ private extension WordprocessingMLWriter {
             y: y,
             width: width,
             height: height,
-            relativeHeight: docPrID,
+            relativeHeight: 1_000_000 + docPrID,
             behindDocument: false
         ) + "<wp:docPr id=\"\(docPrID)\" name=\"PDF \(vector.kind.rawValue) \(docPrID)\"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect=\"1\"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">\(shape)</a:graphicData></a:graphic></wp:anchor>"
     }
@@ -242,15 +253,17 @@ private extension WordprocessingMLWriter {
         height: Int,
         docPrID: Int
     ) -> String {
+        let leadingInset = emu(textBox.officeLeadingInset)
+        let trailingInset = emu(textBox.officeTrailingInset)
         let shape = """
-        <wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(width)" cy="\(height)"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>\(textBoxContent(textBox))</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz" wrap="square" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t"><a:noAutofit/></wps:bodyPr></wps:wsp>
+        <wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(width)" cy="\(height)"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>\(textBoxContent(textBox))</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz" wrap="none" lIns="\(leadingInset)" tIns="0" rIns="\(trailingInset)" bIns="0" anchor="t"><a:noAutofit/></wps:bodyPr></wps:wsp>
         """
         return anchorPrefix(
             x: x,
             y: y,
             width: width,
             height: height,
-            relativeHeight: docPrID,
+            relativeHeight: 1_000_000 + docPrID,
             behindDocument: false
         ) + "<wp:docPr id=\"\(docPrID)\" name=\"Text \(docPrID)\"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect=\"1\"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">\(shape)</a:graphicData></a:graphic></wp:anchor>"
     }
@@ -287,18 +300,135 @@ private extension WordprocessingMLWriter {
     }
 
     func textBoxContent(_ textBox: PDFSceneTextBox) -> String {
-        let color = rgbHex(textBox.color)
-        let fontSize = max(2, min(144, Int((textBox.fontSize * 2).rounded())))
         let alignment: String
         switch textBox.alignment {
         case .left: alignment = "left"
         case .center: alignment = "center"
         case .right: alignment = "right"
         }
-        let paragraphs = textBox.text.split(separator: "\n", omittingEmptySubsequences: false).map { line in
-            "<w:p><w:pPr><w:jc w:val=\"\(alignment)\"/><w:spacing w:line=\"240\" w:lineRule=\"auto\"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii=\"\(XMLValue.attribute(textBox.fontName))\" w:hAnsi=\"\(XMLValue.attribute(textBox.fontName))\" w:eastAsia=\"\(XMLValue.attribute(textBox.fontName))\" w:cs=\"\(XMLValue.attribute(textBox.fontName))\"/><w:sz w:val=\"\(fontSize)\"/><w:szCs w:val=\"\(fontSize)\"/><w:color w:val=\"\(color)\"/></w:rPr><w:t xml:space=\"preserve\">\(XMLValue.escape(String(line), preserveWhitespace: true))</w:t></w:r></w:p>"
+        let lines = textBox.lines.isEmpty
+            ? [
+                PDFSceneTextLine(
+                    id: textBox.id,
+                    text: textBox.text,
+                    bounds: textBox.bounds,
+                    runs: [
+                        PDFSceneTextRun(
+                            PDFTextRun(
+                                text: textBox.text,
+                                fontName: textBox.fontName,
+                                fontSize: textBox.fontSize,
+                                textColor: textBox.color,
+                                isOfficeCompatible: true
+                            )
+                        )
+                    ],
+                    sourceMaskBounds: textBox.bounds,
+                    sourceMaskIsSafe: true,
+                    extractionSource: textBox.extractionSource
+                )
+            ]
+            : textBox.lines
+        return lines.enumerated().map { index, line in
+            let nextLine = index + 1 < lines.count ? lines[index + 1] : nil
+            let spacing = lineSpacingTwips(
+                for: line,
+                nextLine: nextLine
+            )
+            let tabs = wordTabStops(for: line, in: textBox)
+            let runs = line.runs.isEmpty
+                ? wordRun(
+                    PDFSceneTextRun(
+                        PDFTextRun(
+                            text: line.text,
+                            fontName: textBox.fontName,
+                            fontSize: textBox.fontSize,
+                            textColor: textBox.color,
+                            isOfficeCompatible: true
+                        )
+                    )
+                )
+                : line.runs.map(wordRun).joined()
+            return "<w:p><w:pPr>\(tabs)<w:spacing w:before=\"0\" w:after=\"0\" w:line=\"\(spacing)\" w:lineRule=\"atLeast\"/><w:jc w:val=\"\(alignment)\"/></w:pPr>\(runs)</w:p>"
         }.joined()
-        return paragraphs
+    }
+
+    func wordRun(_ run: PDFSceneTextRun) -> String {
+        let color = rgbHex(run.color)
+        let fontSize = max(2, min(144, Int((run.fontSize * 2).rounded())))
+        let bold = run.isBold ? "<w:b/><w:bCs/>" : ""
+        let italic = run.isItalic ? "<w:i/><w:iCs/>" : ""
+        return "<w:r><w:rPr><w:rFonts w:ascii=\"\(XMLValue.attribute(run.fontName))\" w:hAnsi=\"\(XMLValue.attribute(run.fontName))\" w:eastAsia=\"\(XMLValue.attribute(run.fontName))\" w:cs=\"\(XMLValue.attribute(run.fontName))\"/><w:sz w:val=\"\(fontSize)\"/><w:szCs w:val=\"\(fontSize)\"/><w:color w:val=\"\(color)\"/>\(bold)\(italic)</w:rPr>\(wordTextElements(run.text))</w:r>"
+    }
+
+    func wordTabStops(
+        for line: PDFSceneTextLine,
+        in textBox: PDFSceneTextBox
+    ) -> String {
+        guard let sourceOffset = line.listTabStop else { return "" }
+        let relativeOffset = max(
+            0.5,
+            line.bounds.minX + sourceOffset - textBox.bounds.minX
+        )
+        let position = max(1, Int((relativeOffset * twipsPerPoint).rounded()))
+        return "<w:tabs><w:tab w:val=\"left\" w:pos=\"\(position)\"/></w:tabs>"
+    }
+
+    func wordTextElements(_ text: String) -> String {
+        var elements = ""
+        var fragment = ""
+        func appendFragment() {
+            guard !fragment.isEmpty else { return }
+            elements += "<w:t xml:space=\"preserve\">\(XMLValue.escape(fragment, preserveWhitespace: true))</w:t>"
+            fragment.removeAll(keepingCapacity: true)
+        }
+        for character in text {
+            if character == "\t" {
+                appendFragment()
+                elements += "<w:tab/>"
+            } else {
+                fragment.append(character)
+            }
+        }
+        appendFragment()
+        return elements
+    }
+
+    func lineSpacingTwips(
+        for line: PDFSceneTextLine,
+        nextLine: PDFSceneTextLine?
+    ) -> Int {
+        let sourceAdvance = nextLine.map {
+            max(0, line.bounds.minY - $0.bounds.minY)
+        } ?? 0
+        let fontHeight = line.runs.map(\.fontSize).max() ?? line.bounds.height
+        let points = max(line.bounds.height, fontHeight * 1.05, sourceAdvance)
+        return max(1, Int((points * twipsPerPoint).rounded()))
+    }
+
+    func fontTableXML(scene: PDFSceneDocument) -> String {
+        let fonts = Set(
+            scene.pages.flatMap { page in
+                page.textBoxes.flatMap { textBox in
+                    textBox.lines.flatMap(\.runs).map(\.fontName)
+                }
+            }
+        ).union(["Arial"])
+        let body = fonts.sorted().map { fontName in
+            "<w:font w:name=\"\(XMLValue.attribute(fontName))\"><w:family w:val=\"\(fontFamily(for: fontName))\"/><w:charset w:val=\"00\"/></w:font>"
+        }.joined()
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:fonts xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(body)</w:fonts>"
+    }
+
+    func fontFamily(for fontName: String) -> String {
+        let normalized = fontName.lowercased()
+        if normalized.contains("courier") || normalized.contains("mono") {
+            return "modern"
+        }
+        if normalized.contains("times") || normalized.contains("serif") || normalized.contains("cambria") {
+            return "roman"
+        }
+        return "swiss"
     }
 
     func sectionProperties(for geometry: WordPageGeometry) -> String {
@@ -353,7 +483,6 @@ private extension WordprocessingMLWriter {
 
     static let stylesXML = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\" w:eastAsia=\"Arial\" w:cs=\"Arial\"/><w:lang w:val=\"en-US\"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after=\"0\" w:line=\"1\" w:lineRule=\"exact\"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/><w:qFormat/></w:style></w:styles>"
     static let settingsXML = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:settings xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:zoom w:percent=\"100\"/><w:doNotTrackFormatting/><w:compat><w:compatSetting w:name=\"compatibilityMode\" w:uri=\"http://schemas.microsoft.com/office/word\" w:val=\"15\"/></w:compat></w:settings>"
-    static let fontTableXML = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:fonts xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:font w:name=\"Arial\"><w:family w:val=\"swiss\"/><w:charset w:val=\"00\"/></w:font></w:fonts>"
     static let themeXML = """
     <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="KC DeepL"><a:themeElements><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="1F2937"/></a:dk2><a:lt2><a:srgbClr val="F3F4F6"/></a:lt2><a:accent1><a:srgbClr val="2563EB"/></a:accent1><a:accent2><a:srgbClr val="7C3AED"/></a:accent2><a:accent3><a:srgbClr val="059669"/></a:accent3><a:accent4><a:srgbClr val="D97706"/></a:accent4><a:accent5><a:srgbClr val="DC2626"/></a:accent5><a:accent6><a:srgbClr val="0891B2"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Aptos Display"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Aptos"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Office"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>

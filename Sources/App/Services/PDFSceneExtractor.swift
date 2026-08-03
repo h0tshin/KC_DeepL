@@ -7,8 +7,8 @@ import PDFKit
 
 /// Native macOS PDF scene extractor. PDFKit supplies reliable text geometry
 /// while Core Graphics supplies page rendering, resource/image inspection and
-/// a conservative path trace. Unsupported compositing remains in the page
-/// RGBA island instead of being silently discarded.
+/// a conservative path trace. Unsupported compositing remains in the opaque
+/// page safety net instead of being silently discarded or blended twice.
 struct PDFSceneExtractor {
     let maximumRasterDimension: CGFloat
 
@@ -57,7 +57,14 @@ struct PDFSceneExtractor {
             let cropBox = page.bounds(for: .cropBox)
             let pageAnalysis = analysis?.pages[safe: pageIndex]
             let textBoxes = Self.textBoxes(from: pageAnalysis)
-            let masks = pageAnalysis?.lines.map {
+            let replacementLineIDs = Set(
+                textBoxes
+                    .filter { $0.visualPolicy == .replaceSourcePaint }
+                    .flatMap(\.sourceLineIDs)
+            )
+            let masks = pageAnalysis?.lines.filter {
+                replacementLineIDs.contains($0.id)
+            }.map {
                 ($0.sourceMaskBounds, $0.backgroundColor)
             } ?? []
             let imageData = try renderPage(
@@ -74,17 +81,25 @@ struct PDFSceneExtractor {
             )
 
             var pageWarnings = pageAnalysis?.warnings.map(\.message) ?? []
+            let preservedTextBoxCount = textBoxes.filter {
+                $0.visualPolicy == .preserveSourcePaint
+            }.count
+            if preservedTextBoxCount > 0 {
+                pageWarnings.append(
+                    "\(preservedTextBoxCount)개 텍스트 상자는 글꼴·배경·OCR 안전성 검증을 통과하지 않아 원본 페이지 이미지를 보존했습니다."
+                )
+            }
             if pageAnalysis == nil {
-                pageWarnings.append("PDFKit 텍스트 분석을 사용할 수 없어 페이지를 원본 RGBA 섬으로 보존했습니다.")
+                pageWarnings.append("PDFKit 텍스트 분석을 사용할 수 없어 페이지 래스터 안전망을 보존했습니다.")
             }
             if imageSummary.imageOccurrenceCount > 0 {
                 pageWarnings.append(
-                    "페이지의 \(imageSummary.imageOccurrenceCount)개 이미지 occurrence를 검사했습니다. \(imageSummary.extractedImageCount)개는 RGBA PNG asset으로 추출했고, 복합 alpha/마스크 합성은 페이지 RGBA 섬으로 함께 보존했습니다."
+                    "페이지의 \(imageSummary.imageOccurrenceCount)개 이미지 occurrence를 검사했습니다. \(imageSummary.extractedImageCount)개는 PNG asset으로 추출했고, 복합 alpha/마스크 합성은 페이지 래스터 안전망으로 함께 보존했습니다."
                 )
             }
             if graphics.vectors.isEmpty == false {
                 pageWarnings.append(
-                    "\(graphics.vectors.count)개 PDF 경로를 추적했습니다. 네이티브로 복원되지 않은 합성은 페이지 RGBA 섬을 기준으로 보존했습니다."
+                    "\(graphics.vectors.count)개 PDF 경로를 추적했습니다. 네이티브로 복원되지 않은 합성은 페이지 래스터 안전망을 기준으로 보존했습니다."
                 )
             }
 
@@ -130,7 +145,7 @@ struct PDFSceneExtractor {
 private extension PDFSceneExtractor {
     static func textBoxes(from page: PDFPageAnalysis?) -> [PDFSceneTextBox] {
         guard let page else { return [] }
-        return page.blocks.compactMap { block in
+        return page.blocks.compactMap { block -> PDFSceneTextBox? in
             let lines = block.lineIDs.compactMap { id in
                 page.lines.first(where: { $0.id == id })
             }
@@ -139,19 +154,65 @@ private extension PDFSceneExtractor {
             else {
                 return nil
             }
+            let sceneLines = lines.enumerated().map { index, line in
+                let sourceRuns = line.runs.isEmpty
+                    ? [
+                        PDFTextRun(
+                            text: line.text,
+                            fontName: line.fontName,
+                            fontSize: line.fontSize,
+                            textColor: line.textColor,
+                            isOfficeCompatible: false
+                        )
+                    ]
+                    : line.runs
+                let listTabStop = PDFOfficeTextAppearance.listTabStop(
+                    for: line,
+                    continuations: Array(lines.dropFirst(index + 1))
+                )
+                let officeRuns = listTabStop.map { _ in
+                    PDFOfficeTextAppearance.runsReplacingListWhitespace(sourceRuns)
+                } ?? sourceRuns
+                let usesListTab = officeRuns.contains { $0.text == "\t" }
+                return PDFSceneTextLine(
+                    id: line.id,
+                    text: line.text,
+                    bounds: line.bounds,
+                    runs: officeRuns.map(PDFSceneTextRun.init),
+                    sourceMaskBounds: line.sourceMaskBounds,
+                    sourceMaskIsSafe: line.sourceMaskIsSafe,
+                    extractionSource: line.extractionSource,
+                    listTabStop: usesListTab ? listTabStop : nil
+                )
+            }
+            let primaryRun = sceneLines.first?.runs.first
+            let layoutBounds = PDFOfficeTextAppearance.officeLayoutBounds(
+                for: lines,
+                sourceBounds: block.bounds,
+                alignment: firstLine.alignment,
+                cropBox: page.cropBox
+            )
             return PDFSceneTextBox(
                 id: block.id,
-                text: block.text,
+                // Preserve visual PDF lines inside a single Office text box.
+                // Joining with spaces here was the primary cause of changed
+                // wrapping, clipped tails, and font substitutions in DOCX.
+                text: lines.map(\.text).joined(separator: "\n"),
                 bounds: block.bounds,
-                fontName: firstLine.fontName,
-                fontSize: max(5, firstLine.fontSize),
-                color: firstLine.textColor,
+                layoutBounds: layoutBounds,
+                fontName: primaryRun?.fontName ?? firstLine.fontName,
+                fontSize: max(5, primaryRun?.fontSize ?? firstLine.fontSize),
+                color: primaryRun?.color ?? firstLine.textColor,
                 alignment: firstLine.alignment,
                 lineCount: lines.count,
                 sourceLineIDs: block.lineIDs,
                 extractionSource: lines.contains(where: {
                     $0.extractionSource == .visionOCR
-                }) ? .visionOCR : .native
+                }) ? .visionOCR : .native,
+                lines: sceneLines,
+                visualPolicy: PDFOfficeTextAppearance.canReplaceSourcePaint(
+                    lines: lines
+                ) ? .replaceSourcePaint : .preserveSourcePaint
             )
         }
     }
@@ -180,41 +241,85 @@ private extension PDFSceneExtractor {
         ) else {
             throw DocumentConversionError.packageWriteFailed("페이지 렌더 컨텍스트를 만들 수 없습니다.")
         }
-        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        // An Office document page is an opaque visual canvas. Keeping this
+        // fallback page image transparent looks equivalent in a PDF viewer,
+        // but Word/LibreOffice re-encode its soft mask and can expose erased
+        // text rectangles as faint seams. Flatten only this visual safety-net
+        // against the page canvas; extracted image assets retain alpha/masks.
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.saveGState()
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: scale, y: -scale)
+        // A bitmap CGContext and PDF page both use a bottom-left coordinate
+        // system here.  Flipping it before PDFKit draws the page mirrors the
+        // raster vertically; that error is hidden on text-only pages once
+        // masks are applied, but corrupts images, watermarks and any unmasked
+        // fallback content.  Keep the native orientation and transform only
+        // for scale/crop.
+        context.scaleBy(x: scale, y: scale)
         context.translateBy(x: -cropBox.minX, y: -cropBox.minY)
         page.draw(with: .cropBox, to: context)
         context.restoreGState()
 
-        // Cover original glyph paint only where PDFKit was able to estimate a
-        // stable backdrop. This lets the editable text box be visible without
-        // pretending that a gradient or transparency group is a solid fill.
-        for (optionalBounds, color) in masks {
+        // Replace original glyph paint only where PDFKit was able to estimate
+        // a stable backdrop.  The final compositing color is sampled from the
+        // actual RGBA page render, not from the opaque analysis bitmap.  That
+        // distinction matters for a PDF with a transparent page canvas: an
+        // opaque white mask leaves visible seams after Office scales the PNG.
+        for (optionalBounds, fallbackColor) in masks {
             guard let bounds = optionalBounds,
                   !bounds.isNull,
                   bounds.width > 0,
                   bounds.height > 0
             else { continue }
-            let pixelRect = CGRect(
+            let rawPixelRect = CGRect(
                 x: (bounds.minX - cropBox.minX) * scale,
-                y: (cropBox.maxY - bounds.maxY) * scale,
+                y: (bounds.minY - cropBox.minY) * scale,
                 width: bounds.width * scale,
                 height: bounds.height * scale
             )
+            let pagePixels = CGRect(x: 0, y: 0, width: width, height: height)
+            // PDF selection rectangles can end on a glyph's antialiased top
+            // or bottom pixel.  Clear one *raster* pixel beyond the verified
+            // source mask so that a surviving antialias fringe cannot appear
+            // as a faint line under the editable Office text.  Keeping this
+            // in pixel space makes the bleed smaller at higher render scales
+            // and avoids a page-unit heuristic that could eat nearby artwork.
+            let pixelRect = rawPixelRect
+                .insetBy(dx: -1, dy: -1)
+                .integral
+                .intersection(pagePixels)
+            guard !pixelRect.isNull,
+                  pixelRect.width > 0,
+                  pixelRect.height > 0
+            else { continue }
+
+            let background = renderedBackdropColor(
+                in: context,
+                near: pixelRect
+            ) ?? fallbackColor
+            context.saveGState()
+            context.setShouldAntialias(false)
+            // Source-over cannot restore a sampled backdrop after text glyphs
+            // were already drawn. Copy the rendered colour exactly. The page
+            // safety-net is intentionally opaque so a source-mask edge stays
+            // invisible to Office's PNG importer.
+            context.setBlendMode(.copy)
             context.setFillColor(
                 CGColor(
-                    red: color.red,
-                    green: color.green,
-                    blue: color.blue,
+                    red: background.red,
+                    green: background.green,
+                    blue: background.blue,
                     alpha: 1
                 )
             )
             context.fill(pixelRect)
+            context.restoreGState()
         }
 
-        guard let image = context.makeImage() else {
+        guard let image = makeOpaquePagePNGImage(
+            from: context,
+            colorSpace: colorSpace
+        ) ?? context.makeImage() else {
             throw DocumentConversionError.packageWriteFailed("페이지 이미지를 생성하지 못했습니다.")
         }
         let output = NSMutableData()
@@ -233,6 +338,161 @@ private extension PDFSceneExtractor {
             throw DocumentConversionError.packageWriteFailed("PNG 인코딩에 실패했습니다.")
         }
         return output as Data
+    }
+
+    /// Creates an opaque RGB page image for Office. PDF pages may begin with
+    /// transparent pixels, but DOCX/PPTX pages are displayed on an opaque
+    /// canvas. Serializing the fallback as RGBA makes some Office renderers
+    /// resample its soft mask separately from colour data, revealing source
+    /// mask seams. Native images with alpha remain separate PNG assets; this
+    /// affects only the full-page visual safety net.
+    func makeOpaquePagePNGImage(
+        from context: CGContext,
+        colorSpace: CGColorSpace
+    ) -> CGImage? {
+        guard context.bitsPerComponent == 8,
+              context.bytesPerRow >= context.width * 4,
+              let source = context.data
+        else {
+            return nil
+        }
+        let byteCount = context.bytesPerRow * context.height
+        var opaquePixels = Data(count: byteCount)
+        let sourcePixels = source.assumingMemoryBound(to: UInt8.self)
+        opaquePixels.withUnsafeMutableBytes { destination in
+            guard let destinationPixels = destination.baseAddress?
+                .assumingMemoryBound(to: UInt8.self)
+            else { return }
+            for y in 0..<context.height {
+                for x in 0..<context.width {
+                    let offset = y * context.bytesPerRow + x * 4
+                    let alpha = sourcePixels[offset + 3]
+                    if alpha == 0 {
+                        destinationPixels[offset] = 255
+                        destinationPixels[offset + 1] = 255
+                        destinationPixels[offset + 2] = 255
+                    } else {
+                        // The context starts from opaque white, so alpha is
+                        // expected to be one. Retain a defensive unpremultiply
+                        // path for malformed PDF blend state.
+                        let multiplier = 255.0 / Double(alpha)
+                        destinationPixels[offset] = UInt8(min(
+                            255,
+                            Int((Double(sourcePixels[offset]) * multiplier).rounded())
+                        ))
+                        destinationPixels[offset + 1] = UInt8(min(
+                            255,
+                            Int((Double(sourcePixels[offset + 1]) * multiplier).rounded())
+                        ))
+                        destinationPixels[offset + 2] = UInt8(min(
+                            255,
+                            Int((Double(sourcePixels[offset + 2]) * multiplier).rounded())
+                        ))
+                    }
+                    destinationPixels[offset + 3] = 255
+                }
+            }
+        }
+        guard let provider = CGDataProvider(data: opaquePixels as CFData) else {
+            return nil
+        }
+        return CGImage(
+            width: context.width,
+            height: context.height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: context.bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGBitmapInfo(
+                rawValue: CGImageAlphaInfo.noneSkipLast.rawValue
+                    | CGBitmapInfo.byteOrder32Big.rawValue
+            ),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    }
+
+    /// Finds the dominant rendered pixel in a source-mask rectangle. The
+    /// analysis service uses an independent bitmap while judging background
+    /// complexity; this helper samples the final Office page compositor so
+    /// replacement paint exactly matches its flattened visual backdrop.
+    func renderedBackdropColor(
+        in context: CGContext,
+        near pixelRect: CGRect
+    ) -> PDFTextColor? {
+        guard context.bitsPerComponent == 8,
+              context.bytesPerRow >= context.width * 4,
+              let data = context.data
+        else {
+            return nil
+        }
+
+        let minimumX = max(0, Int(pixelRect.minX.rounded(.down)))
+        let maximumX = min(context.width - 1, Int(pixelRect.maxX.rounded(.up)) - 1)
+        let minimumY = max(0, Int(pixelRect.minY.rounded(.down)))
+        let maximumY = min(context.height - 1, Int(pixelRect.maxY.rounded(.up)) - 1)
+        guard minimumX <= maximumX, minimumY <= maximumY else { return nil }
+
+        let pixelCount = (maximumX - minimumX + 1) * (maximumY - minimumY + 1)
+        let sampleStride = max(1, Int(sqrt(Double(pixelCount) / 4_096.0)))
+        var frequencies: [RGBABin: Int] = [:]
+
+        for y in stride(from: minimumY, through: maximumY, by: sampleStride) {
+            for x in stride(from: minimumX, through: maximumX, by: sampleStride) {
+                let offset = y * context.bytesPerRow + x * 4
+                let pixel = data.assumingMemoryBound(to: UInt8.self)
+                    .advanced(by: offset)
+                let alpha = CGFloat(pixel[3]) / 255.0
+                let divisor = max(alpha, 1.0 / 255.0)
+                let red = alpha <= 1.0 / 255.0
+                    ? 0
+                    : min(1, CGFloat(pixel[0]) / 255.0 / divisor)
+                let green = alpha <= 1.0 / 255.0
+                    ? 0
+                    : min(1, CGFloat(pixel[1]) / 255.0 / divisor)
+                let blue = alpha <= 1.0 / 255.0
+                    ? 0
+                    : min(1, CGFloat(pixel[2]) / 255.0 / divisor)
+                frequencies[RGBABin(
+                    red: red,
+                    green: green,
+                    blue: blue,
+                    alpha: alpha
+                ), default: 0] += 1
+            }
+        }
+
+        guard let dominant = frequencies.max(by: { $0.value < $1.value })?.key
+        else { return nil }
+        return dominant.color
+    }
+
+    struct RGBABin: Hashable {
+        let red: Int
+        let green: Int
+        let blue: Int
+        let alpha: Int
+
+        init(red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) {
+            func quantize(_ value: CGFloat) -> Int {
+                Int((max(0, min(1, value)) * 31).rounded())
+            }
+            self.red = quantize(red)
+            self.green = quantize(green)
+            self.blue = quantize(blue)
+            self.alpha = quantize(alpha)
+        }
+
+        var color: PDFTextColor {
+            PDFTextColor(
+                red: CGFloat(red) / 31.0,
+                green: CGFloat(green) / 31.0,
+                blue: CGFloat(blue) / 31.0,
+                alpha: CGFloat(alpha) / 31.0
+            )
+        }
     }
 
     static func dictionary(

@@ -24,6 +24,42 @@ struct PDFTextColor: Equatable, Sendable {
     static let white = PDFTextColor(red: 1, green: 1, blue: 1, alpha: 1)
 }
 
+/// A contiguous character range with the visual appearance reported by
+/// PDFKit. A PDF selection may contain several font resources (for example a
+/// Symbol-font bullet followed by an Arial sentence), so treating the first
+/// character's font as the font for the whole line is not safe.
+struct PDFTextRun: Equatable, Sendable {
+    let text: String
+    /// An Office-compatible font family name, never an opaque PDF resource or
+    /// PostScript identifier such as `ArialMT`.
+    let fontName: String
+    let fontSize: CGFloat
+    let textColor: PDFTextColor
+    let isBold: Bool
+    let isItalic: Bool
+    /// `false` means that the run remains extractable, but its source paint
+    /// must remain in the raster backdrop to avoid a destructive replacement.
+    let isOfficeCompatible: Bool
+
+    init(
+        text: String,
+        fontName: String,
+        fontSize: CGFloat,
+        textColor: PDFTextColor,
+        isBold: Bool = false,
+        isItalic: Bool = false,
+        isOfficeCompatible: Bool = false
+    ) {
+        self.text = text
+        self.fontName = fontName
+        self.fontSize = fontSize
+        self.textColor = textColor
+        self.isBold = isBold
+        self.isItalic = isItalic
+        self.isOfficeCompatible = isOfficeCompatible
+    }
+}
+
 /// Shared source-mask and translation-annotation geometry. The horizontal
 /// padding covers PDF text antialiasing; vertical expansion is intentionally
 /// avoided because many slide PDFs align text boxes directly to a coloured
@@ -43,8 +79,13 @@ enum PDFOverlayGeometry {
 struct PDFTextLine: Identifiable, Equatable, Sendable {
     let id: String
     let text: String
+    let runs: [PDFTextRun]
     let bounds: CGRect
     let sourceMaskBounds: CGRect
+    /// Background sampling verified that this native line can be removed from
+    /// the visual safety-net image. This is deliberately separate from
+    /// extractability: OCR and complex backgrounds are never safe to erase.
+    let sourceMaskIsSafe: Bool
     let fontName: String
     let fontSize: CGFloat
     let textColor: PDFTextColor
@@ -53,6 +94,38 @@ struct PDFTextLine: Identifiable, Equatable, Sendable {
     let readingOrder: Int
     let columnIndex: Int
     let extractionSource: PDFTextExtractionSource
+
+    init(
+        id: String,
+        text: String,
+        runs: [PDFTextRun] = [],
+        bounds: CGRect,
+        sourceMaskBounds: CGRect,
+        sourceMaskIsSafe: Bool = false,
+        fontName: String,
+        fontSize: CGFloat,
+        textColor: PDFTextColor,
+        backgroundColor: PDFTextColor,
+        alignment: PDFTextAlignment,
+        readingOrder: Int,
+        columnIndex: Int,
+        extractionSource: PDFTextExtractionSource
+    ) {
+        self.id = id
+        self.text = text
+        self.runs = runs
+        self.bounds = bounds
+        self.sourceMaskBounds = sourceMaskBounds
+        self.sourceMaskIsSafe = sourceMaskIsSafe
+        self.fontName = fontName
+        self.fontSize = fontSize
+        self.textColor = textColor
+        self.backgroundColor = backgroundColor
+        self.alignment = alignment
+        self.readingOrder = readingOrder
+        self.columnIndex = columnIndex
+        self.extractionSource = extractionSource
+    }
 }
 
 /// A conservative paragraph-like grouping of adjacent lines in the same column.

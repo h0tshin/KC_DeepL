@@ -66,7 +66,14 @@ struct PresentationMLWriter {
             )
         }
 
-        let slideIDs = scene.pages.map { "<p:sldId id=\"\(256 + $0.pageIndex)\" r:id=\"rId\($0.pageIndex + 3)\"/>" }.joined()
+        // rId1...rId4 are reserved by the presentation itself (master,
+        // presProps, viewProps and tableStyles).  Starting slide relationships
+        // at rId3 produced duplicate relationship IDs in multi-page PPTX
+        // files, which PowerPoint/LibreOffice correctly reject.
+        let firstSlideRelationshipID = 5
+        let slideIDs = scene.pages.map {
+            "<p:sldId id=\"\(256 + $0.pageIndex)\" r:id=\"rId\($0.pageIndex + firstSlideRelationshipID)\"/>"
+        }.joined()
         let presentationXML = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldMasterIdLst><p:sldMasterId id="1" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst>\(slideIDs)</p:sldIdLst><p:sldSz cx="\(slideWidth)" cy="\(slideHeight)" type="custom"/><p:notesSz cx="\(slideWidth)" cy="\(slideHeight)"/><p:defaultTextStyle><a:defPPr><a:defRPr lang="en-US"/></a:defPPr></p:defaultTextStyle></p:presentation>
@@ -98,7 +105,7 @@ struct PresentationMLWriter {
         for page in scene.pages {
             presentationRels.append(
                 (
-                    "rId\(page.pageIndex + 3)",
+                    "rId\(page.pageIndex + firstSlideRelationshipID)",
                     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide",
                     "slides/slide\(page.pageIndex + 1).xml"
                 )
@@ -169,7 +176,9 @@ private extension PresentationMLWriter {
     ) -> String {
         let pageOffsetX: CGFloat = 0
         let pageOffsetY: CGFloat = canvasHeight - page.height
-        let nativeVectors = page.vectors.filter(\.nativeEligible).sorted { $0.paintOrder < $1.paintOrder }
+        let nativeVectors = page.vectors
+            .filter(\.canOverlayOnPageSafetyNet)
+            .sorted { $0.paintOrder < $1.paintOrder }
         var shapeID = 3
         let imageX = emu(pageOffsetX)
         let imageY = emu(pageOffsetY)
@@ -182,7 +191,7 @@ private extension PresentationMLWriter {
             case image(PDFSceneImage, String)
             case vector(PDFSceneVector)
         }
-        let overlays = page.images.map { image in
+        let overlays = page.images.filter(\.canOverlayOnPageSafetyNet).map { image in
             Overlay.image(
                 image,
                 imageRelationships.first(where: { $0.image.id == image.id })?.id ?? ""
@@ -233,11 +242,13 @@ private extension PresentationMLWriter {
                 break
             }
         }
-        for textBox in page.textBoxes {
-            let x = emu(pageOffsetX + textBox.bounds.minX - page.cropBox.minX)
-            let y = emu(pageOffsetY + page.height - (textBox.bounds.maxY - page.cropBox.minY))
-            let width = max(1, emu(textBox.bounds.width))
-            let height = max(1, emu(textBox.bounds.height))
+        for textBox in page.textBoxes
+        where textBox.visualPolicy == .replaceSourcePaint {
+            let bounds = textBox.officeBounds
+            let x = emu(pageOffsetX + bounds.minX - page.cropBox.minX)
+            let y = emu(pageOffsetY + page.height - (bounds.maxY - page.cropBox.minY))
+            let width = max(1, emu(bounds.width))
+            let height = max(1, emu(bounds.height))
             shapes += textShape(
                 textBox: textBox,
                 id: shapeID,
@@ -300,23 +311,116 @@ private extension PresentationMLWriter {
         width: Int,
         height: Int
     ) -> String {
-        let color = textBox.color
-        let colorHex = rgbHex(color)
-        let alpha = Int((max(0, min(1, color.alpha)) * 100_000).rounded())
+        let leadingInset = emu(textBox.officeLeadingInset)
+        let trailingInset = emu(textBox.officeTrailingInset)
         let paragraphAlignment: String
         switch textBox.alignment {
         case .left: paragraphAlignment = "l"
         case .center: paragraphAlignment = "ctr"
         case .right: paragraphAlignment = "r"
         }
-        let runs = textBox.text.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map { index, line in
-            let escaped = XMLValue.escape(String(line), preserveWhitespace: true)
-            let breakXML = index == 0 ? "" : "<a:br/>"
-            return "\(breakXML)<a:r><a:rPr lang=\"en-US\" sz=\"\(max(500, min(7200, Int((textBox.fontSize * 100).rounded()))))\"><a:solidFill><a:srgbClr val=\"\(colorHex)\"><a:alpha val=\"\(alpha)\"/></a:srgbClr></a:solidFill><a:latin typeface=\"\(XMLValue.attribute(textBox.fontName))\"/><a:ea typeface=\"\(XMLValue.attribute(textBox.fontName))\"/><a:cs typeface=\"\(XMLValue.attribute(textBox.fontName))\"/></a:rPr><a:t xml:space=\"preserve\">\(escaped)</a:t></a:r>"
+        let lines = textBox.lines.isEmpty
+            ? [
+                PDFSceneTextLine(
+                    id: textBox.id,
+                    text: textBox.text,
+                    bounds: textBox.bounds,
+                    runs: [
+                        PDFSceneTextRun(
+                            PDFTextRun(
+                                text: textBox.text,
+                                fontName: textBox.fontName,
+                                fontSize: textBox.fontSize,
+                                textColor: textBox.color,
+                                isOfficeCompatible: true
+                            )
+                        )
+                    ],
+                    sourceMaskBounds: textBox.bounds,
+                    sourceMaskIsSafe: true,
+                    extractionSource: textBox.extractionSource
+                )
+            ]
+            : textBox.lines
+        let paragraphs = lines.enumerated().map { index, line in
+            let nextLine = index + 1 < lines.count ? lines[index + 1] : nil
+            let spacing = lineSpacingPoints(
+                for: line,
+                nextLine: nextLine
+            )
+            let tabs = drawingTabStops(for: line, in: textBox)
+            let runs = line.runs.isEmpty
+                ? drawingRun(
+                    PDFSceneTextRun(
+                        PDFTextRun(
+                            text: line.text,
+                            fontName: textBox.fontName,
+                            fontSize: textBox.fontSize,
+                            textColor: textBox.color,
+                            isOfficeCompatible: true
+                        )
+                    )
+                )
+                : line.runs.map(drawingRun).joined()
+            return "<a:p><a:pPr algn=\"\(paragraphAlignment)\"><a:lnSpc><a:spcPts val=\"\(spacing)\"/></a:lnSpc>\(tabs)</a:pPr>\(runs)<a:endParaRPr/></a:p>"
         }.joined()
         return """
-        <p:sp><p:nvSpPr><p:cNvPr id="\(id)" name="Text \(id)"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="\(x)" y="\(y)"/><a:ext cx="\(width)" cy="\(height)"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr lIns="0" tIns="0" rIns="0" bIns="0" wrap="square" anchor="t" vert="horz"><a:noAutofit/></a:bodyPr><a:lstStyle/><a:p algn="\(paragraphAlignment)"><a:pPr algn="\(paragraphAlignment)"/><a:endParaRPr lang="en-US" sz="\(max(500, min(7200, Int((textBox.fontSize * 100).rounded()))))"><a:solidFill><a:srgbClr val="\(colorHex)"><a:alpha val="\(alpha)"/></a:srgbClr></a:solidFill></a:endParaRPr>\(runs)</a:p></p:txBody></p:sp>
+        <p:sp><p:nvSpPr><p:cNvPr id="\(id)" name="Text \(id)"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="\(x)" y="\(y)"/><a:ext cx="\(width)" cy="\(height)"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln w="0"><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr lIns="\(leadingInset)" tIns="0" rIns="\(trailingInset)" bIns="0" wrap="none" anchor="t" vert="horz"><a:noAutofit/></a:bodyPr><a:lstStyle/>\(paragraphs)</p:txBody></p:sp>
         """
+    }
+
+    func drawingRun(_ run: PDFSceneTextRun) -> String {
+        let colorHex = rgbHex(run.color)
+        let alpha = Int((max(0, min(1, run.color.alpha)) * 100_000).rounded())
+        let fontSize = max(500, min(7200, Int((run.fontSize * 100).rounded())))
+        let bold = run.isBold ? " b=\"1\"" : ""
+        let italic = run.isItalic ? " i=\"1\"" : ""
+        return "<a:r><a:rPr lang=\"en-US\" sz=\"\(fontSize)\"\(bold)\(italic)><a:solidFill><a:srgbClr val=\"\(colorHex)\"><a:alpha val=\"\(alpha)\"/></a:srgbClr></a:solidFill><a:latin typeface=\"\(XMLValue.attribute(run.fontName))\"/><a:ea typeface=\"\(XMLValue.attribute(run.fontName))\"/><a:cs typeface=\"\(XMLValue.attribute(run.fontName))\"/></a:rPr>\(drawingTextElements(run.text))</a:r>"
+    }
+
+    func drawingTabStops(
+        for line: PDFSceneTextLine,
+        in textBox: PDFSceneTextBox
+    ) -> String {
+        guard let sourceOffset = line.listTabStop else { return "" }
+        let relativeOffset = max(
+            0.5,
+            line.bounds.minX + sourceOffset - textBox.bounds.minX
+        )
+        let position = max(1, emu(relativeOffset))
+        return "<a:tabLst><a:tab pos=\"\(position)\"/></a:tabLst>"
+    }
+
+    func drawingTextElements(_ text: String) -> String {
+        var elements = ""
+        var fragment = ""
+        func appendFragment() {
+            guard !fragment.isEmpty else { return }
+            elements += "<a:t xml:space=\"preserve\">\(XMLValue.escape(fragment, preserveWhitespace: true))</a:t>"
+            fragment.removeAll(keepingCapacity: true)
+        }
+        for character in text {
+            if character == "\t" {
+                appendFragment()
+                elements += "<a:tab/>"
+            } else {
+                fragment.append(character)
+            }
+        }
+        appendFragment()
+        return elements
+    }
+
+    func lineSpacingPoints(
+        for line: PDFSceneTextLine,
+        nextLine: PDFSceneTextLine?
+    ) -> Int {
+        let sourceAdvance = nextLine.map {
+            max(0, line.bounds.minY - $0.bounds.minY)
+        } ?? 0
+        let fontHeight = line.runs.map(\.fontSize).max() ?? line.bounds.height
+        let points = max(line.bounds.height, fontHeight * 1.05, sourceAdvance)
+        return max(100, Int((points * 100).rounded()))
     }
 
     func emu(_ points: CGFloat) -> Int {
