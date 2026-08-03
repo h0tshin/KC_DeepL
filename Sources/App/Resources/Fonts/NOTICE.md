@@ -6,10 +6,12 @@ license text distributed by its upstream project.
 
 ## Barlow
 
-- Upstream: <https://github.com/google/fonts/tree/2796410152d4f9524b68ed46e69c1b60f8e0f7c3/ofl/barlow>
+- Upstream: <https://github.com/jpt/barlow/tree/master/fonts/ttf>
 - License: SIL Open Font License 1.1 (`Barlow/OFL.txt`)
 - `Barlow-Regular.ttf`: `95aa02c7c43096e0dd44d787ba6216864a67157e402adab59b35572e0c1577ea`
 - `Barlow-Italic.ttf`: `70cf45c354af39e55082fd506e748cc6a0a1812949875f99ded3f76bf691e4ca`
+- `Barlow-Bold.ttf`: `aeb8c7772bacd65d1a89021f8874762e7747286c85ce23b396ff0c11a89525d3`
+- `Barlow-BoldItalic.ttf`: `5409ac65b093df3a54be68446de9939ff3b70dba06a0aa5fe991f13bc65fcb5e`
 - `Barlow-SemiBold.ttf`: `86577cb32f8abe3673db53ca0f4221e6856751a4f6730c867e00f720f8bb1fc5`
 - `Barlow-SemiBoldItalic.ttf`: `277b45fc0b9f066bf77e88e5d147baae8d1ad7441cedee1dc305fc3dc6e84ce7`
 

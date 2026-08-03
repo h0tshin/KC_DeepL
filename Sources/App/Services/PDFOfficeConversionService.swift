@@ -5,6 +5,10 @@ struct PDFOfficeConversionService {
     private let extractor: PDFSceneExtractor
 
     init(extractor: PDFSceneExtractor = PDFSceneExtractor()) {
+        // Conversion can also be invoked from a detached worker or a test,
+        // before the SwiftUI app's initializer runs. Register the bundled OFL
+        // fonts here so source-family resolution is identical in every path.
+        _ = AppFontRegistry.registerBundledFonts()
         self.extractor = extractor
     }
 

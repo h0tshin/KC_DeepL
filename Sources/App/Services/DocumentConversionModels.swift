@@ -176,11 +176,75 @@ struct PDFSceneImage {
     let paintOrder: Int
     let hasAlpha: Bool
     let maskApplied: Bool
+    /// The locally uniform backdrop inferred for an alpha/masked image. It is
+    /// used both to prove the image's source-over composite against the page
+    /// safety net and to repair the template before the selectable picture is
+    /// inserted. `nil` means no reliable local backdrop was available.
+    let backdropColor: PDFTextColor?
     let isBackdropIndependent: Bool
     /// The decoded opaque image has been compared against the rendered page
     /// safety-net at its original placement. Only a match can be drawn above
     /// that safety-net without hiding later PDF paint.
     let isSafetyNetVerifiedOpaque: Bool
+    /// True when the original image placement needs no rotation or shear and
+    /// can therefore be represented by a normal Office picture frame.
+    let hasRepresentableGeometry: Bool
+    /// True when the PDF image occurrence has an axis-aligned placement that
+    /// can be reconstructed as a real Office picture after the corresponding
+    /// area has been repaired in the template/background raster. Unlike
+    /// `canOverlayOnPageSafetyNet`, this intentionally supports alpha and
+    /// masked images because their original paint is removed first.
+    let isNativeObjectEligible: Bool
+    /// The image stream can be reproduced on top of an independently
+    /// extracted page background template. This keeps alpha/mask images
+    /// editable without requiring the image's original pixels to exist in
+    /// the template raster beneath it.
+    let isLayeredTemplateEligible: Bool
+    /// The decoded asset contributes visible final pixels in the rendered PDF
+    /// reference. A resource that is completely covered by a later PDF draw
+    /// operation must be omitted from a layered Office reconstruction rather
+    /// than forcing a foreground-page screenshot or resurfacing above content.
+    let hasVisibleReferenceContribution: Bool
+    /// A PDF clipping path active at the image's `Do` operator.  A normal
+    /// Office picture only has a rectangular frame, so a non-rectangular PDF
+    /// clip is preserved as a freeform shape filled with the original image.
+    /// This is essential for slide footers and masks whose photo is visibly
+    /// cut around a template rather than simply layered behind it.
+    let clip: PDFSceneImageClip?
+
+    init(
+        id: String,
+        sourceName: String,
+        bounds: CGRect,
+        pngData: Data,
+        paintOrder: Int,
+        hasAlpha: Bool,
+        maskApplied: Bool,
+        backdropColor: PDFTextColor?,
+        isBackdropIndependent: Bool,
+        isSafetyNetVerifiedOpaque: Bool,
+        hasRepresentableGeometry: Bool,
+        isNativeObjectEligible: Bool,
+        isLayeredTemplateEligible: Bool,
+        hasVisibleReferenceContribution: Bool,
+        clip: PDFSceneImageClip? = nil
+    ) {
+        self.id = id
+        self.sourceName = sourceName
+        self.bounds = bounds
+        self.pngData = pngData
+        self.paintOrder = paintOrder
+        self.hasAlpha = hasAlpha
+        self.maskApplied = maskApplied
+        self.backdropColor = backdropColor
+        self.isBackdropIndependent = isBackdropIndependent
+        self.isSafetyNetVerifiedOpaque = isSafetyNetVerifiedOpaque
+        self.hasRepresentableGeometry = hasRepresentableGeometry
+        self.isNativeObjectEligible = isNativeObjectEligible
+        self.isLayeredTemplateEligible = isLayeredTemplateEligible
+        self.hasVisibleReferenceContribution = hasVisibleReferenceContribution
+        self.clip = clip
+    }
 
     /// Native image placement is safe only when it cannot alter pixels that
     /// are already represented by the full-page visual safety net.  An opaque
@@ -193,16 +257,73 @@ struct PDFSceneImage {
             && !maskApplied
             && isSafetyNetVerifiedOpaque
     }
+
+    /// The editable-first conversion path draws this image above a repaired
+    /// page template only after the source paint has been proven to match the
+    /// final page: directly for opaque pixels, or as a source-over composite
+    /// against a locally uniform backdrop for alpha/masked pixels.
+    var canRecreateOnRepairedPage: Bool {
+        // The raster-repair path removes a rectangle from the page template.
+        // It cannot safely restore pixels outside a non-rectangular clip, so
+        // clipped images are promoted only when a clean layered background is
+        // available below them.
+        isNativeObjectEligible && clip == nil
+    }
+
+    var canRecreateOnLayeredTemplate: Bool {
+        isLayeredTemplateEligible
+    }
+
+    /// The visible Office frame is the image rectangle intersected with the
+    /// active PDF clip.  The writer uses this frame both for a normal picture
+    /// and for a freeform image-filled shape.
+    var officeBounds: CGRect {
+        guard let clip else { return bounds }
+        let clipped = bounds.intersection(clip.bounds)
+        return clipped.isNull || clipped.width <= 0 || clipped.height <= 0
+            ? bounds
+            : clipped
+    }
 }
 
-/// Controls the relationship between a native Office text box and the visual
-/// fallback image. `replaceSourcePaint` is used only after the extractor has
-/// verified that the source glyphs can be rebuilt safely; otherwise the image
-/// remains authoritative and the text is retained as non-destructive metadata
-/// in the scene/report rather than risking a blank patch.
+/// A representable PDF clipping path captured at an image painting operator.
+/// Coordinates remain in source-PDF page space and are normalized by the
+/// Office writer only when it emits DrawingML custom geometry.
+struct PDFSceneImageClip {
+    let bounds: CGRect
+    let pathCommands: [PDFSceneVectorPathCommand]
+}
+
+/// Controls the relationship between a native Office text box and the
+/// template/background raster. Native text is the default outcome: a stable
+/// solid background uses a direct mask, while a subtle gradient or watermark
+/// uses a glyph-aware local repair. Only text that cannot be recovered as a
+/// trustworthy editable run remains in the template image.
 enum PDFSceneTextVisualPolicy: String, Sendable {
     case replaceSourcePaint
+    case repairSourcePaint
     case preserveSourcePaint
+
+    var createsEditableText: Bool {
+        switch self {
+        case .replaceSourcePaint, .repairSourcePaint:
+            true
+        case .preserveSourcePaint:
+            false
+        }
+    }
+
+    var needsAdaptiveBackdropRepair: Bool {
+        self == .repairSourcePaint
+    }
+}
+
+/// Separates editable document content from source header/footer/watermark
+/// chrome. Template chrome remains visually intact but is emitted as a locked
+/// background-layer object instead of becoming an ordinary editing target.
+enum PDFSceneTextRole: String, Sendable {
+    case editableContent
+    case templateChrome
 }
 
 /// A run retains the formatting boundary that PDFKit exposed inside one visual
@@ -212,6 +333,7 @@ struct PDFSceneTextRun {
     let text: String
     let fontName: String
     let fontSize: CGFloat
+    let characterSpacing: CGFloat
     let color: PDFTextColor
     let isBold: Bool
     let isItalic: Bool
@@ -220,6 +342,7 @@ struct PDFSceneTextRun {
         self.text = run.text
         self.fontName = run.fontName
         self.fontSize = run.fontSize
+        self.characterSpacing = run.characterSpacing
         self.color = run.textColor
         self.isBold = run.isBold
         self.isItalic = run.isItalic
@@ -236,6 +359,10 @@ struct PDFSceneTextLine {
     let runs: [PDFSceneTextRun]
     let sourceMaskBounds: CGRect
     let sourceMaskIsSafe: Bool
+    /// A source-render visibility proof for template text. It remains true
+    /// when the surrounding template is complex, so visual presence and safe
+    /// source-paint replacement are never conflated.
+    let hasVisibleInk: Bool
     let extractionSource: PDFTextExtractionSource
     /// Offset, in source points from `bounds.minX`, where a list item's body
     /// text begins. PDFKit commonly collapses a PDF list tab to a normal
@@ -250,6 +377,7 @@ struct PDFSceneTextLine {
         runs: [PDFSceneTextRun],
         sourceMaskBounds: CGRect,
         sourceMaskIsSafe: Bool,
+        hasVisibleInk: Bool = false,
         extractionSource: PDFTextExtractionSource,
         listTabStop: CGFloat? = nil
     ) {
@@ -259,6 +387,7 @@ struct PDFSceneTextLine {
         self.runs = runs
         self.sourceMaskBounds = sourceMaskBounds
         self.sourceMaskIsSafe = sourceMaskIsSafe
+        self.hasVisibleInk = hasVisibleInk
         self.extractionSource = extractionSource
         self.listTabStop = listTabStop
     }
@@ -297,6 +426,11 @@ struct PDFSceneTextBox {
     let extractionSource: PDFTextExtractionSource
     let lines: [PDFSceneTextLine]
     let visualPolicy: PDFSceneTextVisualPolicy
+    let role: PDFSceneTextRole
+    /// A later editable source text run occupies this template text's glyph
+    /// area. The template line is therefore excluded rather than resurfaced
+    /// above the foreground during layered reconstruction.
+    let isOccludedByForeground: Bool
 
     init(
         id: String,
@@ -311,7 +445,9 @@ struct PDFSceneTextBox {
         sourceLineIDs: [String],
         extractionSource: PDFTextExtractionSource,
         lines: [PDFSceneTextLine],
-        visualPolicy: PDFSceneTextVisualPolicy
+        visualPolicy: PDFSceneTextVisualPolicy,
+        role: PDFSceneTextRole = .editableContent,
+        isOccludedByForeground: Bool = false
     ) {
         self.id = id
         self.text = text
@@ -326,9 +462,25 @@ struct PDFSceneTextBox {
         self.extractionSource = extractionSource
         self.lines = lines
         self.visualPolicy = visualPolicy
+        self.role = role
+        self.isOccludedByForeground = isOccludedByForeground
     }
 
     var officeBounds: CGRect { layoutBounds ?? bounds }
+
+    /// Body text is always a required editable reconstruction candidate. A
+    /// header/footer line, however, may still be extractable after a later PDF
+    /// object has completely covered it. Only a source-mask proof promotes
+    /// such chrome into the layered template; otherwise it is intentionally
+    /// omitted instead of resurfacing above the final content.
+    var hasVisibleReferenceContribution: Bool {
+        role == .editableContent
+            || (!isOccludedByForeground && lines.allSatisfy(\.hasVisibleInk))
+    }
+
+    var canRecreateOnLayeredTemplate: Bool {
+        visualPolicy.createsEditableText && hasVisibleReferenceContribution
+    }
 
     /// Insets that retain the original PDF text origin after `officeBounds`
     /// gains room for font side bearings.  A left-aligned paragraph needs a
@@ -377,12 +529,26 @@ enum PDFSceneVectorKind: String, Codable, Sendable {
     case line
     case rectangle
     case ellipse
+    case freeform
+}
+
+/// A path command preserved from a PDF painting operation. Coordinates remain
+/// in PDF page space so each Office writer can normalize them to its own
+/// drawing canvas without losing Bézier control points or shape geometry.
+enum PDFSceneVectorPathCommand: Equatable {
+    case move(CGPoint)
+    case line(CGPoint)
+    case cubic(control1: CGPoint, control2: CGPoint, end: CGPoint)
+    case close
 }
 
 struct PDFSceneVector {
     let id: String
     let kind: PDFSceneVectorKind
     let bounds: CGRect
+    /// Freeform vectors retain their original PDF path in page coordinates.
+    /// Preset line/rectangle geometry leaves this empty.
+    let pathCommands: [PDFSceneVectorPathCommand]
     /// `nil` means that the original path was filled without a stroke. OOXML
     /// must emit an explicit no-line rather than inventing a black outline.
     let stroke: PDFTextColor?
@@ -404,6 +570,16 @@ struct PDFSceneVector {
             && (stroke?.alpha ?? 1) >= 0.999
             && (fill?.alpha ?? 1) >= 0.999
             && isSafetyNetVerifiedOpaque
+    }
+
+    /// A page-sized raster is only an allowed template when it is a verified
+    /// background asset rather than a flattened copy of all foreground
+    /// content. In that mode, an eligible vector can be recreated without
+    /// drawing over a second copy of itself. Unlike the page-safety-net mode,
+    /// alpha is safe here because the source vector is absent from the
+    /// template and is composited exactly once by Office.
+    var canRecreateOnLayeredTemplate: Bool {
+        nativeEligible
     }
 }
 

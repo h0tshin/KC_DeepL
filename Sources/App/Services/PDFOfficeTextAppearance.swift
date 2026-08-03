@@ -8,6 +8,7 @@ import Foundation
 enum PDFOfficeTextAppearance {
     private struct FontResolution {
         let familyName: String
+        let sourceFontName: String?
         let isBold: Bool
         let isItalic: Bool
         let isPortable: Bool
@@ -113,25 +114,23 @@ enum PDFOfficeTextAppearance {
         )
     }
 
-    /// A page raster is the visual safety net. Source paint may be removed only
-    /// when every visual line was natively extracted, has a simple sampled
-    /// background, and can be faithfully expressed by Office. This fail-closed
-    /// rule prevents text holes when OCR, transparency, private-use glyphs, or
-    /// unknown fonts are encountered.
-    static func canReplaceSourcePaint(
-        lines: [PDFTextLine]
-    ) -> Bool {
-        guard !lines.isEmpty else { return false }
-        return lines.allSatisfy { line in
+    /// Decides how an extracted text block is rebuilt in Office. The prior
+    /// implementation treated a non-uniform template background as grounds to
+    /// discard the entire editable block. That made a normal presentation look
+    /// correct only because every page became one screenshot. Instead, native
+    /// text with a subtle/structured backdrop uses a glyph-aware local repair
+    /// in the page template, then becomes a real Office text box.
+    static func visualPolicy(
+        for lines: [PDFTextLine]
+    ) -> PDFSceneTextVisualPolicy {
+        guard !lines.isEmpty else { return .preserveSourcePaint }
+        let canCreateEditableText = lines.allSatisfy { line in
             line.extractionSource == .native
-                && line.sourceMaskIsSafe
-                // A standalone bullet/ornament carries no text layout of its
-                // own. PDF producers commonly emit it as a separate glyph
-                // with a wider selection box; masking and redrawing that box
-                // leaves a visible rectangular patch on textured templates.
-                // Keep it with the visual safety-net unless it was merged
-                // with real body text in the same source line.
-                && !isStandaloneMarkerOrSymbol(line.text)
+                // Standalone bullets and ornaments are legitimate text
+                // objects. The template repair path erases only pixels that
+                // match the known glyph colour, rather than filling their
+                // often-wide PDF selection rectangle, so they can remain
+                // editable without exposing a rectangular patch.
                 && line.textColor.alpha >= 0.999
                 && !line.runs.isEmpty
                 && line.runs.allSatisfy {
@@ -139,6 +138,82 @@ enum PDFOfficeTextAppearance {
                 }
                 && hasPlausibleWidth(for: line)
         }
+        guard canCreateEditableText else { return .preserveSourcePaint }
+        return lines.allSatisfy(\.sourceMaskIsSafe)
+            ? .replaceSourcePaint
+            : .repairSourcePaint
+    }
+
+    /// Compatibility shim for callers/tests that need to know whether the
+    /// inexpensive solid-mask path is available. Editable text can still be
+    /// created through `repairSourcePaint` when this is false.
+    static func canReplaceSourcePaint(
+        lines: [PDFTextLine]
+    ) -> Bool {
+        visualPolicy(for: lines) == .replaceSourcePaint
+    }
+
+    /// Resolves one paragraph alignment from the *set* of visual PDF lines.
+    ///
+    /// A positioned PDF has no semantic paragraph alignment to trust.  The
+    /// reliable evidence is repeated geometry: left-aligned lines share a
+    /// leading edge, centred lines share a midpoint, and right-aligned lines
+    /// share a trailing edge.  Evaluating a single line against an inferred
+    /// column is unstable for speech bubbles and narrow diagrams because the
+    /// column can collapse to the line's ink width.  Use robust edge
+    /// dispersion across the whole block instead, while retaining the
+    /// source-side fallback for a genuinely ambiguous one-line block.
+    static func paragraphAlignment(
+        for lines: [PDFTextLine],
+        fallback: PDFTextAlignment
+    ) -> PDFTextAlignment {
+        guard lines.count >= 2,
+              !lines.contains(where: { beginsWithListMarker($0.text) })
+        else {
+            return fallback
+        }
+
+        let widths = lines.map(\.bounds.width)
+        guard let narrowest = widths.min(),
+              let widest = widths.max()
+        else {
+            return fallback
+        }
+        let largestFontSize = lines.map(\.fontSize).max() ?? 10
+        // If every source line has almost the same width, its leading,
+        // midpoint, and trailing edges all convey the same geometry. Keep the
+        // already-resolved single-line result instead of inventing a style.
+        guard widest - narrowest >= max(4, largestFontSize * 0.7) else {
+            return fallback
+        }
+
+        let candidates: [(PDFTextAlignment, [CGFloat])] = [
+            (.left, lines.map { $0.bounds.minX }),
+            (.center, lines.map { $0.bounds.midX }),
+            (.right, lines.map { $0.bounds.maxX })
+        ]
+        let scored = candidates.map { alignment, edges in
+            (alignment, robustEdgeDispersion(edges))
+        }.sorted { lhs, rhs in
+            lhs.1 < rhs.1
+        }
+        guard let winner = scored.first,
+              let runnerUp = scored.dropFirst().first
+        else {
+            return fallback
+        }
+
+        // PDFKit character rectangles can vary fractionally from line to
+        // line.  Require both a tightly shared anchor and a meaningful lead
+        // over the next best anchor before overriding the fallback.
+        let anchorTolerance = max(1.25, largestFontSize * 0.11)
+        let confidenceGap = max(1.5, largestFontSize * 0.22)
+        guard winner.1 <= anchorTolerance,
+              runnerUp.1 - winner.1 >= confidenceGap
+        else {
+            return fallback
+        }
+        return winner.0
     }
 
     /// Calculates a non-destructive Office layout rectangle.  PDFKit reports
@@ -338,6 +413,93 @@ enum PDFOfficeTextAppearance {
 
         return insertedSpacer ? result : runs
     }
+
+    /// Fits Office text to the source visual advance. PDF stores line-level
+    /// glyph geometry (including producer-specific tracking), while Office
+    /// stores a family, size and optional character spacing. A substituted
+    /// typeface first receives a bounded size correction; every safe Office
+    /// line then receives a small source-derived tracking correction so the
+    /// result keeps its original right edge without scaling glyph outlines.
+    static func calibratedRuns(
+        _ runs: [PDFTextRun],
+        sourceWidth: CGFloat
+    ) -> [PDFTextRun] {
+        guard sourceWidth.isFinite,
+              sourceWidth > 0.5,
+              runs.isEmpty == false,
+              runs.allSatisfy(\.isOfficeCompatible)
+        else {
+            return runs
+        }
+
+        let officeWidth = typographicWidth(for: runs)
+        guard officeWidth.isFinite, officeWidth > 0.5 else { return runs }
+
+        var fittedRuns = runs
+        if runs.contains(where: { $0.sourceFontName != nil }) {
+            // PDF selection bounds omit some side bearings. Bound a font-size
+            // correction so malformed source bounds cannot cause a destructive
+            // scale change after an actual typeface substitution.
+            let scale = min(1.2, max(0.72, sourceWidth / officeWidth))
+            if abs(scale - 1) > 0.01 {
+                fittedRuns = runs.map { run in
+                    PDFTextRun(
+                        text: run.text,
+                        fontName: run.fontName,
+                        sourceFontName: run.sourceFontName,
+                        fontSize: max(5, min(144, run.fontSize * scale)),
+                        characterSpacing: run.characterSpacing,
+                        textColor: run.textColor,
+                        isBold: run.isBold,
+                        isItalic: run.isItalic,
+                        isOfficeCompatible: run.isOfficeCompatible
+                    )
+                }
+            }
+        }
+
+        let fittedWidth = typographicWidth(for: fittedRuns)
+        guard fittedWidth.isFinite, fittedWidth > 0.5 else {
+            return fittedRuns
+        }
+        // List items are rebuilt later with an explicit source-derived marker
+        // spacer. Applying a per-character correction before that whitespace
+        // expands would count the newly inserted Unicode spaces as real PDF
+        // character gaps and move the list body too far right.
+        guard listMarkerLength(in: fittedRuns) == nil else {
+            return fittedRuns
+        }
+        let widthRatio = sourceWidth / fittedWidth
+        guard widthRatio >= 0.92, widthRatio <= 1.08 else {
+            return fittedRuns
+        }
+
+        let gapCount = fittedRuns.reduce(0) { count, run in
+            count + max(0, run.text.count - 1)
+        }
+        guard gapCount > 0 else { return fittedRuns }
+        let correction = (sourceWidth - fittedWidth) / CGFloat(gapCount)
+        // PDF selection bounds include a small amount of side-bearing space,
+        // so apply a conservative fraction of the raw difference. Tracking
+        // above 0.18pt per gap is almost certainly a broken selection width
+        // rather than a font-metric difference.
+        let boundedCorrection = min(0.18, max(-0.18, correction * 0.35))
+        guard abs(boundedCorrection) >= 0.005 else { return fittedRuns }
+
+        return fittedRuns.map { run in
+            PDFTextRun(
+                text: run.text,
+                fontName: run.fontName,
+                sourceFontName: run.sourceFontName,
+                fontSize: run.fontSize,
+                characterSpacing: boundedCorrection,
+                textColor: run.textColor,
+                isBold: run.isBold,
+                isItalic: run.isItalic,
+                isOfficeCompatible: run.isOfficeCompatible
+            )
+        }
+    }
 }
 
 private extension PDFOfficeTextAppearance {
@@ -347,7 +509,39 @@ private extension PDFOfficeTextAppearance {
     /// lets the source-side ink measurement and the target-side metrics remain
     /// explicit, testable parts of one anchor model instead of applying a
     /// document-specific y-offset in either writer.
-    static let officeTextFrameTopReserveRatio: CGFloat = 0.105
+    static let officeTextFrameTopReserveRatio: CGFloat = 0.20
+    static let officeTextFrameTopReserveMaximum: CGFloat = 4
+
+    /// Median absolute deviation keeps a single short wrapped line from
+    /// changing a paragraph's inferred anchor. PDF coordinates are in
+    /// points, so this is directly comparable with font-size based
+    /// tolerances in paragraphAlignment.
+    static func robustEdgeDispersion(_ values: [CGFloat]) -> CGFloat {
+        guard !values.isEmpty else { return .greatestFiniteMagnitude }
+        let sorted = values.sorted()
+        let median = sorted[sorted.count / 2]
+        let deviations = values.map { abs($0 - median) }.sorted()
+        return deviations[deviations.count / 2]
+    }
+
+    static func beginsWithListMarker(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let firstToken = trimmed.split(whereSeparator: \.isWhitespace).first
+        else {
+            return false
+        }
+        let token = String(firstToken)
+        if [
+            "•", "◦", "○", "●", "▪", "▫", "‣", "⁃",
+            "-", "–", "—", "*", "o", "O", "0", ""
+        ].contains(token) {
+            return true
+        }
+        let suffix = token.drop(while: { $0.isNumber })
+        return !suffix.isEmpty
+            && suffix.allSatisfy { $0 == "." || $0 == ")" }
+            && token.dropLast(suffix.count).allSatisfy(\.isNumber)
+    }
 
     static func officeTopAnchorAdjustment(
         for lines: [PDFTextLine],
@@ -417,7 +611,10 @@ private extension PDFOfficeTextAppearance {
         let topBearing = max(0, ascent - inkBounds.maxY)
         let officeFrameReserve = max(
             0.35,
-            min(1.2, largestRunSize * officeTextFrameTopReserveRatio)
+            min(
+                officeTextFrameTopReserveMaximum,
+                largestRunSize * officeTextFrameTopReserveRatio
+            )
         )
         return topBearing + officeFrameReserve
     }
@@ -471,7 +668,9 @@ private extension PDFOfficeTextAppearance {
         PDFTextRun(
             text: text,
             fontName: run.fontName,
+            sourceFontName: run.sourceFontName,
             fontSize: run.fontSize,
+            characterSpacing: run.characterSpacing,
             textColor: run.textColor,
             isBold: run.isBold,
             isItalic: run.isItalic,
@@ -485,7 +684,9 @@ private extension PDFOfficeTextAppearance {
               let last = runs.last,
               last.text != "\t",
               last.fontName == run.fontName,
+              last.sourceFontName == run.sourceFontName,
               abs(last.fontSize - run.fontSize) < 0.01,
+              abs(last.characterSpacing - run.characterSpacing) < 0.0001,
               last.textColor == run.textColor,
               last.isBold == run.isBold,
               last.isItalic == run.isItalic,
@@ -521,7 +722,9 @@ private extension PDFOfficeTextAppearance {
         return PDFTextRun(
             text: normalized.text,
             fontName: resolution.familyName,
+            sourceFontName: resolution.sourceFontName,
             fontSize: size,
+            characterSpacing: 0,
             textColor: fallbackColor,
             isBold: resolution.isBold,
             isItalic: resolution.isItalic,
@@ -533,7 +736,9 @@ private extension PDFOfficeTextAppearance {
         guard !run.text.isEmpty else { return }
         if let last = runs.last,
            last.fontName == run.fontName,
+           last.sourceFontName == run.sourceFontName,
            abs(last.fontSize - run.fontSize) < 0.01,
+           abs(last.characterSpacing - run.characterSpacing) < 0.0001,
            last.textColor == run.textColor,
            last.isBold == run.isBold,
            last.isItalic == run.isItalic,
@@ -541,7 +746,9 @@ private extension PDFOfficeTextAppearance {
             runs[runs.count - 1] = PDFTextRun(
                 text: last.text + run.text,
                 fontName: last.fontName,
+                sourceFontName: last.sourceFontName,
                 fontSize: last.fontSize,
+                characterSpacing: last.characterSpacing,
                 textColor: last.textColor,
                 isBold: last.isBold,
                 isItalic: last.isItalic,
@@ -649,19 +856,23 @@ private extension PDFOfficeTextAppearance {
                 continue
             }
             let symbolicTraits = CTFontGetSymbolicTraits(ctFont)
+            let officeFamily = officeOutputTypeface(for: family)
             return FontResolution(
-                familyName: family,
+                familyName: officeFamily,
+                sourceFontName: normalizedFontToken(officeFamily)
+                    == normalizedFontToken(family) ? nil : rawName,
                 isBold: requestedTraits.bold
                     || symbolicTraits.contains(.traitBold),
                 isItalic: requestedTraits.italic
                     || symbolicTraits.contains(.traitItalic),
-                isPortable: isOfficeTypeface(family)
+                isPortable: isOfficeTypeface(officeFamily)
             )
         }
 
         let fallback = fallbackFont ?? NSFont.systemFont(ofSize: pointSize)
         return FontResolution(
             familyName: fallback.familyName ?? "Helvetica",
+            sourceFontName: nil,
             isBold: requestedTraits.bold,
             isItalic: requestedTraits.italic,
             isPortable: false
@@ -678,6 +889,7 @@ private extension PDFOfficeTextAppearance {
         var candidates = [withoutSubset]
         let familyAliases: [(tokens: [String], family: String)] = [
             (["arial"], "Arial"),
+            (["barlow"], "Barlow"),
             (["helvetica"], "Helvetica"),
             (["couriernew", "courier"], "Courier New"),
             (["timesnewroman", "timesroman", "times"], "Times New Roman"),
@@ -692,6 +904,24 @@ private extension PDFOfficeTextAppearance {
         }
         var seen = Set<String>()
         return candidates.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    /// A process-scoped app font is visible to PDFKit while KC DeepL is
+    /// running, but it is not automatically installed for PowerPoint, Word,
+    /// or LibreOffice. Barlow is a bundled OFL family, so its four real faces
+    /// are emitted into the PPTX as PresentationML font parts. Keep the
+    /// original typeface name when that package path is available; otherwise
+    /// fall back to a broad Office sans-serif instead of allowing a serif
+    /// substitution to change the source layout.
+    static func officeOutputTypeface(for family: String) -> String {
+        switch normalizedFontToken(family) {
+        case "barlow":
+            OfficeEmbeddedFontCatalog.canEmbedPresentationTypeface(family)
+                ? "Barlow"
+                : "Arial"
+        default:
+            family
+        }
     }
 
     static func fontAppearsToMatch(
@@ -731,34 +961,20 @@ private extension PDFOfficeTextAppearance {
             .joined()
     }
 
-    /// Font embedding is deliberately not attempted: it can violate the
-    /// source font's licence and is not available for many subsetted PDF font
-    /// programs. Therefore "Office compatible" must mean more than "the font
-    /// exists on this Mac". A branded font that happens to be installed while
-    /// converting can silently become Times in another Office renderer, which
-    /// changes both the visual design and line geometry.
-    ///
-    /// Keep the source raster authoritative for unembedded/custom families and
-    /// reserve source-paint replacement for stable, cross-Office families.
-    /// macOS-native Helvetica is included because this product targets
-    /// PowerPoint/Word on macOS; all other families must be explicitly added
-    /// after a cross-render validation fixture is introduced.
+    /// "Office compatible" means the emitted typeface is expected to resolve
+    /// in an Office editor outside KC DeepL's process. Unknown subsetted/brand
+    /// fonts remain in the template rather than being silently substituted.
     static func isOfficeTypeface(_ family: String) -> Bool {
         let token = normalizedFontToken(family)
+        if token == "barlow" {
+            return OfficeEmbeddedFontCatalog.canEmbedPresentationTypeface(family)
+        }
         return portableOfficeTypefaceTokens.contains(token)
     }
 
     static func isWhitespace(_ text: String) -> Bool {
         !text.isEmpty && text.unicodeScalars.allSatisfy {
             CharacterSet.whitespacesAndNewlines.contains($0)
-        }
-    }
-
-    static func isStandaloneMarkerOrSymbol(_ value: String) -> Bool {
-        let visible = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !visible.isEmpty else { return true }
-        return !visible.unicodeScalars.contains {
-            CharacterSet.alphanumerics.contains($0)
         }
     }
 
@@ -801,12 +1017,10 @@ private extension PDFOfficeTextAppearance {
     static func typographicWidth(for runs: [PDFTextRun]) -> CGFloat {
         let attributed = NSMutableAttributedString()
         for run in runs {
-            let font = NSFont(name: run.fontName, size: max(5, run.fontSize))
-                ?? NSFont.systemFont(ofSize: max(5, run.fontSize))
             attributed.append(
                 NSAttributedString(
                     string: run.text,
-                    attributes: [.font: font]
+                    attributes: [.font: officeLayoutFont(for: run)]
                 )
             )
         }

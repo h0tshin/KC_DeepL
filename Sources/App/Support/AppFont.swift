@@ -10,6 +10,8 @@ import SwiftUI
 enum AppFont {
     static let barlowRegular = "Barlow-Regular"
     static let barlowItalic = "Barlow-Italic"
+    static let barlowBold = "Barlow-Bold"
+    static let barlowBoldItalic = "Barlow-BoldItalic"
     static let barlowSemibold = "Barlow-SemiBold"
     static let barlowSemiboldItalic = "Barlow-SemiBoldItalic"
     static let notoSansKRRegular = "NotoSansCJKkr-Regular"
@@ -218,6 +220,18 @@ enum AppFontRegistry {
             fileExtension: "ttf",
             subdirectory: "Fonts/Barlow",
             postScriptName: AppFont.barlowItalic
+        ),
+        Resource(
+            name: "Barlow-Bold",
+            fileExtension: "ttf",
+            subdirectory: "Fonts/Barlow",
+            postScriptName: AppFont.barlowBold
+        ),
+        Resource(
+            name: "Barlow-BoldItalic",
+            fileExtension: "ttf",
+            subdirectory: "Fonts/Barlow",
+            postScriptName: AppFont.barlowBoldItalic
         ),
         Resource(
             name: "Barlow-SemiBold",

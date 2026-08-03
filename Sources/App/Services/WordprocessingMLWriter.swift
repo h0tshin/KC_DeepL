@@ -49,7 +49,12 @@ struct WordprocessingMLWriter {
                 )
             )
             var imageRelationships: [(image: PDFSceneImage, id: String)] = []
-            for (offset, image) in page.images.enumerated() {
+            let nativeImages = page.images.filter {
+                page.usesPageRasterFallback
+                    ? $0.canRecreateOnRepairedPage
+                    : $0.canRecreateOnLayeredTemplate
+            }
+            for (offset, image) in nativeImages.enumerated() {
                 let imageRelationshipID = "rId\(nextRelationshipID)"
                 nextRelationshipID += 1
                 relationships.append(
@@ -145,12 +150,28 @@ private extension WordprocessingMLWriter {
             case image(PDFSceneImage, String)
             case vector(PDFSceneVector)
         }
-        let overlays = page.images.filter(\.canOverlayOnPageSafetyNet).map { image in
+        let nativeImages = page.images.filter {
+            page.usesPageRasterFallback
+                ? $0.canRecreateOnRepairedPage
+                : $0.canRecreateOnLayeredTemplate
+        }
+        let imageOverlays = nativeImages.map { image in
             Overlay.image(
                 image,
                 imageRelationships.first(where: { $0.image.id == image.id })?.id ?? ""
             )
-        } + page.vectors.filter(\.canOverlayOnPageSafetyNet).map(Overlay.vector)
+        }
+        let nativeVectors = page.vectors.filter {
+            page.usesPageRasterFallback
+                ? $0.canOverlayOnPageSafetyNet
+                : $0.canRecreateOnLayeredTemplate
+        }
+        let overlays: [Overlay]
+        if page.usesPageRasterFallback {
+            overlays = imageOverlays + nativeVectors.map(Overlay.vector)
+        } else {
+            overlays = nativeVectors.map(Overlay.vector) + imageOverlays
+        }
         func overlaySortKey(_ overlay: Overlay) -> (order: Int, kind: Int, id: String) {
             switch overlay {
             case let .image(image, _):
@@ -159,13 +180,19 @@ private extension WordprocessingMLWriter {
                 return (vector.paintOrder, 1, vector.id)
             }
         }
-        for overlay in overlays.sorted(by: { lhs, rhs in
+        let orderedOverlays: [Overlay]
+        if page.usesPageRasterFallback {
+            orderedOverlays = overlays.sorted(by: { lhs, rhs in
             let left = overlaySortKey(lhs)
             let right = overlaySortKey(rhs)
             if left.order != right.order { return left.order < right.order }
             if left.kind != right.kind { return left.kind < right.kind }
             return left.id < right.id
-        }) {
+            })
+        } else {
+            orderedOverlays = overlays
+        }
+        for overlay in orderedOverlays {
             switch overlay {
             case let .image(image, relationshipID) where !relationshipID.isEmpty:
                 let x = emu((image.bounds.minX - page.cropBox.minX) * geometry.scale)
@@ -185,8 +212,24 @@ private extension WordprocessingMLWriter {
                 break
             }
         }
-        for textBox in page.textBoxes
-        where textBox.visualPolicy == .replaceSourcePaint {
+        let templateTextBoxes = page.usesPageRasterFallback
+            ? []
+            : page.textBoxes.filter {
+                $0.role == .templateChrome && $0.canRecreateOnLayeredTemplate
+            }
+        let contentTextBoxes = page.textBoxes.filter {
+            $0.role == .editableContent && $0.canRecreateOnLayeredTemplate
+        }
+        for textBox in templateTextBoxes {
+            let bounds = textBox.officeBounds
+            let x = emu((bounds.minX - page.cropBox.minX) * geometry.scale)
+            let y = emu((page.height - (bounds.maxY - page.cropBox.minY)) * geometry.scale)
+            let width = emu(max(1, bounds.width * geometry.scale))
+            let height = emu(max(1, bounds.height * geometry.scale))
+            result += "<w:r><w:drawing>\(textAnchor(textBox: textBox, x: x, y: y, width: width, height: height, docPrID: nextDocPrID, locked: true))</w:drawing></w:r>"
+            nextDocPrID += 1
+        }
+        for textBox in contentTextBoxes {
             let bounds = textBox.officeBounds
             let x = emu((bounds.minX - page.cropBox.minX) * geometry.scale)
             let y = emu((page.height - (bounds.maxY - page.cropBox.minY)) * geometry.scale)
@@ -235,8 +278,20 @@ private extension WordprocessingMLWriter {
             "<a:ln w=\"\(max(1, Int((Double(vector.lineWidth) * emuPerPoint).rounded())))\"><a:solidFill>\(solidFillBody($0))</a:solidFill></a:ln>"
         } ?? "<a:ln><a:noFill/></a:ln>"
         let rotation = vector.kind == .line ? 0 : Int((vector.rotation * 60_000).rounded())
-        let geometry = vector.kind == .line ? "line" : "rect"
-        let shape = "<wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm rot=\"\(rotation)\"><a:off x=\"0\" y=\"0\"/><a:ext cx=\"\(width)\" cy=\"\(height)\"/></a:xfrm><a:prstGeom prst=\"\(geometry)\"><a:avLst/></a:prstGeom>\(fill)\(line)</wps:spPr><wps:bodyPr/></wps:wsp>"
+        let geometry: String
+        switch vector.kind {
+        case .line:
+            geometry = "<a:prstGeom prst=\"line\"><a:avLst/></a:prstGeom>"
+        case .rectangle, .ellipse:
+            geometry = "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>"
+        case .freeform:
+            geometry = customGeometry(
+                for: vector,
+                width: width,
+                height: height
+            )
+        }
+        let shape = "<wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm rot=\"\(rotation)\"><a:off x=\"0\" y=\"0\"/><a:ext cx=\"\(width)\" cy=\"\(height)\"/></a:xfrm>\(geometry)\(fill)\(line)</wps:spPr><wps:bodyPr/></wps:wsp>"
         return anchorPrefix(
             x: x,
             y: y,
@@ -247,26 +302,65 @@ private extension WordprocessingMLWriter {
         ) + "<wp:docPr id=\"\(docPrID)\" name=\"PDF \(vector.kind.rawValue) \(docPrID)\"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect=\"1\"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">\(shape)</a:graphicData></a:graphic></wp:anchor>"
     }
 
+    func customGeometry(
+        for vector: PDFSceneVector,
+        width: Int,
+        height: Int
+    ) -> String {
+        let pathWidth = max(1, width)
+        let pathHeight = max(1, height)
+        let commands = vector.pathCommands.map { command -> String in
+            switch command {
+            case let .move(point):
+                return "<a:moveTo>\(customPathPoint(point, in: vector))</a:moveTo>"
+            case let .line(point):
+                return "<a:lnTo>\(customPathPoint(point, in: vector))</a:lnTo>"
+            case let .cubic(control1, control2, end):
+                return "<a:cubicBezTo>\(customPathPoint(control1, in: vector))\(customPathPoint(control2, in: vector))\(customPathPoint(end, in: vector))</a:cubicBezTo>"
+            case .close:
+                return "<a:close/>"
+            }
+        }.joined()
+        return "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l=\"l\" t=\"t\" r=\"r\" b=\"b\"/><a:pathLst><a:path w=\"\(pathWidth)\" h=\"\(pathHeight)\">\(commands)</a:path></a:pathLst></a:custGeom>"
+    }
+
+    func customPathPoint(
+        _ point: CGPoint,
+        in vector: PDFSceneVector
+    ) -> String {
+        let x = max(
+            0,
+            Int(((point.x - vector.bounds.minX) * emuPerPoint).rounded())
+        )
+        let y = max(
+            0,
+            Int(((vector.bounds.maxY - point.y) * emuPerPoint).rounded())
+        )
+        return "<a:pt x=\"\(x)\" y=\"\(y)\"/>"
+    }
+
     func textAnchor(
         textBox: PDFSceneTextBox,
         x: Int,
         y: Int,
         width: Int,
         height: Int,
-        docPrID: Int
+        docPrID: Int,
+        locked: Bool = false
     ) -> String {
         let leadingInset = textMarginEMU(textBox.officeLeadingInset)
         let trailingInset = textMarginEMU(textBox.officeTrailingInset)
         let shape = """
-        <wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(width)" cy="\(height)"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>\(textBoxContent(textBox))</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz" wrap="none" lIns="\(leadingInset)" tIns="0" rIns="\(trailingInset)" bIns="0" anchor="t"><a:noAutofit/></wps:bodyPr></wps:wsp>
+        <wps:wsp><wps:cNvSpPr txBox="1">\(locked ? "<a:spLocks noSelect=\"1\" noGrp=\"1\" noTextEdit=\"1\" noMove=\"1\" noResize=\"1\" noRot=\"1\"/>" : "")</wps:cNvSpPr><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(width)" cy="\(height)"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>\(textBoxContent(textBox))</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz" wrap="none" lIns="\(leadingInset)" tIns="0" rIns="\(trailingInset)" bIns="0" anchor="t"><a:noAutofit/></wps:bodyPr></wps:wsp>
         """
         return anchorPrefix(
             x: x,
             y: y,
             width: width,
             height: height,
-            relativeHeight: 1_000_000 + docPrID,
-            behindDocument: false
+            relativeHeight: locked ? docPrID : 1_000_000 + docPrID,
+            behindDocument: false,
+            locked: locked
         ) + "<wp:docPr id=\"\(docPrID)\" name=\"Text \(docPrID)\"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect=\"1\"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">\(shape)</a:graphicData></a:graphic></wp:anchor>"
     }
 

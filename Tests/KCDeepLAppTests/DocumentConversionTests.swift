@@ -6,6 +6,7 @@ import XCTest
 @testable import KCDeepL
 
 final class DocumentConversionTests: XCTestCase {
+
     func testNativeExtractorBuildsAOnePageSceneAndPPTX() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("KCDeepL-ConversionTests-\(UUID().uuidString)", isDirectory: true)
@@ -118,11 +119,6 @@ final class DocumentConversionTests: XCTestCase {
 
         XCTAssertGreaterThanOrEqual(report.imageOccurrenceCount, 1)
         XCTAssertGreaterThanOrEqual(report.extractedImageCount, 1)
-        XCTAssertTrue(
-            (try Data(contentsOf: output)).range(
-                of: Data("object-1-1.png".utf8)
-            ) != nil
-        )
 
         let scene = try PDFSceneExtractor().extract(sourceURL: source)
         let page = try XCTUnwrap(scene.pages.first)
@@ -130,19 +126,23 @@ final class DocumentConversionTests: XCTestCase {
             page.images.first(where: { $0.hasAlpha || $0.maskApplied })
         )
         XCTAssertFalse(transparentImage.canOverlayOnPageSafetyNet)
+        XCTAssertTrue(
+            transparentImage.canRecreateOnRepairedPage,
+            "A transparent image on a simple, fully recoverable backdrop must become a native Office picture."
+        )
 
         let parts = try PresentationMLWriter().makeParts(scene: scene)
+        XCTAssertNotNil(
+            parts.first(where: { $0.name == "ppt/media/object-1-1.png" }),
+            "The selectable source image must be packaged separately from the page template."
+        )
         let slidePart = try XCTUnwrap(
             parts.first(where: { $0.name == "ppt/slides/slide1.xml" })
         )
         let slideXML = try XCTUnwrap(String(data: slidePart.data, encoding: .utf8))
-        let imageIndex = try XCTUnwrap(page.images.firstIndex(where: {
-            $0.id == transparentImage.id
-        }))
-        let transparentRelationshipID = "rId\(imageIndex + 3)"
-        XCTAssertFalse(
-            slideXML.contains("r:embed=\"\(transparentRelationshipID)\""),
-            "A transparent/masked image must not blend a second time over the page safety-net."
+        XCTAssertTrue(
+            slideXML.contains("r:embed=\"rId3\""),
+            "The transparent image must be reinserted over its repaired template, not omitted or blended twice over original pixels."
         )
     }
 
@@ -157,15 +157,314 @@ final class DocumentConversionTests: XCTestCase {
         let opaqueImage = try XCTUnwrap(
             page.images.first(where: { !$0.hasAlpha && !$0.maskApplied })
         )
+        let laterVector = try XCTUnwrap(
+            page.vectors.max(by: { $0.paintOrder < $1.paintOrder })
+        )
+
+        XCTAssertGreaterThan(
+            laterVector.paintOrder,
+            opaqueImage.paintOrder,
+            "Vector and image paint orders must share one PDF content-stream sequence."
+        )
 
         XCTAssertFalse(
             opaqueImage.canOverlayOnPageSafetyNet,
             "An opaque PDF image covered by later paint must remain only in the authoritative page raster."
         )
         XCTAssertFalse(opaqueImage.isSafetyNetVerifiedOpaque)
+        XCTAssertFalse(
+            opaqueImage.canRecreateOnRepairedPage,
+            "A later paint layer must also prevent template repair and native image reinsertion."
+        )
     }
 
-    func testOfficeRunResolverCanonicalizesLegacyTypefaceAndBullet() {
+    func testTransparentImageCoveredByLaterPaintRemainsInTemplate() throws {
+        let directory = try temporaryDirectory(prefix: "KCDeepL-TransparentImageSafetyNetTests")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("transparent-image-covered.pdf")
+        try makePDFWithImage(
+            at: source,
+            // This later rectangle intersects both opaque and semi-transparent
+            // pixels. Reinserting the source PNG above the repaired template
+            // would otherwise hide the real topmost PDF paint.
+            laterPaintRect: CGRect(x: 180, y: 175, width: 84, height: 54)
+        )
+
+        let scene = try PDFSceneExtractor().extract(sourceURL: source)
+        let page = try XCTUnwrap(scene.pages.first)
+        let transparentImage = try XCTUnwrap(
+            page.images.first(where: { $0.hasAlpha || $0.maskApplied })
+        )
+
+        XCTAssertFalse(transparentImage.canOverlayOnPageSafetyNet)
+        XCTAssertFalse(
+            transparentImage.canRecreateOnRepairedPage,
+            "A later paint layer must prevent a transparent source image from covering the final PDF content."
+        )
+    }
+
+    func testImagePlacementCapturesNonRectangularPDFClip() throws {
+        let directory = try temporaryDirectory(prefix: "KCDeepL-ImageClipTests")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("clipped-image.pdf")
+        try makePDFWithClippedImage(at: source)
+
+        let scene = try PDFSceneExtractor().extract(sourceURL: source)
+        let page = try XCTUnwrap(scene.pages.first)
+        let clippedImage = try XCTUnwrap(
+            page.images.first(where: { $0.clip != nil })
+        )
+        let clip = try XCTUnwrap(clippedImage.clip)
+
+        XCTAssertGreaterThanOrEqual(clip.pathCommands.count, 4)
+        XCTAssertTrue(
+            clip.pathCommands.contains { command in
+                if case .close = command { return true }
+                return false
+            },
+            "The PDF clipping polygon must retain its closed path for DrawingML custom geometry."
+        )
+        XCTAssertTrue(clippedImage.hasRepresentableGeometry)
+        XCTAssertFalse(
+            clippedImage.canRecreateOnRepairedPage,
+            "A non-rectangular clip cannot be repaired by erasing a rectangular page-fallback area."
+        )
+    }
+
+    func testImageClipVisibilityProofExcludesMaskedOutPixels() {
+        let clip = PDFSceneImageClip(
+            bounds: CGRect(x: 100, y: 100, width: 160, height: 160),
+            pathCommands: [
+                .move(CGPoint(x: 100, y: 100)),
+                .line(CGPoint(x: 260, y: 100)),
+                .line(CGPoint(x: 260, y: 260)),
+                .close
+            ]
+        )
+
+        XCTAssertTrue(
+            PDFSceneExtractor.pointIsInsideImageClip(
+                CGPoint(x: 220, y: 130),
+                clip: clip
+            )
+        )
+        XCTAssertFalse(
+            PDFSceneExtractor.pointIsInsideImageClip(
+                CGPoint(x: 120, y: 240),
+                clip: clip
+            ),
+            "The alpha visibility proof must ignore source pixels outside a PDF clip."
+        )
+    }
+
+    func testPresentationWriterSerializesClippedImageAsEditableFreeform() throws {
+        let clip = PDFSceneImageClip(
+            bounds: CGRect(x: 200, y: 40, width: 160, height: 120),
+            pathCommands: [
+                .move(CGPoint(x: 200, y: 40)),
+                .line(CGPoint(x: 360, y: 40)),
+                .line(CGPoint(x: 360, y: 160)),
+                .line(CGPoint(x: 240, y: 160)),
+                .close
+            ]
+        )
+        let image = PDFSceneImage(
+            id: "clipped-image",
+            sourceName: "photo",
+            bounds: CGRect(x: 200, y: 40, width: 160, height: 120),
+            pngData: Data([0]),
+            paintOrder: 2,
+            hasAlpha: false,
+            maskApplied: false,
+            backdropColor: nil,
+            isBackdropIndependent: true,
+            isSafetyNetVerifiedOpaque: true,
+            hasRepresentableGeometry: true,
+            isNativeObjectEligible: true,
+            isLayeredTemplateEligible: true,
+            hasVisibleReferenceContribution: true,
+            clip: clip
+        )
+        let page = PDFScenePage(
+            id: "clipped-page",
+            pageIndex: 0,
+            cropBox: CGRect(x: 0, y: 0, width: 400, height: 240),
+            rotation: 0,
+            pageImagePNG: Data([0]),
+            textBoxes: [],
+            images: [image],
+            vectors: [],
+            templateObjects: [],
+            imageOccurrenceCount: 1,
+            extractedImageCount: 1,
+            nativeVectorCount: 0,
+            warnings: [],
+            usesPageRasterFallback: false
+        )
+        let scene = PDFSceneDocument(
+            sourceURL: URL(fileURLWithPath: "/tmp/clipped-image.pdf"),
+            sourceSHA256: "clip-fixture",
+            pages: [page],
+            warnings: []
+        )
+
+        let parts = try PresentationMLWriter().makeParts(scene: scene)
+        let slide = try XCTUnwrap(parts.first(where: { $0.name == "ppt/slides/slide1.xml" }))
+        let xml = try XCTUnwrap(String(data: slide.data, encoding: .utf8))
+
+        XCTAssertTrue(xml.contains("name=\"PDF clipped image photo\""))
+        XCTAssertTrue(xml.contains("<a:custGeom>"))
+        XCTAssertTrue(xml.contains("<a:blipFill"))
+        XCTAssertTrue(xml.contains("<a:close/>"))
+    }
+
+    func testPresentationWriterReplaysImagesAndVectorsInGlobalPaintOrder() throws {
+        let black = PDFTextColor(red: 0, green: 0, blue: 0, alpha: 1)
+        let earlyVector = PDFSceneVector(
+            id: "early-vector",
+            kind: .rectangle,
+            bounds: CGRect(x: 20, y: 20, width: 80, height: 60),
+            pathCommands: [],
+            stroke: nil,
+            fill: black,
+            lineWidth: 0,
+            rotation: 0,
+            paintOrder: 10,
+            nativeEligible: true,
+            isSafetyNetVerifiedOpaque: true
+        )
+        let image = PDFSceneImage(
+            id: "photo",
+            sourceName: "photo",
+            bounds: CGRect(x: 80, y: 40, width: 120, height: 90),
+            pngData: Data([0]),
+            paintOrder: 20,
+            hasAlpha: false,
+            maskApplied: false,
+            backdropColor: nil,
+            isBackdropIndependent: true,
+            isSafetyNetVerifiedOpaque: true,
+            hasRepresentableGeometry: true,
+            isNativeObjectEligible: true,
+            isLayeredTemplateEligible: true,
+            hasVisibleReferenceContribution: true
+        )
+        let lateVector = PDFSceneVector(
+            id: "late-vector",
+            kind: .rectangle,
+            bounds: CGRect(x: 120, y: 70, width: 70, height: 50),
+            pathCommands: [],
+            stroke: nil,
+            fill: black,
+            lineWidth: 0,
+            rotation: 0,
+            paintOrder: 30,
+            nativeEligible: true,
+            isSafetyNetVerifiedOpaque: true
+        )
+        let page = PDFScenePage(
+            id: "paint-order-page",
+            pageIndex: 0,
+            cropBox: CGRect(x: 0, y: 0, width: 400, height: 240),
+            rotation: 0,
+            pageImagePNG: Data([0]),
+            textBoxes: [],
+            images: [image],
+            vectors: [lateVector, earlyVector],
+            templateObjects: [],
+            imageOccurrenceCount: 1,
+            extractedImageCount: 1,
+            nativeVectorCount: 2,
+            warnings: [],
+            usesPageRasterFallback: false
+        )
+        let scene = PDFSceneDocument(
+            sourceURL: URL(fileURLWithPath: "/tmp/paint-order.pdf"),
+            sourceSHA256: "paint-order-fixture",
+            pages: [page],
+            warnings: []
+        )
+
+        let parts = try PresentationMLWriter().makeParts(scene: scene)
+        let slide = try XCTUnwrap(parts.first(where: { $0.name == "ppt/slides/slide1.xml" }))
+        let xml = try XCTUnwrap(String(data: slide.data, encoding: .utf8))
+        let early = try XCTUnwrap(xml.range(of: "name=\"PDF rectangle 3\""))
+        let photo = try XCTUnwrap(xml.range(of: "name=\"PDF image photo\""))
+        let late = try XCTUnwrap(xml.range(of: "name=\"PDF rectangle 5\""))
+
+        XCTAssertLessThan(early.lowerBound, photo.lowerBound)
+        XCTAssertLessThan(photo.lowerBound, late.lowerBound)
+    }
+
+    func testScaledOpaqueImageIsRecreatedAsNativePicture() throws {
+        let directory = try temporaryDirectory(prefix: "KCDeepL-OpaqueImageNativeTests")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("opaque-image.pdf")
+        try makePDFWithOpaqueImage(at: source, laterPaintRect: nil)
+
+        let scene = try PDFSceneExtractor().extract(sourceURL: source)
+        let page = try XCTUnwrap(scene.pages.first)
+        let opaqueImage = try XCTUnwrap(
+            page.images.first(where: { !$0.hasAlpha && !$0.maskApplied })
+        )
+
+        XCTAssertTrue(opaqueImage.isSafetyNetVerifiedOpaque)
+        XCTAssertTrue(opaqueImage.canRecreateOnRepairedPage)
+
+        let parts = try PresentationMLWriter().makeParts(scene: scene)
+        let slidePart = try XCTUnwrap(
+            parts.first(where: { $0.name == "ppt/slides/slide1.xml" })
+        )
+        let slideXML = try XCTUnwrap(String(data: slidePart.data, encoding: .utf8))
+        let imageIndex = try XCTUnwrap(page.images.firstIndex(where: { $0.id == opaqueImage.id }))
+        XCTAssertTrue(slideXML.contains("r:embed=\"rId\(imageIndex + 3)\""))
+    }
+
+    func testOpaqueImageWithSmallLaterPaintDoesNotOverlaySafetyNet() throws {
+        let directory = try temporaryDirectory(prefix: "KCDeepL-SmallOpaqueImageSafetyNetTests")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("opaque-image-small-covered.pdf")
+        try makePDFWithOpaqueImage(
+            at: source,
+            // Four and a half percent of the image: small enough to evade a
+            // pure mean-error gate, but large enough to be visibly wrong if
+            // the source image is inserted over it again.
+            laterPaintRect: CGRect(x: 180, y: 260, width: 100, height: 30)
+        )
+
+        let scene = try PDFSceneExtractor().extract(sourceURL: source)
+        let page = try XCTUnwrap(scene.pages.first)
+        let opaqueImage = try XCTUnwrap(
+            page.images.first(where: { !$0.hasAlpha && !$0.maskApplied })
+        )
+
+        XCTAssertFalse(opaqueImage.isSafetyNetVerifiedOpaque)
+        XCTAssertFalse(opaqueImage.canRecreateOnRepairedPage)
+    }
+
+    func testOpaqueImageWithSmallLaterPaintDoesNotPassDirectPixelMatch() throws {
+        let directory = try temporaryDirectory(prefix: "KCDeepL-DirectImageSafetyNetTests")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("opaque-image-direct-covered.pdf")
+        try makePDFWithOpaqueImage(
+            at: source,
+            // This source is white, so the direct RGB mean remains low even
+            // though a compact black later paint layer is visible.
+            laterPaintRect: CGRect(x: 180, y: 260, width: 80, height: 20),
+            solidWhite: true
+        )
+
+        let scene = try PDFSceneExtractor().extract(sourceURL: source)
+        let page = try XCTUnwrap(scene.pages.first)
+        let opaqueImage = try XCTUnwrap(
+            page.images.first(where: { !$0.hasAlpha && !$0.maskApplied })
+        )
+
+        XCTAssertFalse(opaqueImage.isSafetyNetVerifiedOpaque)
+        XCTAssertFalse(opaqueImage.canRecreateOnRepairedPage)
+    }
+
+    func testOfficeRunResolverCanonicalizesLegacyTypefaceAndBullet() throws {
         let run = PDFOfficeTextAppearance.run(
             text: "\u{F0B7} FAQ",
             fontName: "ArialMT",
@@ -192,9 +491,252 @@ final class DocumentConversionTests: XCTestCase {
             fontSize: 14,
             color: .black
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             branded.isOfficeCompatible,
-            "An unembedded branded font must retain source paint instead of silently falling back in Office."
+            "A bundled OFL font must resolve to an editable Office typeface."
+        )
+        XCTAssertEqual(
+            branded.fontName,
+            "Barlow",
+            "The real Barlow faces are embedded into the PPTX package."
+        )
+        XCTAssertNil(branded.sourceFontName)
+
+        let fitted = PDFOfficeTextAppearance.calibratedRuns(
+            [branded],
+            sourceWidth: 40
+        )
+        let fittedRun = try XCTUnwrap(fitted.first)
+        XCTAssertEqual(
+            fittedRun.fontSize,
+            branded.fontSize,
+            "A real embedded face preserves the PDF's original typographic metrics."
+        )
+    }
+
+    func testPresentationWriterEmbedsBundledBarlowForEditableText() throws {
+        XCTAssertNotNil(
+            AppResourceLocator.url(
+                forResource: "Barlow-Regular",
+                withExtension: "ttf",
+                subdirectory: "Fonts/Barlow"
+            )
+        )
+        XCTAssertTrue(OfficeEmbeddedFontCatalog.canEmbedPresentationTypeface("Barlow"))
+        let run = PDFSceneTextRun(
+            PDFOfficeTextAppearance.run(
+                text: "Editable Barlow",
+                fontName: "Barlow-Regular",
+                fontSize: 20,
+                color: .black
+            )
+        )
+        let line = PDFSceneTextLine(
+            id: "barlow-line",
+            text: "Editable Barlow",
+            bounds: CGRect(x: 60, y: 480, width: 180, height: 24),
+            runs: [run],
+            sourceMaskBounds: CGRect(x: 60, y: 480, width: 180, height: 24),
+            sourceMaskIsSafe: true,
+            extractionSource: .native
+        )
+        let textBox = PDFSceneTextBox(
+            id: "barlow-box",
+            text: "Editable Barlow",
+            bounds: CGRect(x: 60, y: 480, width: 180, height: 24),
+            fontName: "Barlow",
+            fontSize: 20,
+            color: .black,
+            alignment: .left,
+            lineCount: 1,
+            sourceLineIDs: [line.id],
+            extractionSource: .native,
+            lines: [line],
+            visualPolicy: .replaceSourcePaint
+        )
+        let page = PDFScenePage(
+            id: "barlow-page",
+            pageIndex: 0,
+            cropBox: CGRect(x: 0, y: 0, width: 400, height: 240),
+            rotation: 0,
+            pageImagePNG: Data([0]),
+            textBoxes: [textBox],
+            images: [],
+            vectors: [],
+            templateObjects: [],
+            imageOccurrenceCount: 0,
+            extractedImageCount: 0,
+            nativeVectorCount: 0,
+            warnings: [],
+            usesPageRasterFallback: true
+        )
+        let scene = PDFSceneDocument(
+            sourceURL: URL(fileURLWithPath: "/tmp/barlow-source.pdf"),
+            sourceSHA256: "barlow-fixture",
+            pages: [page],
+            warnings: []
+        )
+
+        let parts = try PresentationMLWriter().makeParts(scene: scene)
+        let fontParts = parts.filter { $0.name.hasPrefix("ppt/fonts/") }
+        XCTAssertEqual(fontParts.count, 4)
+        for fontPart in fontParts {
+            XCTAssertGreaterThan(fontPart.data.count, 1_000)
+            XCTAssertEqual(fontPart.data[34], 0x4C)
+            XCTAssertEqual(fontPart.data[35], 0x50)
+            let declaredSize = Int(fontPart.data[0])
+                | Int(fontPart.data[1]) << 8
+                | Int(fontPart.data[2]) << 16
+                | Int(fontPart.data[3]) << 24
+            XCTAssertEqual(declaredSize, fontPart.data.count)
+        }
+        let boldFace = try XCTUnwrap(
+            fontParts.first(where: { $0.name == "ppt/fonts/font2.fntdata" })
+        )
+        let boldDescriptor = try XCTUnwrap(
+            "Barlow Bold".data(using: .utf16LittleEndian)
+        )
+        let semiBoldDescriptor = try XCTUnwrap(
+            "Barlow SemiBold".data(using: .utf16LittleEndian)
+        )
+        XCTAssertNotNil(
+            boldFace.data.range(of: boldDescriptor),
+            "The <p:bold> face must embed Barlow Bold, not a synthesized or SemiBold substitute."
+        )
+        XCTAssertNil(
+            boldFace.data.range(of: semiBoldDescriptor)
+        )
+
+        let presentation = try XCTUnwrap(
+            parts.first(where: { $0.name == "ppt/presentation.xml" })
+        )
+        let presentationXML = String(decoding: presentation.data, as: UTF8.self)
+        XCTAssertTrue(presentationXML.contains("embedTrueTypeFonts=\"1\""))
+        XCTAssertTrue(presentationXML.contains("typeface=\"Barlow\""))
+        XCTAssertTrue(presentationXML.contains("<p:regular r:id="))
+        XCTAssertTrue(presentationXML.contains("<p:bold r:id="))
+        XCTAssertTrue(presentationXML.contains("<p:italic r:id="))
+        XCTAssertTrue(presentationXML.contains("<p:boldItalic r:id="))
+
+        let relationships = try XCTUnwrap(
+            parts.first(where: { $0.name == "ppt/_rels/presentation.xml.rels" })
+        )
+        let relationshipsXML = String(decoding: relationships.data, as: UTF8.self)
+        XCTAssertEqual(
+            relationshipsXML.components(separatedBy: "/relationships/font").count - 1,
+            4
+        )
+        let contentTypes = try XCTUnwrap(
+            parts.first(where: { $0.name == "[Content_Types].xml" })
+        )
+        XCTAssertTrue(
+            String(decoding: contentTypes.data, as: UTF8.self)
+                .contains("Extension=\"fntdata\" ContentType=\"application/x-fontdata\"")
+        )
+        let slide = try XCTUnwrap(
+            parts.first(where: { $0.name == "ppt/slides/slide1.xml" })
+        )
+        let slideXML = String(decoding: slide.data, as: UTF8.self)
+        XCTAssertTrue(slideXML.contains("typeface=\"Barlow\""))
+        XCTAssertTrue(
+            slideXML.contains("spc=\"4\""),
+            "Editable Barlow Regular runs retain the calibrated DrawingML advance."
+        )
+    }
+
+    func testPresentationWriterUsesSoftLineBreaksForWrappedListItem() throws {
+        let firstRun = PDFSceneTextRun(
+            PDFTextRun(
+                text: "• First source line",
+                fontName: "Arial",
+                fontSize: 12,
+                textColor: .black,
+                isOfficeCompatible: true
+            )
+        )
+        let continuationRun = PDFSceneTextRun(
+            PDFTextRun(
+                text: "wrapped continuation",
+                fontName: "Arial",
+                fontSize: 12,
+                textColor: .black,
+                isOfficeCompatible: true
+            )
+        )
+        let first = PDFSceneTextLine(
+            id: "wrapped-list-first",
+            text: "• First source line",
+            bounds: CGRect(x: 50, y: 198, width: 140, height: 12),
+            runs: [firstRun],
+            sourceMaskBounds: CGRect(x: 50, y: 198, width: 140, height: 12),
+            sourceMaskIsSafe: true,
+            extractionSource: .native,
+            listTabStop: 24
+        )
+        let continuation = PDFSceneTextLine(
+            id: "wrapped-list-continuation",
+            text: "wrapped continuation",
+            bounds: CGRect(x: 74, y: 176, width: 120, height: 12),
+            runs: [continuationRun],
+            sourceMaskBounds: CGRect(x: 74, y: 176, width: 120, height: 12),
+            sourceMaskIsSafe: true,
+            extractionSource: .native
+        )
+        let textBox = PDFSceneTextBox(
+            id: "wrapped-list-box",
+            text: "• First source line\nwrapped continuation",
+            bounds: CGRect(x: 50, y: 176, width: 144, height: 34),
+            fontName: "Arial",
+            fontSize: 12,
+            color: .black,
+            alignment: .left,
+            lineCount: 2,
+            sourceLineIDs: [first.id, continuation.id],
+            extractionSource: .native,
+            lines: [first, continuation],
+            visualPolicy: .replaceSourcePaint
+        )
+        let page = PDFScenePage(
+            id: "wrapped-list-page",
+            pageIndex: 0,
+            cropBox: CGRect(x: 0, y: 0, width: 300, height: 240),
+            rotation: 0,
+            pageImagePNG: Data([0]),
+            textBoxes: [textBox],
+            images: [],
+            vectors: [],
+            templateObjects: [],
+            imageOccurrenceCount: 0,
+            extractedImageCount: 0,
+            nativeVectorCount: 0,
+            warnings: [],
+            usesPageRasterFallback: true
+        )
+        let scene = PDFSceneDocument(
+            sourceURL: URL(fileURLWithPath: "/tmp/wrapped-list.pdf"),
+            sourceSHA256: "wrapped-list-fixture",
+            pages: [page],
+            warnings: []
+        )
+
+        let parts = try PresentationMLWriter().makeParts(scene: scene)
+        let slide = try XCTUnwrap(
+            parts.first(where: { $0.name == "ppt/slides/slide1.xml" })
+        )
+        let xml = String(decoding: slide.data, as: UTF8.self)
+
+        XCTAssertEqual(
+            xml.components(separatedBy: "<a:p>").count - 1,
+            1,
+            "One PDF paragraph must remain one editable PowerPoint paragraph."
+        )
+        XCTAssertTrue(xml.contains("<a:br/>"))
+        XCTAssertTrue(xml.contains("marL=\"304800\""))
+        XCTAssertTrue(xml.contains("indent=\"-304800\""))
+        XCTAssertTrue(xml.contains("<a:spcPts val=\"2200\"/>"))
+        XCTAssertTrue(
+            xml.contains("tIns=\"45720\""),
+            "A fixed-line paragraph needs its proportional top reserve in the text frame."
         )
     }
 
@@ -247,11 +789,32 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertGreaterThan(color.blueComponent, 0.99)
     }
 
-    func testTextOnNonUniformBackgroundPreservesTheSourceSafetyNet() throws {
+    func testTextOnNonUniformBackgroundUsesGlyphAwareTemplateRepair() throws {
         let directory = try temporaryDirectory(prefix: "KCDeepL-NonUniformTextMaskTests")
         defer { try? FileManager.default.removeItem(at: directory) }
         let source = directory.appendingPathComponent("non-uniform-text.pdf")
         try makePDFWithNonUniformTextBackground(at: source)
+
+        let analysis = try PDFDocumentAnalysisService(
+            includeOCR: true,
+            includeSupplementalOCR: false,
+            maximumOCRImageDimension: 2_400,
+            requiresSourceMaskHaloValidation: true,
+            retainDocumentChromeForTemplate: true
+        ).analyze(sourceURL: source)
+        let analyzedLine = try XCTUnwrap(
+            analysis.pages.first?.lines.first(where: {
+                $0.text.contains("background safety")
+            })
+        )
+        XCTAssertFalse(
+            analyzedLine.sourceMaskIsSafe,
+            "The non-uniform template must remain protected from rectangular source-paint removal."
+        )
+        XCTAssertNotNil(
+            analyzedLine.inkTopY,
+            "A protected template can still provide a reliable rendered-ink anchor for editable Office text."
+        )
 
         let scene = try PDFSceneExtractor().extract(sourceURL: source)
         let page = try XCTUnwrap(scene.pages.first)
@@ -261,8 +824,96 @@ final class DocumentConversionTests: XCTestCase {
 
         XCTAssertEqual(
             textBox.visualPolicy,
-            .preserveSourcePaint,
-            "A mask crossing even a light template transition must retain the exact source raster."
+            .repairSourcePaint,
+            "Native text on a non-uniform backdrop must remain editable through local glyph repair."
+        )
+    }
+
+    func testParagraphAlignmentPrefersRepeatedLeadingEdges() {
+        let makeLine: (String, CGFloat, CGFloat, CGFloat) -> PDFTextLine = {
+            id, x, width, y in
+            PDFTextLine(
+                id: id,
+                text: "A paragraph line with measurable width",
+                runs: [
+                    PDFTextRun(
+                        text: "A paragraph line with measurable width",
+                        fontName: "Arial",
+                        fontSize: 18,
+                        textColor: .black,
+                        isOfficeCompatible: true
+                    )
+                ],
+                bounds: CGRect(x: x, y: y, width: width, height: 22),
+                sourceMaskBounds: CGRect(x: x, y: y, width: width, height: 22),
+                sourceMaskIsSafe: true,
+                fontName: "Arial",
+                fontSize: 18,
+                textColor: .black,
+                backgroundColor: .white,
+                alignment: .center,
+                readingOrder: 0,
+                columnIndex: 0,
+                extractionSource: .native
+            )
+        }
+        let lines = [
+            makeLine("one", 160, 150, 300),
+            makeLine("two", 160, 260, 276),
+            makeLine("three", 160, 125, 252)
+        ]
+
+        XCTAssertEqual(
+            PDFOfficeTextAppearance.paragraphAlignment(
+                for: lines,
+                fallback: .center
+            ),
+            .left,
+            "A narrow inferred column must not turn a common leading edge into centred text."
+        )
+    }
+
+    func testParagraphAlignmentPrefersRepeatedMidpoints() {
+        let makeLine: (String, CGFloat, CGFloat, CGFloat) -> PDFTextLine = {
+            id, x, width, y in
+            PDFTextLine(
+                id: id,
+                text: "A paragraph line with measurable width",
+                runs: [
+                    PDFTextRun(
+                        text: "A paragraph line with measurable width",
+                        fontName: "Arial",
+                        fontSize: 18,
+                        textColor: .black,
+                        isOfficeCompatible: true
+                    )
+                ],
+                bounds: CGRect(x: x, y: y, width: width, height: 22),
+                sourceMaskBounds: CGRect(x: x, y: y, width: width, height: 22),
+                sourceMaskIsSafe: true,
+                fontName: "Arial",
+                fontSize: 18,
+                textColor: .black,
+                backgroundColor: .white,
+                alignment: .left,
+                readingOrder: 0,
+                columnIndex: 0,
+                extractionSource: .native
+            )
+        }
+        let lines = [
+            makeLine("one", 210, 180, 300),
+            makeLine("two", 170, 260, 276),
+            makeLine("three", 240, 120, 252)
+        ]
+
+        XCTAssertEqual(
+            PDFOfficeTextAppearance.paragraphAlignment(
+                for: lines,
+                fallback: .left
+            ),
+            .center,
+            "A multi-line title with one shared midpoint must remain centred."
         )
     }
 
@@ -358,9 +1009,9 @@ final class DocumentConversionTests: XCTestCase {
             columnIndex: 0,
             extractionSource: .native
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             PDFOfficeTextAppearance.canReplaceSourcePaint(lines: [standaloneBullet]),
-            "A standalone list marker must remain in the source safety-net."
+            "Glyph-aware template repair removes only the marker pixels, so a supported standalone bullet remains editable."
         )
     }
 
@@ -430,6 +1081,63 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertGreaterThan(
             resolvedText.dropFirst().prefix(while: \.isWhitespace).count,
             0
+        )
+    }
+
+    func testListContinuationWithOverlappingSelectionCellsStaysInSameBlock() {
+        let run = PDFTextRun(
+            text: "• First visual line",
+            fontName: "Barlow",
+            fontSize: 18,
+            textColor: .black,
+            isOfficeCompatible: true
+        )
+        let first = PDFTextLine(
+            id: "list-first",
+            text: run.text,
+            runs: [run],
+            bounds: CGRect(x: 21.72, y: 299.27, width: 826.03, height: 25.36),
+            sourceMaskBounds: CGRect(x: 21.72, y: 299.27, width: 826.03, height: 25.36),
+            sourceMaskIsSafe: false,
+            fontName: "Barlow",
+            fontSize: 18,
+            textColor: .black,
+            backgroundColor: .white,
+            alignment: .left,
+            readingOrder: 0,
+            columnIndex: -1,
+            extractionSource: .native
+        )
+        let continuationRun = PDFTextRun(
+            text: "wrapped continuation",
+            fontName: "Barlow",
+            fontSize: 18,
+            textColor: .black,
+            isOfficeCompatible: true
+        )
+        let continuation = PDFTextLine(
+            id: "list-continuation",
+            text: continuationRun.text,
+            runs: [continuationRun],
+            bounds: CGRect(x: 48.72, y: 281.92, width: 258.66, height: 23.27),
+            sourceMaskBounds: CGRect(x: 48.72, y: 281.92, width: 258.66, height: 23.27),
+            sourceMaskIsSafe: false,
+            fontName: "Barlow",
+            fontSize: 18,
+            textColor: .black,
+            backgroundColor: .white,
+            alignment: .left,
+            readingOrder: 1,
+            columnIndex: 0,
+            extractionSource: .native
+        )
+
+        XCTAssertTrue(
+            PDFDocumentAnalysisService.canJoin(
+                first,
+                continuation,
+                blockStart: first
+            )
         )
     }
 
@@ -637,7 +1345,7 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertTrue(slideXML.contains("wrap=\"none\""))
         XCTAssertTrue(slideXML.contains("<a:tab pos=\"228600\"/>"))
         XCTAssertTrue(slideXML.contains("<a:tab/>"))
-        XCTAssertTrue(slideXML.contains("<a:pPr marL=\"228600\" algn=\"l\""))
+        XCTAssertTrue(slideXML.contains("<a:pPr marL=\"228600\" indent=\"-228600\" algn=\"l\""))
         XCTAssertTrue(slideXML.contains("<a:spcPts val=\"2000\"/>"))
     }
 
@@ -815,7 +1523,73 @@ private extension DocumentConversionTests {
         try (mutableData as Data).write(to: url, options: .atomic)
     }
 
-    func makePDFWithImage(at url: URL) throws {
+    func makePDFWithClippedImage(at url: URL) throws {
+        let width = 64
+        let height = 64
+        var pixels: [UInt8] = []
+        pixels.reserveCapacity(width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                pixels.append(UInt8((x * 255) / max(1, width - 1)))
+                pixels.append(UInt8((y * 255) / max(1, height - 1)))
+                pixels.append(96)
+                pixels.append(0)
+            }
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let image = CGImage(
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bitsPerPixel: 32,
+                  bytesPerRow: width * 4,
+                  space: colorSpace,
+                  bitmapInfo: CGBitmapInfo(
+                      rawValue: CGImageAlphaInfo.noneSkipLast.rawValue
+                          | CGBitmapInfo.byteOrder32Big.rawValue
+                  ),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: false,
+                  intent: .defaultIntent
+              )
+        else {
+            XCTFail("Clipped image fixture creation failed")
+            return
+        }
+
+        let mutableData = NSMutableData()
+        guard let consumer = CGDataConsumer(data: mutableData as CFMutableData) else {
+            XCTFail("PDF consumer creation failed")
+            return
+        }
+        var mediaBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        guard let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            XCTFail("PDF context creation failed")
+            return
+        }
+        context.beginPDFPage([kCGPDFContextMediaBox: mediaBox] as CFDictionary)
+        context.setFillColor(CGColor.white)
+        context.fill(mediaBox)
+        context.saveGState()
+        context.move(to: CGPoint(x: 140, y: 160))
+        context.addLine(to: CGPoint(x: 420, y: 160))
+        context.addLine(to: CGPoint(x: 420, y: 420))
+        context.addLine(to: CGPoint(x: 220, y: 420))
+        context.closePath()
+        context.clip()
+        context.draw(image, in: CGRect(x: 100, y: 120, width: 360, height: 340))
+        context.restoreGState()
+        context.endPDFPage()
+        context.closePDF()
+        try (mutableData as Data).write(to: url, options: .atomic)
+    }
+
+    func makePDFWithImage(
+        at url: URL,
+        laterPaintRect: CGRect? = nil
+    ) throws {
         let width = 48
         let height = 32
         var pixels: [UInt8] = []
@@ -863,21 +1637,29 @@ private extension DocumentConversionTests {
         }
         context.beginPDFPage([kCGPDFContextMediaBox: mediaBox] as CFDictionary)
         context.draw(image, in: CGRect(x: 80, y: 120, width: 260, height: 180))
+        if let laterPaintRect {
+            context.setFillColor(CGColor.black)
+            context.fill(laterPaintRect)
+        }
         context.endPDFPage()
         context.closePDF()
         try (mutableData as Data).write(to: url, options: .atomic)
     }
 
-    func makePDFWithOpaqueImageCoveredByLaterPaint(at url: URL) throws {
+    func makePDFWithOpaqueImage(
+        at url: URL,
+        laterPaintRect: CGRect?,
+        solidWhite: Bool = false
+    ) throws {
         let width = 64
         let height = 48
         var pixels: [UInt8] = []
         pixels.reserveCapacity(width * height * 4)
         for y in 0..<height {
             for x in 0..<width {
-                pixels.append(UInt8((x * 255) / max(1, width - 1)))
-                pixels.append(UInt8((y * 255) / max(1, height - 1)))
-                pixels.append(80)
+                pixels.append(solidWhite ? 255 : UInt8((x * 255) / max(1, width - 1)))
+                pixels.append(solidWhite ? 255 : UInt8((y * 255) / max(1, height - 1)))
+                pixels.append(solidWhite ? 255 : 80)
                 pixels.append(0)
             }
         }
@@ -916,13 +1698,23 @@ private extension DocumentConversionTests {
         }
         context.beginPDFPage([kCGPDFContextMediaBox: mediaBox] as CFDictionary)
         context.draw(image, in: CGRect(x: 120, y: 180, width: 300, height: 220))
-        // This is deliberately larger than the image-safety sampler spacing:
-        // reinserting the original image would visibly erase the later paint.
-        context.setFillColor(CGColor.black)
-        context.fill(CGRect(x: 200, y: 230, width: 150, height: 120))
+        if let laterPaintRect {
+            // This is deliberately larger than the image-safety sampler
+            // spacing: reinserting the original image would visibly erase the
+            // later paint.
+            context.setFillColor(CGColor.black)
+            context.fill(laterPaintRect)
+        }
         context.endPDFPage()
         context.closePDF()
         try (mutableData as Data).write(to: url, options: .atomic)
+    }
+
+    func makePDFWithOpaqueImageCoveredByLaterPaint(at url: URL) throws {
+        try makePDFWithOpaqueImage(
+            at: url,
+            laterPaintRect: CGRect(x: 200, y: 230, width: 150, height: 120)
+        )
     }
 
     func drawText(_ text: String, at position: CGPoint, in context: CGContext) {

@@ -19,6 +19,8 @@ final class AppFontTests: XCTestCase {
             Set([
                 AppFont.barlowRegular,
                 AppFont.barlowItalic,
+                AppFont.barlowBold,
+                AppFont.barlowBoldItalic,
                 AppFont.barlowSemibold,
                 AppFont.barlowSemiboldItalic,
                 AppFont.notoSansKRRegular,

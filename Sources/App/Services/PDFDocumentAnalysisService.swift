@@ -7,6 +7,13 @@ import Vision
 struct PDFDocumentAnalysisService: Sendable {
     private let ocrLanguages: [String]
     private let includeOCR: Bool
+    /// Hybrid OCR is useful for a translation workflow where an image region
+    /// may be the only copy of a sentence.  For Office reconstruction it is
+    /// unsafe to treat a second, approximate OCR reading as an editable
+    /// object above an already-rendered page.  Keep this switch explicit so
+    /// the conversion pipeline can still OCR genuinely image-only pages
+    /// without producing duplicate OCR ghosts on native-text pages.
+    private let includeSupplementalOCR: Bool
     private let ocrMinimumConfidence: Float
     private let maximumOCRImageDimension: CGFloat
     /// Office conversion replaces source paint with a flattened page raster
@@ -14,19 +21,26 @@ struct PDFDocumentAnalysisService: Sendable {
     /// translation/composition path does not. Keep this policy opt-in: the
     /// translator has its own layout-preservation safety contract.
     private let requiresSourceMaskHaloValidation: Bool
+    /// Translation intentionally omits document chrome. Office conversion can
+    /// opt in to retain the same source lines as locked template objects.
+    private let retainDocumentChromeForTemplate: Bool
 
     init(
         ocrLanguages: [String] = [],
         includeOCR: Bool = true,
+        includeSupplementalOCR: Bool = true,
         ocrMinimumConfidence: Float = 0.55,
         maximumOCRImageDimension: CGFloat = 3_200,
-        requiresSourceMaskHaloValidation: Bool = false
+        requiresSourceMaskHaloValidation: Bool = false,
+        retainDocumentChromeForTemplate: Bool = false
     ) {
         self.ocrLanguages = ocrLanguages
         self.includeOCR = includeOCR
+        self.includeSupplementalOCR = includeSupplementalOCR
         self.ocrMinimumConfidence = min(max(ocrMinimumConfidence, 0), 1)
         self.maximumOCRImageDimension = max(1_024, maximumOCRImageDimension)
         self.requiresSourceMaskHaloValidation = requiresSourceMaskHaloValidation
+        self.retainDocumentChromeForTemplate = retainDocumentChromeForTemplate
     }
 
     func analyze(sourceURL: URL) throws -> PDFDocumentAnalysis {
@@ -92,7 +106,7 @@ struct PDFDocumentAnalysisService: Sendable {
             var candidates = nativeCandidates
             var pageWarnings: [PDFDocumentWarning] = []
 
-            if includeOCR {
+            if includeOCR && (nativeCandidates.isEmpty || includeSupplementalOCR) {
                 let ocrResult = try visionTextCandidates(
                     on: page,
                     cropBox: cropBox,
@@ -122,7 +136,7 @@ struct PDFDocumentAnalysisService: Sendable {
                         }
                         pageWarnings.append(.ocrRequired(pageIndex: pageIndex))
                     }
-                } else if ocrResult.didFail {
+                } else if includeSupplementalOCR, ocrResult.didFail {
                     if rotation == 0 {
                         pageWarnings.append(.hybridOCRUnavailable(pageIndex: pageIndex))
                     } else {
@@ -133,7 +147,7 @@ struct PDFDocumentAnalysisService: Sendable {
                             )
                         )
                     }
-                } else {
+                } else if includeSupplementalOCR {
                     let supplementalOCR = ocrResult.candidates.filter { ocrCandidate in
                         !nativeCandidates.contains {
                             Self.areDuplicate($0, ocrCandidate)
@@ -174,6 +188,10 @@ struct PDFDocumentAnalysisService: Sendable {
                 rotation: rotation
             )
             backgroundResult = Self.applyingOCRContrast(to: backgroundResult)
+            backgroundResult = Self.promotingAdjacentFooterChrome(
+                in: backgroundResult,
+                pageBounds: cropBox
+            )
             let extractedLines = try makeLines(
                 from: backgroundResult.candidates,
                 pageIndex: pageIndex
@@ -196,12 +214,14 @@ struct PDFDocumentAnalysisService: Sendable {
                     )
                 )
             }
+            let chromeLines = extractedLines.filter(\.isDocumentChrome)
+            let contentLines = extractedLines.filter { !$0.isDocumentChrome }
             let blocks = try makeBlocks(
-                from: extractedLines,
+                from: contentLines,
                 pageIndex: pageIndex
             )
             let lines = Self.alignListBlockLines(
-                extractedLines,
+                contentLines,
                 blocks: blocks
             )
 
@@ -240,6 +260,7 @@ struct PDFDocumentAnalysisService: Sendable {
                 rotation: rotation,
                 lines: lines,
                 blocks: blocks,
+                templateChromeLines: chromeLines,
                 warnings: pageWarnings
             )
             pages.append(analysis)
@@ -275,7 +296,9 @@ private extension PDFDocumentAnalysisService {
         var backgroundColor: PDFTextColor = .white
         var sourceMaskBounds: CGRect?
         var sourceMaskIsSafe = false
+        var hasVisibleInk = false
         var alignment: PDFTextAlignment?
+        var isDocumentChrome: Bool
     }
 
     struct OCRResult {
@@ -413,9 +436,9 @@ private extension PDFDocumentAnalysisService {
             let fallbackName = extractedFontName
                 ?? NSFont.systemFont(ofSize: inferredFontSize).fontName
             let fallbackColor = trustedTextColor ?? Self.textColor(from: color)
-            let runs: [PDFTextRun]
+            let uncalibratedRuns: [PDFTextRun]
             if let attributedString {
-                runs = PDFOfficeTextAppearance.runs(
+                uncalibratedRuns = PDFOfficeTextAppearance.runs(
                     from: attributedString,
                     fallbackFontName: fallbackName,
                     fallbackFontSize: inferredFontSize,
@@ -423,7 +446,7 @@ private extension PDFDocumentAnalysisService {
                     forceSystemFallback: useSystemFallback
                 )
             } else {
-                runs = [
+                uncalibratedRuns = [
                     PDFOfficeTextAppearance.run(
                         text: Self.normalizedText(lineSelection.string ?? ""),
                         fontName: fallbackName,
@@ -433,6 +456,10 @@ private extension PDFDocumentAnalysisService {
                     )
                 ]
             }
+            let runs = PDFOfficeTextAppearance.calibratedRuns(
+                uncalibratedRuns,
+                sourceWidth: bounds.width
+            )
             let text = runs.map(\.text).joined()
             guard !text.isEmpty, let primaryRun = runs.first else { return nil }
             guard !Self.isFreeTextAnnotationAppearance(
@@ -442,12 +469,13 @@ private extension PDFDocumentAnalysisService {
             ) else {
                 return nil
             }
-            guard !Self.isPreservedDocumentChrome(
+            let isDocumentChrome = Self.isPreservedDocumentChrome(
                 text: text,
                 bounds: bounds,
                 fontSize: primaryRun.fontSize,
                 pageBounds: cropBox
-            ) else {
+            )
+            guard !isDocumentChrome || retainDocumentChromeForTemplate else {
                 return nil
             }
 
@@ -460,7 +488,8 @@ private extension PDFDocumentAnalysisService {
                 textColor: fallbackColor,
                 foregroundColorIsTrusted: trustedTextColor != nil,
                 extractionSource: .native,
-                alignment: Self.textAlignment(from: paragraphStyle?.alignment)
+                alignment: Self.textAlignment(from: paragraphStyle?.alignment),
+                isDocumentChrome: isDocumentChrome
             )
         }
     }
@@ -614,12 +643,13 @@ private extension PDFDocumentAnalysisService {
                 recognized.confidence
             )
             let fontSize = max(5, min(144, bounds.height * 0.72))
-            guard !Self.isPreservedDocumentChrome(
+            let isDocumentChrome = Self.isPreservedDocumentChrome(
                 text: text,
                 bounds: bounds,
                 fontSize: fontSize,
                 pageBounds: cropBox
-            ) else {
+            )
+            guard !isDocumentChrome || retainDocumentChromeForTemplate else {
                 continue
             }
             let systemFontName = NSFont.systemFont(ofSize: fontSize).fontName
@@ -640,7 +670,8 @@ private extension PDFDocumentAnalysisService {
                     textColor: .black,
                     foregroundColorIsTrusted: false,
                     extractionSource: .visionOCR,
-                    alignment: nil
+                    alignment: nil,
+                    isDocumentChrome: isDocumentChrome
                 )
             )
         }
@@ -719,15 +750,23 @@ private extension PDFDocumentAnalysisService {
             candidate.sourceMaskBounds = estimate.maskBounds
             candidate.sourceMaskIsSafe = !estimate.isComplex
                 && candidate.extractionSource == .native
-            if candidate.sourceMaskIsSafe,
-               candidate.foregroundColorIsTrusted {
-                candidate.inkTopY = Self.visibleInkTopY(
+            let visibleInkTop = candidate.extractionSource == .native
+                && candidate.foregroundColorIsTrusted
+                ? Self.visibleInkTopY(
                     for: candidate,
                     backgroundColor: estimate.color,
                     cropBox: cropBox,
                     bitmap: bitmap
                 )
-            }
+                : nil
+            candidate.hasVisibleInk = visibleInkTop != nil
+            // Geometry measurement and template-paint repair have different
+            // safety requirements.  A textured or translucent template may
+            // be unsafe to erase, while its rendered text edge is still a
+            // trustworthy anchor for an editable Office frame.  Retaining
+            // that independently measured anchor prevents complex-page
+            // headings from falling back to PDFKit's padded selection box.
+            candidate.inkTopY = visibleInkTop
             let outputIndex = candidates.count
             candidates.append(candidate)
             if estimate.isComplex {
@@ -989,44 +1028,59 @@ private extension PDFDocumentAnalysisService {
         // text line. It is deliberately fail-closed: preserving source paint
         // loses editability for that one line, but never damages a template or
         // places a substituted font on an artificial patch.
-        let hasUniformHalo: Bool
+        // The surrounding halo answers a different question from the sampled
+        // source-mask interior. The interior tells us the colour directly
+        // beneath this text; the halo tells us whether a rectangular solid
+        // repaint can safely extend around it. Conflating them breaks text at
+        // a shape edge (for example white text on a red banner): a white
+        // exterior halo would falsely make the visible white text look hidden.
+        //
+        // For the Office-specific solid-mask path, a *uniform* halo is also a
+        // useful fallback when the compact selection is dominated by bold
+        // glyph pixels. Never use a non-uniform halo as the paint colour;
+        // glyph-aware repair retains the local interior background instead.
+        let halo: (color: PDFTextColor, isUniform: Bool)?
         if requiresSourceMaskHaloValidation {
-            hasUniformHalo = try Self.hasUniformBackgroundHalo(
+            halo = try Self.sampledBackgroundHalo(
                 around: resolvedMaskBounds,
-                expectedBackground: dominant.color,
                 cropBox: cropBox,
                 bitmap: bitmap,
                 scaleX: scaleX,
                 scaleY: scaleY
             )
         } else {
-            hasUniformHalo = true
+            halo = nil
+        }
+        let hasUniformHalo = !requiresSourceMaskHaloValidation
+            || (halo?.isUniform ?? false)
+        let resolvedBackground: PDFTextColor
+        if let halo,
+           halo.isUniform,
+           Self.colorDistanceSquared(halo.color, foregroundColor) > 0.0025 {
+            resolvedBackground = halo.color
+        } else {
+            resolvedBackground = dominant.color
         }
         return (
-            dominant.color,
+            resolvedBackground,
             hasComplexInterior || !hasUniformHalo,
             resolvedMaskBounds
         )
     }
 
-    /// Verifies that the immediate area surrounding a source-mask rectangle
-    /// can be repainted with the same solid colour.  The mask is expanded by
-    /// a small PDF-space halo, then only the outer ring is inspected.  A
-    /// two-raster-pixel guard keeps antialiased glyph edges out of the test.
-    ///
-    /// This is intentionally stricter than the interior sampler above. A
-    /// subtle 3–6% tone change is visually noticeable when a rectangular mask
-    /// covers it even though it is harmless within a line's normal antialias
-    /// samples. Returning `false` simply retains the exact source pixels in
-    /// the safety-net image.
-    static func hasUniformBackgroundHalo(
+    /// Samples the immediate area surrounding a source-mask rectangle. The
+    /// mask is expanded by a small PDF-space halo and only the outer ring is
+    /// inspected, with a two-raster-pixel guard to keep antialiased glyph
+    /// edges out.  Besides deciding whether a direct solid fill is safe, the
+    /// method returns the colour that a glyph-aware repair must prefer over a
+    /// potentially text-contaminated selection interior.
+    static func sampledBackgroundHalo(
         around maskBounds: CGRect,
-        expectedBackground: PDFTextColor,
         cropBox: CGRect,
         bitmap: NSBitmapImageRep,
         scaleX: CGFloat,
         scaleY: CGFloat
-    ) throws -> Bool {
+    ) throws -> (color: PDFTextColor, isUniform: Bool)? {
         guard maskBounds.width > 0,
               maskBounds.height > 0,
               scaleX > 0,
@@ -1034,7 +1088,7 @@ private extension PDFDocumentAnalysisService {
               bitmap.pixelsWide > 0,
               bitmap.pixelsHigh > 0
         else {
-            return false
+            return nil
         }
 
         let minimumDimension = min(maskBounds.width, maskBounds.height)
@@ -1048,7 +1102,7 @@ private extension PDFDocumentAnalysisService {
               outerBounds.width > 0,
               outerBounds.height > 0
         else {
-            return false
+            return nil
         }
 
         func pointInBitmap(_ point: CGPoint) -> CGPoint {
@@ -1069,7 +1123,7 @@ private extension PDFDocumentAnalysisService {
               outerPixels.width > 0,
               outerPixels.height > 0
         else {
-            return false
+            return nil
         }
 
         let minimumX = max(0, Int(outerPixels.minX.rounded(.down)))
@@ -1083,15 +1137,13 @@ private extension PDFDocumentAnalysisService {
             Int((outerPixels.maxY - 1).rounded(.down))
         )
         guard minimumX <= maximumX, minimumY <= maximumY else {
-            return false
+            return nil
         }
 
         let pixelCount = (maximumX - minimumX + 1) * (maximumY - minimumY + 1)
         let strideLength = max(1, Int(sqrt(Double(pixelCount) / 1_200)))
-        var sampledCount = 0
-        var mismatchedCount = 0
-        var totalDistance: CGFloat = 0
-
+        var samples: [(red: CGFloat, green: CGFloat, blue: CGFloat)] = []
+        samples.reserveCapacity(min(1_200, pixelCount))
         for y in stride(from: minimumY, through: maximumY, by: strideLength) {
             try Task.checkCancellation()
             for x in stride(from: minimumX, through: maximumX, by: strideLength) {
@@ -1106,37 +1158,56 @@ private extension PDFDocumentAnalysisService {
                 else {
                     continue
                 }
-                sampledCount += 1
-                let distance = Self.colorDistanceSquared(
+                samples.append((
                     red: color.redComponent,
                     green: color.greenComponent,
-                    blue: color.blueComponent,
-                    to: expectedBackground
-                )
-                totalDistance += distance
-                // A per-channel difference just above 2% is enough to create
-                // a visible rectangular patch. The average/rate guards keep
-                // ordinary raster noise and a few antialiased edge pixels
-                // from needlessly disabling editable text.
-                if distance > 0.0012 {
-                    mismatchedCount += 1
-                }
+                    blue: color.blueComponent
+                ))
             }
         }
+        guard samples.count >= 12,
+              let dominant = Self.dominantColor(
+                in: samples,
+                quantizationSteps: 12
+              )
+        else {
+            return nil
+        }
 
-        guard sampledCount >= 12 else { return false }
-        let mismatchRatio = CGFloat(mismatchedCount) / CGFloat(sampledCount)
-        let meanDistance = totalDistance / CGFloat(sampledCount)
-        return mismatchRatio <= 0.025 && meanDistance <= 0.00045
+        var mismatchedCount = 0
+        var totalDistance: CGFloat = 0
+        for sample in samples {
+            let distance = Self.colorDistanceSquared(
+                red: sample.red,
+                green: sample.green,
+                blue: sample.blue,
+                to: dominant.color
+            )
+            totalDistance += distance
+            // A per-channel difference just above 2% is enough to create a
+            // visible rectangular patch. The average/rate guards keep ordinary
+            // raster noise and a few antialiased edge pixels from needlessly
+            // disabling editable text.
+            if distance > 0.0012 {
+                mismatchedCount += 1
+            }
+        }
+        let mismatchRatio = CGFloat(mismatchedCount) / CGFloat(samples.count)
+        let meanDistance = totalDistance / CGFloat(samples.count)
+        return (
+            dominant.color,
+            mismatchRatio <= 0.025 && meanDistance <= 0.00045
+        )
     }
 
     /// Finds the visible top edge of a native text line in the already-rendered
     /// source page. PDFKit's character bounds describe font cells rather than
     /// the actual painted glyphs, which makes a mixed-font marker/body line
-    /// appear to have the wrong vertical anchor. This detector uses only
-    /// candidates whose foreground and simple background were independently
-    /// verified, so textured/transparent regions safely retain selection-box
-    /// geometry instead of risking a false offset.
+    /// appear to have the wrong vertical anchor. Its result is geometry-only:
+    /// a trusted foreground and sampled local backdrop are enough to measure
+    /// the rendered edge even when that backdrop is too complex to repair.
+    /// Text-paint replacement remains guarded independently by
+    /// `sourceMaskIsSafe`, while insufficient contrast still returns `nil`.
     static func visibleInkTopY(
         for candidate: TextCandidate,
         backgroundColor: PDFTextColor,
@@ -1777,6 +1848,7 @@ private extension PDFDocumentAnalysisService {
                 sourceMaskBounds: candidate.sourceMaskBounds
                     ?? candidate.bounds,
                 sourceMaskIsSafe: candidate.sourceMaskIsSafe,
+                hasVisibleInk: candidate.hasVisibleInk,
                 fontName: candidate.fontName,
                 fontSize: candidate.fontSize,
                 textColor: candidate.textColor,
@@ -1784,7 +1856,8 @@ private extension PDFDocumentAnalysisService {
                 alignment: candidate.alignment ?? .left,
                 readingOrder: readingOrder,
                 columnIndex: candidate.columnIndex,
-                extractionSource: candidate.extractionSource
+                extractionSource: candidate.extractionSource,
+                isDocumentChrome: candidate.isDocumentChrome
             ))
         }
         return lines
@@ -1878,6 +1951,7 @@ private extension PDFDocumentAnalysisService {
                 inkTopY: line.inkTopY,
                 sourceMaskBounds: line.sourceMaskBounds,
                 sourceMaskIsSafe: line.sourceMaskIsSafe,
+                hasVisibleInk: line.hasVisibleInk,
                 fontName: line.fontName,
                 fontSize: line.fontSize,
                 textColor: line.textColor,
@@ -1885,11 +1959,15 @@ private extension PDFDocumentAnalysisService {
                 alignment: .left,
                 readingOrder: line.readingOrder,
                 columnIndex: line.columnIndex,
-                extractionSource: line.extractionSource
+                extractionSource: line.extractionSource,
+                isDocumentChrome: line.isDocumentChrome
             )
         }
     }
 
+}
+
+extension PDFDocumentAnalysisService {
     static func canJoin(
         _ previous: PDFTextLine,
         _ current: PDFTextLine,
@@ -1922,7 +2000,18 @@ private extension PDFDocumentAnalysisService {
 
         let verticalGap = previous.bounds.minY - current.bounds.maxY
         let referenceHeight = max(previous.bounds.height, current.bounds.height)
-        guard verticalGap >= -referenceHeight * 0.15,
+        // PDFKit's selection cells for two adjacent list lines can overlap
+        // even though their rendered glyphs do not.  A visibly indented,
+        // marker-less line immediately below a list item is a continuation,
+        // not an independent paragraph.  Allow that bounded cell overlap so
+        // the writer can keep both visual lines in one editable paragraph.
+        let isIndentedListContinuation = startsWithListMarker(blockStart.text)
+            && current.bounds.minX - blockStart.bounds.minX
+                >= max(6, min(previous.fontSize, current.fontSize) * 0.5)
+        let minimumVerticalGap = isIndentedListContinuation
+            ? -referenceHeight * 0.42
+            : -referenceHeight * 0.15
+        guard verticalGap >= minimumVerticalGap,
               verticalGap <= referenceHeight * 0.85
         else {
             return false
@@ -1956,6 +2045,9 @@ private extension PDFDocumentAnalysisService {
         return previous.textColor == current.textColor
     }
 
+}
+
+private extension PDFDocumentAnalysisService {
     static func startsWithListMarker(_ text: String) -> Bool {
         let normalized = normalizedText(text)
         guard let token = normalized.split(separator: " ").first else {
@@ -2344,6 +2436,79 @@ private extension PDFDocumentAnalysisService {
             .union(.punctuationCharacters)
         return !normalized.isEmpty
             && normalized.unicodeScalars.allSatisfy(ignorable.contains)
+    }
+
+    /// Extends a known legal/page-number footer to its adjacent small text.
+    /// PDF extraction frequently splits a single footer into separate visual
+    /// lines, only one of which contains the legal marker (for example,
+    /// "INTERNAL" followed by an ordinary sentence). Treating the other line
+    /// as translatable body content causes it to collide with its own
+    /// template. The promotion is deliberately local: it only crosses to a
+    /// similarly styled line in the same edge-margin cluster, never to a
+    /// large bottom-of-slide statement.
+    static func promotingAdjacentFooterChrome(
+        in result: BackgroundSamplingResult,
+        pageBounds: CGRect
+    ) -> BackgroundSamplingResult {
+        var candidates = result.candidates
+        let footerLimit = pageBounds.minY + pageBounds.height * 0.10
+        let smallFontLimit = max(10, pageBounds.height * 0.027)
+        let knownChromeIndices = candidates.indices.filter {
+            candidates[$0].isDocumentChrome
+                && candidates[$0].bounds.maxY <= footerLimit
+        }
+        guard !knownChromeIndices.isEmpty else {
+            return result
+        }
+
+        func horizontalGap(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+            max(0, max(lhs.minX - rhs.maxX, rhs.minX - lhs.maxX))
+        }
+
+        for index in candidates.indices where !candidates[index].isDocumentChrome {
+            let candidate = candidates[index]
+            guard candidate.extractionSource == .native,
+                  candidate.bounds.maxY <= footerLimit,
+                  candidate.fontSize <= smallFontLimit
+            else {
+                continue
+            }
+            let belongsToFooterCluster = knownChromeIndices.contains { chromeIndex in
+                let chrome = candidates[chromeIndex]
+                let verticalGap = max(
+                    0,
+                    max(
+                        candidate.bounds.minY - chrome.bounds.maxY,
+                        chrome.bounds.minY - candidate.bounds.maxY
+                    )
+                )
+                let permittedVerticalGap = max(
+                    8,
+                    max(candidate.fontSize, chrome.fontSize) * 1.5
+                )
+                let permittedHorizontalGap = max(
+                    14,
+                    max(candidate.fontSize, chrome.fontSize) * 2
+                )
+                return verticalGap <= permittedVerticalGap
+                    && horizontalGap(candidate.bounds, chrome.bounds)
+                        <= permittedHorizontalGap
+                    && abs(candidate.fontSize - chrome.fontSize) <= 3
+                    && colorDistanceSquared(
+                        candidate.textColor,
+                        chrome.textColor
+                    ) <= 0.08
+            }
+            if belongsToFooterCluster {
+                candidates[index].isDocumentChrome = true
+            }
+        }
+
+        return BackgroundSamplingResult(
+            candidates: candidates,
+            complexCandidateIndices: result.complexCandidateIndices,
+            unavailableCandidateIndices: result.unavailableCandidateIndices
+        )
     }
 
     static func containsPrivateSystemFontResource(_ data: Data) -> Bool {

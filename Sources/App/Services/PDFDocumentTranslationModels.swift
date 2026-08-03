@@ -33,7 +33,14 @@ struct PDFTextRun: Equatable, Sendable {
     /// An Office-compatible font family name, never an opaque PDF resource or
     /// PostScript identifier such as `ArialMT`.
     let fontName: String
+    /// The original PostScript name only when the output needs a different
+    /// Office family. This is used for metric fitting and is never serialized.
+    let sourceFontName: String?
     let fontSize: CGFloat
+    /// Source-derived tracking, in points per character gap. PDF text
+    /// operators may carry an advance that the Office font's default metrics
+    /// cannot reproduce exactly even when both use the same family.
+    let characterSpacing: CGFloat
     let textColor: PDFTextColor
     let isBold: Bool
     let isItalic: Bool
@@ -44,7 +51,9 @@ struct PDFTextRun: Equatable, Sendable {
     init(
         text: String,
         fontName: String,
+        sourceFontName: String? = nil,
         fontSize: CGFloat,
+        characterSpacing: CGFloat = 0,
         textColor: PDFTextColor,
         isBold: Bool = false,
         isItalic: Bool = false,
@@ -52,7 +61,9 @@ struct PDFTextRun: Equatable, Sendable {
     ) {
         self.text = text
         self.fontName = fontName
+        self.sourceFontName = sourceFontName
         self.fontSize = fontSize
+        self.characterSpacing = characterSpacing
         self.textColor = textColor
         self.isBold = isBold
         self.isItalic = isItalic
@@ -92,6 +103,13 @@ struct PDFTextLine: Identifiable, Equatable, Sendable {
     /// the visual safety-net image. This is deliberately separate from
     /// extractability: OCR and complex backgrounds are never safe to erase.
     let sourceMaskIsSafe: Bool
+    /// The rendered source page contains foreground-coloured glyph ink inside
+    /// this line's PDF bounds. This is deliberately independent from
+    /// sourceMaskIsSafe: a footer can be visibly present on a complex template
+    /// even when its pixels cannot be safely erased for a text overlay.
+    /// Template reconstruction uses this proof to avoid resurfacing hidden PDF
+    /// chrome above later objects.
+    let hasVisibleInk: Bool
     let fontName: String
     let fontSize: CGFloat
     let textColor: PDFTextColor
@@ -100,6 +118,9 @@ struct PDFTextLine: Identifiable, Equatable, Sendable {
     let readingOrder: Int
     let columnIndex: Int
     let extractionSource: PDFTextExtractionSource
+    /// Header/footer/legal text is deliberately excluded from translation but
+    /// retained by the Office scene extractor as a locked template layer.
+    let isDocumentChrome: Bool
 
     init(
         id: String,
@@ -109,6 +130,7 @@ struct PDFTextLine: Identifiable, Equatable, Sendable {
         inkTopY: CGFloat? = nil,
         sourceMaskBounds: CGRect,
         sourceMaskIsSafe: Bool = false,
+        hasVisibleInk: Bool = false,
         fontName: String,
         fontSize: CGFloat,
         textColor: PDFTextColor,
@@ -116,7 +138,8 @@ struct PDFTextLine: Identifiable, Equatable, Sendable {
         alignment: PDFTextAlignment,
         readingOrder: Int,
         columnIndex: Int,
-        extractionSource: PDFTextExtractionSource
+        extractionSource: PDFTextExtractionSource,
+        isDocumentChrome: Bool = false
     ) {
         self.id = id
         self.text = text
@@ -125,6 +148,7 @@ struct PDFTextLine: Identifiable, Equatable, Sendable {
         self.inkTopY = inkTopY
         self.sourceMaskBounds = sourceMaskBounds
         self.sourceMaskIsSafe = sourceMaskIsSafe
+        self.hasVisibleInk = hasVisibleInk
         self.fontName = fontName
         self.fontSize = fontSize
         self.textColor = textColor
@@ -133,6 +157,7 @@ struct PDFTextLine: Identifiable, Equatable, Sendable {
         self.readingOrder = readingOrder
         self.columnIndex = columnIndex
         self.extractionSource = extractionSource
+        self.isDocumentChrome = isDocumentChrome
     }
 }
 
@@ -157,11 +182,43 @@ struct PDFPageAnalysis: Identifiable, Equatable, Sendable {
     let rotation: Int
     let lines: [PDFTextLine]
     let blocks: [PDFTextBlock]
+    /// Non-translatable header/footer/document-chrome lines. Keeping these
+    /// separate ensures translation requests never include boilerplate while
+    /// the Office conversion path can still reconstruct the source template.
+    let templateChromeLines: [PDFTextLine]
     let warnings: [PDFDocumentWarning]
 
     /// Page-scoped text in the spatial reading order used for translation.
     var sourceText: String {
         blocks.map(\.text).joined(separator: "\n\n")
+    }
+
+    init(
+        id: String,
+        pageIndex: Int,
+        mediaBox: CGRect,
+        cropBox: CGRect,
+        bleedBox: CGRect,
+        trimBox: CGRect,
+        artBox: CGRect,
+        rotation: Int,
+        lines: [PDFTextLine],
+        blocks: [PDFTextBlock],
+        templateChromeLines: [PDFTextLine] = [],
+        warnings: [PDFDocumentWarning]
+    ) {
+        self.id = id
+        self.pageIndex = pageIndex
+        self.mediaBox = mediaBox
+        self.cropBox = cropBox
+        self.bleedBox = bleedBox
+        self.trimBox = trimBox
+        self.artBox = artBox
+        self.rotation = rotation
+        self.lines = lines
+        self.blocks = blocks
+        self.templateChromeLines = templateChromeLines
+        self.warnings = warnings
     }
 }
 
