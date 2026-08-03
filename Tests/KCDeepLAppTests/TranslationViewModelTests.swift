@@ -119,6 +119,35 @@ final class TranslationViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.translatedText, "Apple 번역 결과")
     }
 
+    func testLLMCompletionDoesNotKeepLLMWaitingWhileAppleIsStillPending() async throws {
+        let viewModel = TranslationViewModel(
+            client: DelayedTranslationClient(),
+            historyStore: InMemoryTranslationHistoryStore()
+        )
+        try await Task.sleep(for: .milliseconds(30))
+        viewModel.setSourceText("Translate this")
+
+        let request = Task { @MainActor in
+            await viewModel.translate(
+                sourceLanguage: .english,
+                targetLanguage: .korean,
+                provider: .gemini,
+                modelID: "fast-model",
+                apiKey: "test-key",
+                temperature: 0.2,
+                historyEnabled: false
+            )
+        }
+
+        try await Task.sleep(for: .milliseconds(30))
+        await request.value
+
+        XCTAssertEqual(viewModel.translatedText, "new result")
+        XCTAssertFalse(viewModel.isLLMTranslating)
+        XCTAssertTrue(viewModel.isAppleTranslating)
+        XCTAssertTrue(viewModel.isTranslating)
+    }
+
     func testAppleFailureKeepsWaitingForTheLLMResult() async throws {
         let viewModel = TranslationViewModel(
             client: DelayedTranslationClient(),
@@ -147,6 +176,10 @@ final class TranslationViewModelTests: XCTestCase {
         )
 
         XCTAssertNil(viewModel.errorMessage)
+        XCTAssertEqual(
+            viewModel.appleErrorMessage,
+            AppleDocumentTranslationError.operatingSystemUnsupported.errorDescription
+        )
         XCTAssertTrue(viewModel.isLLMTranslating)
         XCTAssertEqual(viewModel.translatedText, "")
 

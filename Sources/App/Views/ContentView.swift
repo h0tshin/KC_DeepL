@@ -142,6 +142,8 @@ struct ContentView: View {
                             translatedText: viewModel.translatedText,
                             fontSize: readingFontSize,
                             isTranslating: viewModel.isTranslating,
+                            isLLMTranslating: viewModel.isLLMTranslating,
+                            appleErrorMessage: viewModel.appleErrorMessage,
                             errorMessage: viewModel.errorMessage,
                             pasteBackTarget: pasteBackTarget,
                             onCapture: viewModel.beginScreenCaptureMock,
@@ -804,6 +806,8 @@ private struct TranslationWorkspace: View {
     let translatedText: String
     let fontSize: CGFloat
     let isTranslating: Bool
+    let isLLMTranslating: Bool
+    let appleErrorMessage: String?
     let errorMessage: String?
     let pasteBackTarget: PasteBackTarget?
     let onCapture: () -> Void
@@ -829,6 +833,8 @@ private struct TranslationWorkspace: View {
                     translatedText: translatedText,
                     fontSize: fontSize,
                     isTranslating: isTranslating,
+                    isLLMTranslating: isLLMTranslating,
+                    appleErrorMessage: appleErrorMessage,
                     errorMessage: errorMessage,
                     isFocused: focusedPane == .result,
                     showsPasteBackButton: pasteBackTarget != nil,
@@ -1205,6 +1211,8 @@ private struct ResultPane: View {
     let translatedText: String
     let fontSize: CGFloat
     let isTranslating: Bool
+    let isLLMTranslating: Bool
+    let appleErrorMessage: String?
     let errorMessage: String?
     let isFocused: Bool
     let showsPasteBackButton: Bool
@@ -1214,22 +1222,34 @@ private struct ResultPane: View {
         ZStack(alignment: .bottomTrailing) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if translatedText.isEmpty, isTranslating {
-                        ProgressView("번역 중")
-                            .controlSize(.small)
-                            .padding()
-                    } else if translatedText.isEmpty, let errorMessage {
-                        Label(errorMessage, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
-                            .padding()
-                    } else if translatedText.isEmpty {
-                        Text("번역 결과가 이곳에 표시됩니다")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .padding(.top, 220)
-                    } else {
+                    if translatedText.isEmpty {
+                        if let appleErrorMessage {
+                            TranslationErrorLabel(
+                                title: "Apple 번역 실패",
+                                message: appleErrorMessage
+                            )
+                        }
+
+                        if let errorMessage {
+                            TranslationErrorLabel(
+                                title: "LLM 번역 실패",
+                                message: errorMessage
+                            )
+                        }
+
                         if isTranslating {
+                            ProgressView(isLLMTranslating ? "LLM 번역 중" : "Apple 번역 중")
+                                .controlSize(.small)
+                                .padding()
+                        } else if appleErrorMessage == nil, errorMessage == nil {
+                            Text("번역 결과가 이곳에 표시됩니다")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .padding(.top, 220)
+                        }
+                    } else {
+                        if isLLMTranslating {
                             Label("LLM 번역을 기다리는 중입니다", systemImage: "hourglass")
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(.secondary)
@@ -1242,11 +1262,18 @@ private struct ResultPane: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(28)
 
+                        if let appleErrorMessage {
+                            TranslationErrorLabel(
+                                title: "Apple 번역 실패",
+                                message: appleErrorMessage
+                            )
+                        }
+
                         if let errorMessage {
-                            Label("LLM 번역 실패: \(errorMessage)", systemImage: "exclamationmark.triangle")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.orange)
-                                .padding(.horizontal, 28)
+                            TranslationErrorLabel(
+                                title: "LLM 번역 실패",
+                                message: errorMessage
+                            )
                         }
                     }
                 }
@@ -1288,6 +1315,23 @@ private struct ResultPane: View {
 
     private func copyResultText() {
         RichTextFormatting.writeMarkdown(translatedText, to: NSPasteboard.general)
+    }
+}
+
+private struct TranslationErrorLabel: View {
+    let title: String
+    let message: String
+
+    var body: some View {
+        Label {
+            Text("\(title): \(message)")
+                .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: "exclamationmark.triangle")
+        }
+        .font(.system(size: 12))
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 28)
     }
 }
 

@@ -14,6 +14,14 @@ struct AppleTextTranslationTaskHost: View {
             .onChange(of: viewModel.appleRequestGeneration) { _, _ in
                 configureForPendingRequest()
             }
+            .onChange(of: viewModel.pendingAppleTranslation) { _, pending in
+                if pending == nil {
+                    // A cancelled/completed session can leave an invalid
+                    // configuration behind. Clear it so the next request
+                    // with the same language pair creates a fresh task.
+                    configuration = nil
+                }
+            }
             .translationTask(configuration) { session in
                 await viewModel.performPendingAppleTranslation(using: session)
                 if !Task.isCancelled {

@@ -28,6 +28,8 @@ struct PendingAppleTextTranslation: Equatable, Sendable {
 enum AppleTextTranslationError: Error, Equatable, LocalizedError, Sendable {
     case unexpectedResponseIdentifier(expected: String, actual: String?)
     case unexpectedResponseCount(Int)
+    case timedOut(seconds: Int)
+    case sessionCancelled
 
     var errorDescription: String? {
         switch self {
@@ -35,6 +37,10 @@ enum AppleTextTranslationError: Error, Equatable, LocalizedError, Sendable {
             "Apple 번역 응답 ID가 요청과 다릅니다. 예상: \(expected), 실제: \(actual ?? "없음")"
         case let .unexpectedResponseCount(count):
             "Apple 텍스트 번역이 \(count)개의 응답을 반환했습니다. 정확히 1개가 필요합니다."
+        case let .timedOut(seconds):
+            "Apple 번역 세션이 \(seconds)초 안에 응답하지 않았습니다. macOS의 번역 언어 팩 다운로드 상태와 네트워크 연결을 확인해 주세요."
+        case .sessionCancelled:
+            "Apple 번역 세션이 시스템에서 취소되었습니다. 번역 언어 팩 상태를 확인한 후 다시 시도해 주세요."
         }
     }
 }
@@ -63,6 +69,7 @@ final class TranslationViewModel: ObservableObject {
     private let historyRepository: TranslationHistoryRepository
     private var debouncedTranslationTask: Task<Void, Never>?
     private var activeTranslationTask: Task<Void, Never>?
+    private var appleWatchdogTask: Task<Void, Never>?
     private var historyLoadTask: Task<Void, Never>?
     private var historyPersistenceTask: Task<Void, Never>?
     private var historyPersistenceGeneration: UInt = 0
@@ -94,6 +101,7 @@ final class TranslationViewModel: ObservableObject {
     deinit {
         debouncedTranslationTask?.cancel()
         activeTranslationTask?.cancel()
+        appleWatchdogTask?.cancel()
         historyLoadTask?.cancel()
     }
 
@@ -328,6 +336,9 @@ final class TranslationViewModel: ObservableObject {
             }
 
             llmTranslatedText = output
+            // Apple may still be running, but an arrived LLM response is no longer
+            // waiting. Keep this state separate from the combined activity flag.
+            isLLMTranslating = false
             selectTranslationEngine(.llm)
             statusMessage = "번역 완료: \(modelID)"
 
@@ -434,6 +445,7 @@ final class TranslationViewModel: ObservableObject {
             targetLanguage: targetLanguage
         )
         appleRequestGeneration &+= 1
+        startAppleWatchdog(for: generation)
         updateTranslationActivityState()
         statusMessage = "Apple 번역과 LLM 번역을 동시에 요청하는 중입니다."
     }
@@ -453,6 +465,7 @@ final class TranslationViewModel: ObservableObject {
     }
 
     private func resetTranslationResults() {
+        cancelAppleWatchdog()
         appleRequestGeneration &+= 1
         pendingAppleTranslation = nil
         isAppleTranslating = false
@@ -481,8 +494,41 @@ final class TranslationViewModel: ObservableObject {
 
         do {
             try Task.checkCancellation()
+            reportAppleStatus(
+                "Apple 번역 언어 지원을 확인하는 중입니다.",
+                generation: generation
+            )
+            let preflight = try await AppleDocumentTranslationClient.preflight(
+                for: DocumentPageTranslationRequest(
+                    pageIndex: 0,
+                    blocks: [
+                        DocumentPageTextBlock(
+                            id: clientIdentifier,
+                            text: pending.sourceText
+                        )
+                    ],
+                    sourceLanguage: pending.sourceLanguage,
+                    targetLanguage: pending.targetLanguage
+                )
+            )
+            if preflight.availability == .unsupported {
+                throw AppleDocumentTranslationError.unsupportedLanguagePair(
+                    source: preflight.sourceLanguageCode,
+                    target: preflight.targetLanguageCode
+                )
+            }
+            reportAppleStatus(
+                preflight.availability == .downloadRequired
+                    ? "Apple 번역 언어 팩을 준비하는 중입니다."
+                    : "Apple 번역 엔진을 준비하는 중입니다.",
+                generation: generation
+            )
             try await session.prepareTranslation()
             try Task.checkCancellation()
+            reportAppleStatus(
+                "Apple 번역 응답을 기다리는 중입니다.",
+                generation: generation
+            )
 
             var translatedText: String?
             for try await response in session.translate(
@@ -518,9 +564,10 @@ final class TranslationViewModel: ObservableObject {
             guard isCurrentAppleRequest(generation) else {
                 return
             }
-            pendingAppleTranslation = nil
-            isAppleTranslating = false
-            updateTranslationActivityState()
+            reportAppleTranslationFailure(
+                AppleTextTranslationError.sessionCancelled,
+                generation: generation
+            )
         } catch {
             reportAppleTranslationFailure(error, generation: generation)
         }
@@ -542,12 +589,12 @@ final class TranslationViewModel: ObservableObject {
         }
 
         pendingAppleTranslation = nil
+        cancelAppleWatchdog()
         isAppleTranslating = false
         appleErrorMessage = (error as? LocalizedError)?.errorDescription
             ?? error.localizedDescription
 
         if llmTranslatedText.isEmpty, !isLLMTranslating {
-            errorMessage = appleErrorMessage
             statusMessage = "Apple 번역 실패"
         } else if isLLMTranslating {
             statusMessage = "Apple 번역에 실패했습니다. LLM 번역을 기다리는 중입니다."
@@ -564,6 +611,7 @@ final class TranslationViewModel: ObservableObject {
         }
 
         pendingAppleTranslation = nil
+        cancelAppleWatchdog()
         isAppleTranslating = false
         appleTranslatedText = output
         appleErrorMessage = nil
@@ -582,11 +630,21 @@ final class TranslationViewModel: ObservableObject {
             && pendingAppleTranslation?.generation == generation
     }
 
+    private func reportAppleStatus(_ message: String, generation: UInt) {
+        guard isCurrentAppleRequest(generation),
+              llmTranslatedText.isEmpty
+        else {
+            return
+        }
+        statusMessage = message
+    }
+
     private func nextRequestGeneration() -> UInt {
         debouncedTranslationTask?.cancel()
         debouncedTranslationTask = nil
         activeTranslationTask?.cancel()
         activeTranslationTask = nil
+        cancelAppleWatchdog()
         pendingAppleTranslation = nil
         appleRequestGeneration &+= 1
         isAppleTranslating = false
@@ -601,6 +659,7 @@ final class TranslationViewModel: ObservableObject {
         debouncedTranslationTask = nil
         activeTranslationTask?.cancel()
         activeTranslationTask = nil
+        cancelAppleWatchdog()
         requestGeneration &+= 1
         pendingAppleTranslation = nil
         appleRequestGeneration &+= 1
@@ -611,6 +670,33 @@ final class TranslationViewModel: ObservableObject {
 
     private func isCurrentRequest(_ generation: UInt, expectedSourceText: String) -> Bool {
         generation == requestGeneration && sourceText == expectedSourceText
+    }
+
+    private func startAppleWatchdog(for generation: UInt) {
+        cancelAppleWatchdog()
+        appleWatchdogTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(60))
+            } catch {
+                return
+            }
+
+            guard let self,
+                  self.isCurrentAppleRequest(generation)
+            else {
+                return
+            }
+
+            self.reportAppleTranslationFailure(
+                AppleTextTranslationError.timedOut(seconds: 60),
+                generation: generation
+            )
+        }
+    }
+
+    private func cancelAppleWatchdog() {
+        appleWatchdogTask?.cancel()
+        appleWatchdogTask = nil
     }
 
     func setSourceText(_ text: String) {
