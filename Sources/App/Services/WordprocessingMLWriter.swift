@@ -231,7 +231,9 @@ private extension WordprocessingMLWriter {
         docPrID: Int
     ) -> String {
         let fill = vector.fill.map { "<a:solidFill>\(solidFillBody($0))</a:solidFill>" } ?? "<a:noFill/>"
-        let line = "<a:ln w=\"\(max(1, Int((Double(vector.lineWidth) * emuPerPoint).rounded())))\"><a:solidFill>\(solidFillBody(vector.stroke))</a:solidFill></a:ln>"
+        let line = vector.stroke.map {
+            "<a:ln w=\"\(max(1, Int((Double(vector.lineWidth) * emuPerPoint).rounded())))\"><a:solidFill>\(solidFillBody($0))</a:solidFill></a:ln>"
+        } ?? "<a:ln><a:noFill/></a:ln>"
         let rotation = vector.kind == .line ? 0 : Int((vector.rotation * 60_000).rounded())
         let geometry = vector.kind == .line ? "line" : "rect"
         let shape = "<wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm rot=\"\(rotation)\"><a:off x=\"0\" y=\"0\"/><a:ext cx=\"\(width)\" cy=\"\(height)\"/></a:xfrm><a:prstGeom prst=\"\(geometry)\"><a:avLst/></a:prstGeom>\(fill)\(line)</wps:spPr><wps:bodyPr/></wps:wsp>"

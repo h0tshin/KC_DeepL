@@ -23,7 +23,6 @@ final class DocumentConversionTests: XCTestCase {
 
         XCTAssertEqual(report.pageCount, 1)
         XCTAssertTrue(report.pageRasterFallbackCount >= 1)
-        XCTAssertGreaterThanOrEqual(report.nativeVectorCount, 2)
         XCTAssertGreaterThanOrEqual(report.textBoxCount, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
         XCTAssertEqual(try Data(contentsOf: output).prefix(2), Data([0x50, 0x4b]))
@@ -147,6 +146,25 @@ final class DocumentConversionTests: XCTestCase {
         )
     }
 
+    func testOpaqueImageCoveredByLaterPaintDoesNotOverlaySafetyNet() throws {
+        let directory = try temporaryDirectory(prefix: "KCDeepL-OpaqueImageSafetyNetTests")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("opaque-image-covered.pdf")
+        try makePDFWithOpaqueImageCoveredByLaterPaint(at: source)
+
+        let scene = try PDFSceneExtractor().extract(sourceURL: source)
+        let page = try XCTUnwrap(scene.pages.first)
+        let opaqueImage = try XCTUnwrap(
+            page.images.first(where: { !$0.hasAlpha && !$0.maskApplied })
+        )
+
+        XCTAssertFalse(
+            opaqueImage.canOverlayOnPageSafetyNet,
+            "An opaque PDF image covered by later paint must remain only in the authoritative page raster."
+        )
+        XCTAssertFalse(opaqueImage.isSafetyNetVerifiedOpaque)
+    }
+
     func testOfficeRunResolverCanonicalizesLegacyTypefaceAndBullet() {
         let run = PDFOfficeTextAppearance.run(
             text: "\u{F0B7} FAQ",
@@ -167,6 +185,17 @@ final class DocumentConversionTests: XCTestCase {
         )
         XCTAssertEqual(courier.fontName, "Courier New")
         XCTAssertNotEqual(courier.fontName, "CourierNewPSMT")
+
+        let branded = PDFOfficeTextAppearance.run(
+            text: "Sales Talk",
+            fontName: "Barlow-Regular",
+            fontSize: 14,
+            color: .black
+        )
+        XCTAssertFalse(
+            branded.isOfficeCompatible,
+            "An unembedded branded font must retain source paint instead of silently falling back in Office."
+        )
     }
 
     func testSceneRasterKeepsPDFTopAndBottomOrientation() throws {
@@ -216,6 +245,42 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertGreaterThan(color.redComponent, 0.99)
         XCTAssertGreaterThan(color.greenComponent, 0.99)
         XCTAssertGreaterThan(color.blueComponent, 0.99)
+    }
+
+    func testTextOnNonUniformBackgroundPreservesTheSourceSafetyNet() throws {
+        let directory = try temporaryDirectory(prefix: "KCDeepL-NonUniformTextMaskTests")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("non-uniform-text.pdf")
+        try makePDFWithNonUniformTextBackground(at: source)
+
+        let scene = try PDFSceneExtractor().extract(sourceURL: source)
+        let page = try XCTUnwrap(scene.pages.first)
+        let textBox = try XCTUnwrap(
+            page.textBoxes.first(where: { $0.text.contains("background safety") })
+        )
+
+        XCTAssertEqual(
+            textBox.visualPolicy,
+            .preserveSourcePaint,
+            "A mask crossing even a light template transition must retain the exact source raster."
+        )
+    }
+
+    func testClippingRectangleNeverBecomesAVisibleVectorOverlay() throws {
+        let directory = try temporaryDirectory(prefix: "KCDeepL-ClippingVectorTests")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("clip-path.pdf")
+        try makePDFWithFullPageClippingPath(at: source)
+
+        let scene = try PDFSceneExtractor().extract(sourceURL: source)
+        let page = try XCTUnwrap(scene.pages.first)
+        XCTAssertFalse(
+            page.vectors.contains {
+                $0.bounds.width >= page.width * 0.98
+                    && $0.bounds.height >= page.height * 0.98
+            },
+            "A `re W n` clipping path must be discarded before a later fill can be emitted."
+        )
     }
 
     func testUnsafeOrOCRTextNeverErasesTheVisualSafetyNet() {
@@ -268,6 +333,35 @@ final class DocumentConversionTests: XCTestCase {
             extractionSource: .native
         )
         XCTAssertFalse(PDFOfficeTextAppearance.canReplaceSourcePaint(lines: [unknownGlyphLine]))
+
+        let standaloneBullet = PDFTextLine(
+            id: "standalone-bullet",
+            text: "•",
+            runs: [
+                PDFTextRun(
+                    text: "•",
+                    fontName: "Arial",
+                    fontSize: 12,
+                    textColor: .black,
+                    isOfficeCompatible: true
+                )
+            ],
+            bounds: CGRect(x: 10, y: 10, width: 8, height: 12),
+            sourceMaskBounds: CGRect(x: 10, y: 10, width: 8, height: 12),
+            sourceMaskIsSafe: true,
+            fontName: "Arial",
+            fontSize: 12,
+            textColor: .black,
+            backgroundColor: .white,
+            alignment: .left,
+            readingOrder: 0,
+            columnIndex: 0,
+            extractionSource: .native
+        )
+        XCTAssertFalse(
+            PDFOfficeTextAppearance.canReplaceSourcePaint(lines: [standaloneBullet]),
+            "A standalone list marker must remain in the source safety-net."
+        )
     }
 
     func testListPrefixRestoresOnlyTheSourceMarkerWhitespace() {
@@ -628,6 +722,66 @@ private extension DocumentConversionTests {
         try (mutableData as Data).write(to: url, options: .atomic)
     }
 
+    func makePDFWithNonUniformTextBackground(at url: URL) throws {
+        let mutableData = NSMutableData()
+        guard let consumer = CGDataConsumer(data: mutableData as CFMutableData) else {
+            XCTFail("PDF consumer creation failed")
+            return
+        }
+        var mediaBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        guard let context = CGContext(
+            consumer: consumer,
+            mediaBox: &mediaBox,
+            nil
+        ) else {
+            XCTFail("PDF context creation failed")
+            return
+        }
+        context.beginPDFPage([kCGPDFContextMediaBox: mediaBox] as CFDictionary)
+        context.setFillColor(CGColor.white)
+        context.fill(mediaBox)
+        // The 8% tone transition is intentionally below the legacy interior
+        // complexity threshold. The surrounding-halo check must therefore
+        // catch it before a rectangular source mask can become visible.
+        context.setFillColor(CGColor(gray: 0.92, alpha: 1))
+        context.fill(CGRect(x: 210, y: 0, width: 402, height: 792))
+        drawText(
+            "background safety keeps template pixels",
+            at: CGPoint(x: 100, y: 390),
+            in: context
+        )
+        context.endPDFPage()
+        context.closePDF()
+        try (mutableData as Data).write(to: url, options: .atomic)
+    }
+
+    func makePDFWithFullPageClippingPath(at url: URL) throws {
+        let mutableData = NSMutableData()
+        guard let consumer = CGDataConsumer(data: mutableData as CFMutableData) else {
+            XCTFail("PDF consumer creation failed")
+            return
+        }
+        var mediaBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        guard let context = CGContext(
+            consumer: consumer,
+            mediaBox: &mediaBox,
+            nil
+        ) else {
+            XCTFail("PDF context creation failed")
+            return
+        }
+        context.beginPDFPage([kCGPDFContextMediaBox: mediaBox] as CFDictionary)
+        context.saveGState()
+        context.addRect(mediaBox)
+        context.clip()
+        context.setFillColor(CGColor(red: 0.9, green: 0.1, blue: 0.1, alpha: 1))
+        context.fill(CGRect(x: 96, y: 160, width: 160, height: 120))
+        context.restoreGState()
+        context.endPDFPage()
+        context.closePDF()
+        try (mutableData as Data).write(to: url, options: .atomic)
+    }
+
     func makePDF(at url: URL) throws {
         let mutableData = NSMutableData()
         guard let consumer = CGDataConsumer(data: mutableData as CFMutableData) else {
@@ -709,6 +863,63 @@ private extension DocumentConversionTests {
         }
         context.beginPDFPage([kCGPDFContextMediaBox: mediaBox] as CFDictionary)
         context.draw(image, in: CGRect(x: 80, y: 120, width: 260, height: 180))
+        context.endPDFPage()
+        context.closePDF()
+        try (mutableData as Data).write(to: url, options: .atomic)
+    }
+
+    func makePDFWithOpaqueImageCoveredByLaterPaint(at url: URL) throws {
+        let width = 64
+        let height = 48
+        var pixels: [UInt8] = []
+        pixels.reserveCapacity(width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                pixels.append(UInt8((x * 255) / max(1, width - 1)))
+                pixels.append(UInt8((y * 255) / max(1, height - 1)))
+                pixels.append(80)
+                pixels.append(0)
+            }
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let image = CGImage(
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bitsPerPixel: 32,
+                  bytesPerRow: width * 4,
+                  space: colorSpace,
+                  bitmapInfo: CGBitmapInfo(
+                      rawValue: CGImageAlphaInfo.noneSkipLast.rawValue
+                          | CGBitmapInfo.byteOrder32Big.rawValue
+                  ),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: false,
+                  intent: .defaultIntent
+              )
+        else {
+            XCTFail("Opaque image fixture creation failed")
+            return
+        }
+
+        let mutableData = NSMutableData()
+        guard let consumer = CGDataConsumer(data: mutableData as CFMutableData) else {
+            XCTFail("PDF consumer creation failed")
+            return
+        }
+        var mediaBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        guard let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            XCTFail("PDF context creation failed")
+            return
+        }
+        context.beginPDFPage([kCGPDFContextMediaBox: mediaBox] as CFDictionary)
+        context.draw(image, in: CGRect(x: 120, y: 180, width: 300, height: 220))
+        // This is deliberately larger than the image-safety sampler spacing:
+        // reinserting the original image would visibly erase the later paint.
+        context.setFillColor(CGColor.black)
+        context.fill(CGRect(x: 200, y: 230, width: 150, height: 120))
         context.endPDFPage()
         context.closePDF()
         try (mutableData as Data).write(to: url, options: .atomic)

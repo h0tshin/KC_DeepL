@@ -9,17 +9,24 @@ struct PDFDocumentAnalysisService: Sendable {
     private let includeOCR: Bool
     private let ocrMinimumConfidence: Float
     private let maximumOCRImageDimension: CGFloat
+    /// Office conversion replaces source paint with a flattened page raster
+    /// beneath it, so it needs an extra halo validation that the PDF
+    /// translation/composition path does not. Keep this policy opt-in: the
+    /// translator has its own layout-preservation safety contract.
+    private let requiresSourceMaskHaloValidation: Bool
 
     init(
         ocrLanguages: [String] = [],
         includeOCR: Bool = true,
         ocrMinimumConfidence: Float = 0.55,
-        maximumOCRImageDimension: CGFloat = 3_200
+        maximumOCRImageDimension: CGFloat = 3_200,
+        requiresSourceMaskHaloValidation: Bool = false
     ) {
         self.ocrLanguages = ocrLanguages
         self.includeOCR = includeOCR
         self.ocrMinimumConfidence = min(max(ocrMinimumConfidence, 0), 1)
         self.maximumOCRImageDimension = max(1_024, maximumOCRImageDimension)
+        self.requiresSourceMaskHaloValidation = requiresSourceMaskHaloValidation
     }
 
     func analyze(sourceURL: URL) throws -> PDFDocumentAnalysis {
@@ -954,7 +961,7 @@ private extension PDFDocumentAnalysisService {
         // unsafe when it is genuinely distant from the dominant fill. Mild
         // antialiasing or JPEG noise has low squared distance and remains safe.
         let secondaryRatio = 1 - dominantRatio
-        let isComplex = secondaryRatio > 0.12
+        let hasComplexInterior = secondaryRatio > 0.12
             && meanSquaredDistance > 0.02
         let resolvedMaskBounds = try Self.trimmedMaskBounds(
             maskBounds,
@@ -970,7 +977,157 @@ private extension PDFDocumentAnalysisService {
             minimumY: minimumY,
             maximumY: maximumY
         )
-        return (dominant.color, isComplex, resolvedMaskBounds)
+        // Sampling only the exact source-mask rectangle is insufficient for
+        // a very common slide pattern: light gradients, translucent template
+        // artwork, or a watermark can sit immediately around otherwise-white
+        // glyph pixels. Filling the rectangle with a sampled white colour
+        // then makes the editable text look like it has a visible white box.
+        //
+        // Treat the page raster as authoritative unless a *surrounding halo*
+        // is also uniform. This makes the replacement decision about the
+        // whole compositing neighbourhood rather than only about a single
+        // text line. It is deliberately fail-closed: preserving source paint
+        // loses editability for that one line, but never damages a template or
+        // places a substituted font on an artificial patch.
+        let hasUniformHalo: Bool
+        if requiresSourceMaskHaloValidation {
+            hasUniformHalo = try Self.hasUniformBackgroundHalo(
+                around: resolvedMaskBounds,
+                expectedBackground: dominant.color,
+                cropBox: cropBox,
+                bitmap: bitmap,
+                scaleX: scaleX,
+                scaleY: scaleY
+            )
+        } else {
+            hasUniformHalo = true
+        }
+        return (
+            dominant.color,
+            hasComplexInterior || !hasUniformHalo,
+            resolvedMaskBounds
+        )
+    }
+
+    /// Verifies that the immediate area surrounding a source-mask rectangle
+    /// can be repainted with the same solid colour.  The mask is expanded by
+    /// a small PDF-space halo, then only the outer ring is inspected.  A
+    /// two-raster-pixel guard keeps antialiased glyph edges out of the test.
+    ///
+    /// This is intentionally stricter than the interior sampler above. A
+    /// subtle 3–6% tone change is visually noticeable when a rectangular mask
+    /// covers it even though it is harmless within a line's normal antialias
+    /// samples. Returning `false` simply retains the exact source pixels in
+    /// the safety-net image.
+    static func hasUniformBackgroundHalo(
+        around maskBounds: CGRect,
+        expectedBackground: PDFTextColor,
+        cropBox: CGRect,
+        bitmap: NSBitmapImageRep,
+        scaleX: CGFloat,
+        scaleY: CGFloat
+    ) throws -> Bool {
+        guard maskBounds.width > 0,
+              maskBounds.height > 0,
+              scaleX > 0,
+              scaleY > 0,
+              bitmap.pixelsWide > 0,
+              bitmap.pixelsHigh > 0
+        else {
+            return false
+        }
+
+        let minimumDimension = min(maskBounds.width, maskBounds.height)
+        let halo = min(10, max(2, minimumDimension * 0.22))
+        let guardBand = max(1, 2 / min(scaleX, scaleY))
+        let outerBounds = maskBounds
+            .insetBy(dx: -halo, dy: -halo)
+            .intersection(cropBox)
+        let innerBounds = maskBounds.insetBy(dx: -guardBand, dy: -guardBand)
+        guard !outerBounds.isNull,
+              outerBounds.width > 0,
+              outerBounds.height > 0
+        else {
+            return false
+        }
+
+        func pointInBitmap(_ point: CGPoint) -> CGPoint {
+            CGPoint(
+                x: (point.x - cropBox.minX) * scaleX,
+                y: (cropBox.maxY - point.y) * scaleY
+            )
+        }
+        let outerPixels = CGRect(
+            x: floor(pointInBitmap(CGPoint(x: outerBounds.minX, y: outerBounds.maxY)).x),
+            y: floor(pointInBitmap(CGPoint(x: outerBounds.minX, y: outerBounds.maxY)).y),
+            width: ceil(outerBounds.width * scaleX),
+            height: ceil(outerBounds.height * scaleY)
+        ).intersection(
+            CGRect(x: 0, y: 0, width: bitmap.pixelsWide, height: bitmap.pixelsHigh)
+        )
+        guard !outerPixels.isNull,
+              outerPixels.width > 0,
+              outerPixels.height > 0
+        else {
+            return false
+        }
+
+        let minimumX = max(0, Int(outerPixels.minX.rounded(.down)))
+        let maximumX = min(
+            bitmap.pixelsWide - 1,
+            Int((outerPixels.maxX - 1).rounded(.down))
+        )
+        let minimumY = max(0, Int(outerPixels.minY.rounded(.down)))
+        let maximumY = min(
+            bitmap.pixelsHigh - 1,
+            Int((outerPixels.maxY - 1).rounded(.down))
+        )
+        guard minimumX <= maximumX, minimumY <= maximumY else {
+            return false
+        }
+
+        let pixelCount = (maximumX - minimumX + 1) * (maximumY - minimumY + 1)
+        let strideLength = max(1, Int(sqrt(Double(pixelCount) / 1_200)))
+        var sampledCount = 0
+        var mismatchedCount = 0
+        var totalDistance: CGFloat = 0
+
+        for y in stride(from: minimumY, through: maximumY, by: strideLength) {
+            try Task.checkCancellation()
+            for x in stride(from: minimumX, through: maximumX, by: strideLength) {
+                let pagePoint = CGPoint(
+                    x: cropBox.minX + (CGFloat(x) + 0.5) / scaleX,
+                    y: cropBox.maxY - (CGFloat(y) + 0.5) / scaleY
+                )
+                guard !innerBounds.contains(pagePoint),
+                      let sourceColor = bitmap.colorAt(x: x, y: y),
+                      let color = sourceColor.usingColorSpace(.deviceRGB),
+                      color.alphaComponent > 0.05
+                else {
+                    continue
+                }
+                sampledCount += 1
+                let distance = Self.colorDistanceSquared(
+                    red: color.redComponent,
+                    green: color.greenComponent,
+                    blue: color.blueComponent,
+                    to: expectedBackground
+                )
+                totalDistance += distance
+                // A per-channel difference just above 2% is enough to create
+                // a visible rectangular patch. The average/rate guards keep
+                // ordinary raster noise and a few antialiased edge pixels
+                // from needlessly disabling editable text.
+                if distance > 0.0012 {
+                    mismatchedCount += 1
+                }
+            }
+        }
+
+        guard sampledCount >= 12 else { return false }
+        let mismatchRatio = CGFloat(mismatchedCount) / CGFloat(sampledCount)
+        let meanDistance = totalDistance / CGFloat(sampledCount)
+        return mismatchRatio <= 0.025 && meanDistance <= 0.00045
     }
 
     /// Finds the visible top edge of a native text line in the already-rendered

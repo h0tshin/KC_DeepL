@@ -287,7 +287,9 @@ private extension PresentationMLWriter {
         height: Int
     ) -> String {
         let fill = vector.fill.map { solidFill($0) } ?? "<a:noFill/>"
-        let line = "<a:ln w=\"\(max(1, Int((Double(vector.lineWidth) * emuPerPoint).rounded())))\"><a:solidFill>\(solidFillBody(vector.stroke))</a:solidFill></a:ln>"
+        let line = vector.stroke.map {
+            "<a:ln w=\"\(max(1, Int((Double(vector.lineWidth) * emuPerPoint).rounded())))\"><a:solidFill>\(solidFillBody($0))</a:solidFill></a:ln>"
+        } ?? "<a:ln><a:noFill/></a:ln>"
         let rotation = vector.kind == .line ? 0 : Int((vector.rotation * 60_000).rounded())
         let geometry = vector.kind == .line ? "line" : "rect"
         return "<p:sp><p:nvSpPr><p:cNvPr id=\"\(id)\" name=\"PDF \(vector.kind.rawValue) \(id)\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm rot=\"\(rotation)\"><a:off x=\"\(x)\" y=\"\(y)\"/><a:ext cx=\"\(width)\" cy=\"\(height)\"/></a:xfrm><a:prstGeom prst=\"\(geometry)\"><a:avLst/></a:prstGeom>\(fill)\(line)</p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr/></a:p></p:txBody></p:sp>"

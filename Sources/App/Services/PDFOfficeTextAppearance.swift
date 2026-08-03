@@ -13,6 +13,17 @@ enum PDFOfficeTextAppearance {
         let isPortable: Bool
     }
 
+    private static let portableOfficeTypefaceTokens: Set<String> = [
+        "aptos", "aptosdisplay", "aptosmono",
+        "arial", "arialblack", "arialnarrow",
+        "calibri", "cambria", "cambriamath", "candara", "consolas",
+        "constantia", "corbel", "couriernew",
+        "georgia", "helvetica", "helveticaneue",
+        "menlo", "monaco",
+        "notosans", "notoserif",
+        "tahoma", "times", "timesnewroman", "trebuchetms", "verdana"
+    ]
+
     /// Builds visual runs while preserving the original text order and
     /// collapsing only PDF-inserted whitespace. The result's concatenated text
     /// is suitable for both the translation pipeline and OOXML serialization.
@@ -114,6 +125,13 @@ enum PDFOfficeTextAppearance {
         return lines.allSatisfy { line in
             line.extractionSource == .native
                 && line.sourceMaskIsSafe
+                // A standalone bullet/ornament carries no text layout of its
+                // own. PDF producers commonly emit it as a separate glyph
+                // with a wider selection box; masking and redrawing that box
+                // leaves a visible rectangular patch on textured templates.
+                // Keep it with the visual safety-net unless it was merged
+                // with real body text in the same source line.
+                && !isStandaloneMarkerOrSymbol(line.text)
                 && line.textColor.alpha >= 0.999
                 && !line.runs.isEmpty
                 && line.runs.allSatisfy {
@@ -713,16 +731,34 @@ private extension PDFOfficeTextAppearance {
             .joined()
     }
 
+    /// Font embedding is deliberately not attempted: it can violate the
+    /// source font's licence and is not available for many subsetted PDF font
+    /// programs. Therefore "Office compatible" must mean more than "the font
+    /// exists on this Mac". A branded font that happens to be installed while
+    /// converting can silently become Times in another Office renderer, which
+    /// changes both the visual design and line geometry.
+    ///
+    /// Keep the source raster authoritative for unembedded/custom families and
+    /// reserve source-paint replacement for stable, cross-Office families.
+    /// macOS-native Helvetica is included because this product targets
+    /// PowerPoint/Word on macOS; all other families must be explicitly added
+    /// after a cross-render validation fixture is introduced.
     static func isOfficeTypeface(_ family: String) -> Bool {
         let token = normalizedFontToken(family)
-        return !token.isEmpty
-            && !token.contains("lastresort")
-            && !token.contains("systemui")
+        return portableOfficeTypefaceTokens.contains(token)
     }
 
     static func isWhitespace(_ text: String) -> Bool {
         !text.isEmpty && text.unicodeScalars.allSatisfy {
             CharacterSet.whitespacesAndNewlines.contains($0)
+        }
+    }
+
+    static func isStandaloneMarkerOrSymbol(_ value: String) -> Bool {
+        let visible = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !visible.isEmpty else { return true }
+        return !visible.unicodeScalars.contains {
+            CharacterSet.alphanumerics.contains($0)
         }
     }
 

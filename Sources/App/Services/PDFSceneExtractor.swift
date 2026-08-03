@@ -45,7 +45,8 @@ struct PDFSceneExtractor {
         let sha = Self.sha256(data)
         let analysis = try? PDFDocumentAnalysisService(
             includeOCR: true,
-            maximumOCRImageDimension: 2_400
+            maximumOCRImageDimension: 2_400,
+            requiresSourceMaskHaloValidation: true
         ).analyze(sourceURL: sourceURL)
 
         var pages: [PDFScenePage] = []
@@ -78,12 +79,17 @@ struct PDFSceneExtractor {
                 cropBox: cropBox,
                 masks: masks
             )
-            let graphics = PDFGraphicsTrace.trace(page: page)
+            let graphics = PDFGraphicsTrace.trace(
+                page: page,
+                cropBox: cropBox,
+                pageSafetyNetPNG: imageData
+            )
             let imageSummary = PDFImageExtractor.extract(
                 page: page,
                 pageIndex: pageIndex,
                 cropBox: cropBox,
-                maximumDimension: maximumRasterDimension
+                maximumDimension: maximumRasterDimension,
+                pageSafetyNetPNG: imageData
             )
 
             var pageWarnings = pageAnalysis?.warnings.map(\.message) ?? []
@@ -644,6 +650,36 @@ private extension PDFSceneExtractor {
 }
 
 private final class PDFGraphicsTrace {
+    /// Only the PDF device colour spaces have a direct, lossless mapping to
+    /// OOXML RGB. Resource-backed ICC, Separation, Pattern, and Indexed
+    /// spaces remain in the page safety-net unless a dedicated colour-managed
+    /// converter is available; guessing them as black caused opaque boxes in
+    /// converted slides.
+    enum SimpleColorSpace {
+        case deviceGray
+        case deviceRGB
+        case deviceCMYK
+        case unsupported
+
+        var componentCount: Int? {
+            switch self {
+            case .deviceGray: 1
+            case .deviceRGB: 3
+            case .deviceCMYK: 4
+            case .unsupported: nil
+            }
+        }
+
+        static func named(_ rawName: String) -> Self {
+            switch rawName {
+            case "DeviceGray", "G": .deviceGray
+            case "DeviceRGB", "RGB": .deviceRGB
+            case "DeviceCMYK", "CMYK": .deviceCMYK
+            default: .unsupported
+            }
+        }
+    }
+
     struct Result {
         let vectors: [PDFSceneVector]
     }
@@ -651,8 +687,6 @@ private final class PDFGraphicsTrace {
     struct PendingRectangle {
         let bounds: CGRect
         let rotation: CGFloat
-        let stroke: PDFTextColor
-        let lineWidth: CGFloat
     }
 
     var pendingRectangles: [PendingRectangle] = []
@@ -665,13 +699,39 @@ private final class PDFGraphicsTrace {
         let fillColor: PDFTextColor
         let strokeColor: PDFTextColor
         let lineWidth: CGFloat
+        let fillColorIsKnown: Bool
+        let strokeColorIsKnown: Bool
+        let fillColorSpace: SimpleColorSpace
+        let strokeColorSpace: SimpleColorSpace
+        let hasActiveClippingPath: Bool
+        let usesUnsupportedGraphicsState: Bool
     }
     var stateStack: [GraphicsState] = []
     var fillColor = PDFTextColor.black
     var strokeColor = PDFTextColor.black
     var lineWidth: CGFloat = 1
+    // PDF defaults colors to black, but a converter must never treat a color
+    // that it did not parse as an intentional black fill/stroke.
+    var fillColorIsKnown = false
+    var strokeColorIsKnown = false
+    var fillColorSpace: SimpleColorSpace = .deviceGray
+    var strokeColorSpace: SimpleColorSpace = .deviceGray
+    // These flags apply to the current path. A clipping path or unsupported
+    // curve must be preserved by the page raster rather than approximated as
+    // a rectangular OOXML shape.
+    var pathUsesClipping = false
+    var pathHasUnsupportedGeometry = false
+    // A `W`/`W*` clip remains in effect after the current path is ended. It is
+    // part of the graphics state, not the path itself, so it must survive the
+    // following `n` and only unwind on `Q`.
+    var hasActiveClippingPath = false
+    var usesUnsupportedGraphicsState = false
 
-    static func trace(page: PDFPage) -> Result {
+    static func trace(
+        page: PDFPage,
+        cropBox: CGRect,
+        pageSafetyNetPNG: Data
+    ) -> Result {
         guard let pageRef = page.pageRef,
               let table = CGPDFOperatorTableCreate()
         else {
@@ -694,18 +754,53 @@ private final class PDFGraphicsTrace {
         CGPDFOperatorTableSetCallback(table, "l", pdfTraceLine)
         CGPDFOperatorTableSetCallback(table, "h", pdfTraceClosePath)
         CGPDFOperatorTableSetCallback(table, "n", pdfTraceEndPath)
+        CGPDFOperatorTableSetCallback(table, "W", pdfTraceClip)
+        CGPDFOperatorTableSetCallback(table, "W*", pdfTraceClip)
         CGPDFOperatorTableSetCallback(table, "re", pdfTraceRectangle)
         CGPDFOperatorTableSetCallback(table, "S", pdfTraceStroke)
         CGPDFOperatorTableSetCallback(table, "s", pdfTraceStroke)
         CGPDFOperatorTableSetCallback(table, "f", pdfTraceFill)
         CGPDFOperatorTableSetCallback(table, "F", pdfTraceFill)
         CGPDFOperatorTableSetCallback(table, "f*", pdfTraceFill)
+        CGPDFOperatorTableSetCallback(table, "B", pdfTraceFillStroke)
+        CGPDFOperatorTableSetCallback(table, "B*", pdfTraceFillStroke)
+        CGPDFOperatorTableSetCallback(table, "b", pdfTraceFillStroke)
+        CGPDFOperatorTableSetCallback(table, "b*", pdfTraceFillStroke)
+        CGPDFOperatorTableSetCallback(table, "cs", pdfTraceUnknownFillColor)
+        CGPDFOperatorTableSetCallback(table, "CS", pdfTraceUnknownStrokeColor)
+        CGPDFOperatorTableSetCallback(table, "sc", pdfTraceFillComponents)
+        CGPDFOperatorTableSetCallback(table, "SC", pdfTraceStrokeComponents)
+        CGPDFOperatorTableSetCallback(table, "scn", pdfTraceFillComponents)
+        CGPDFOperatorTableSetCallback(table, "SCN", pdfTraceStrokeComponents)
+        CGPDFOperatorTableSetCallback(table, "gs", pdfTraceUnsupportedGraphicsState)
+        CGPDFOperatorTableSetCallback(table, "c", pdfTraceUnsupportedCubicPath)
+        CGPDFOperatorTableSetCallback(table, "v", pdfTraceUnsupportedQuadraticPath)
+        CGPDFOperatorTableSetCallback(table, "y", pdfTraceUnsupportedQuadraticPath)
         let scanner = CGPDFScannerCreate(stream, table, info)
         _ = CGPDFScannerScan(scanner)
         CGPDFScannerRelease(scanner)
         CGPDFContentStreamRelease(stream)
         CGPDFOperatorTableRelease(table)
-        return Result(vectors: trace.vectors)
+        let safetyNet = NSBitmapImageRep(data: pageSafetyNetPNG)
+        let verifiedVectors = trace.vectors.map { vector in
+            PDFSceneVector(
+                id: vector.id,
+                kind: vector.kind,
+                bounds: vector.bounds,
+                stroke: vector.stroke,
+                fill: vector.fill,
+                lineWidth: vector.lineWidth,
+                rotation: vector.rotation,
+                paintOrder: vector.paintOrder,
+                nativeEligible: vector.nativeEligible,
+                isSafetyNetVerifiedOpaque: vectorMatchesSafetyNet(
+                    vector,
+                    cropBox: cropBox,
+                    bitmap: safetyNet
+                )
+            )
+        }
+        return Result(vectors: verifiedVectors)
     }
 
     func rectangle(_ scanner: CGPDFScannerRef) {
@@ -729,42 +824,105 @@ private final class PDFGraphicsTrace {
               transformed.height > 0.25
         else { return }
         let rotation = atan2(transform.b, transform.a) * 180 / .pi
+        if !currentPath.isEmpty {
+            pathHasUnsupportedGeometry = true
+        }
         pendingRectangles.append(
             PendingRectangle(
                 bounds: transformed,
-                rotation: rotation,
-                stroke: strokeColor,
-                lineWidth: lineWidth
+                rotation: rotation
             )
         )
     }
 
     func move(_ scanner: CGPDFScannerRef) {
         guard let point = popPoint(scanner) else { return }
+        if !currentPath.isEmpty || !pendingRectangles.isEmpty {
+            pathHasUnsupportedGeometry = true
+        }
         currentPath = [point]
     }
 
     func line(_ scanner: CGPDFScannerRef) {
-        guard let point = popPoint(scanner), !currentPath.isEmpty else { return }
+        guard let point = popPoint(scanner), !currentPath.isEmpty else {
+            pathHasUnsupportedGeometry = true
+            return
+        }
         currentPath.append(point)
+        if currentPath.count > 2 {
+            pathHasUnsupportedGeometry = true
+        }
     }
 
     func closePath() {
-        guard let first = currentPath.first, let last = currentPath.last,
-              first != last else { return }
-        currentPath.append(first)
+        // Closed paths require a polygon serializer. Do not turn their last
+        // segment into a standalone OOXML line.
+        pathHasUnsupportedGeometry = true
     }
 
     func endPath() {
-        currentPath.removeAll(keepingCapacity: true)
+        resetCurrentPath()
     }
 
     func stroke() {
-        emitPending(fill: nil)
+        emitPending(fill: nil, emitsStroke: true)
     }
 
     func fill() {
-        emitPending(fill: fillColor)
+        emitPending(fill: fillColor, emitsStroke: false)
+    }
+
+    func fillStroke() {
+        emitPending(fill: fillColor, emitsStroke: true)
+    }
+
+    func clip() {
+        pathUsesClipping = true
+        hasActiveClippingPath = true
+    }
+
+    func selectFillColorSpace(named name: String?) {
+        fillColorSpace = name.map(SimpleColorSpace.named) ?? .unsupported
+        fillColorIsKnown = false
+    }
+
+    func selectStrokeColorSpace(named name: String?) {
+        strokeColorSpace = name.map(SimpleColorSpace.named) ?? .unsupported
+        strokeColorIsKnown = false
+    }
+
+    func setFillComponents(_ scanner: CGPDFScannerRef) {
+        guard let color = popComponents(
+            scanner,
+            colorSpace: fillColorSpace,
+            alpha: fillColor.alpha
+        ) else {
+            fillColorIsKnown = false
+            return
+        }
+        fillColor = color
+        fillColorIsKnown = true
+    }
+
+    func setStrokeComponents(_ scanner: CGPDFScannerRef) {
+        guard let color = popComponents(
+            scanner,
+            colorSpace: strokeColorSpace,
+            alpha: strokeColor.alpha
+        ) else {
+            strokeColorIsKnown = false
+            return
+        }
+        strokeColor = color
+        strokeColorIsKnown = true
+    }
+
+    func markUnsupportedGraphicsState() {
+        usesUnsupportedGraphicsState = true
+    }
+
+    func markUnsupportedPath() {
+        pathHasUnsupportedGeometry = true
     }
 
     func save() {
@@ -773,7 +931,13 @@ private final class PDFGraphicsTrace {
                 transform: transform,
                 fillColor: fillColor,
                 strokeColor: strokeColor,
-                lineWidth: lineWidth
+                lineWidth: lineWidth,
+                fillColorIsKnown: fillColorIsKnown,
+                strokeColorIsKnown: strokeColorIsKnown,
+                fillColorSpace: fillColorSpace,
+                strokeColorSpace: strokeColorSpace,
+                hasActiveClippingPath: hasActiveClippingPath,
+                usesUnsupportedGraphicsState: usesUnsupportedGraphicsState
             )
         )
     }
@@ -784,13 +948,25 @@ private final class PDFGraphicsTrace {
             fillColor = .black
             strokeColor = .black
             lineWidth = 1
-            currentPath.removeAll(keepingCapacity: true)
+            fillColorIsKnown = false
+            strokeColorIsKnown = false
+            fillColorSpace = .deviceGray
+            strokeColorSpace = .deviceGray
+            hasActiveClippingPath = false
+            usesUnsupportedGraphicsState = false
+            resetCurrentPath()
             return
         }
         transform = state.transform
         fillColor = state.fillColor
         strokeColor = state.strokeColor
         lineWidth = state.lineWidth
+        fillColorIsKnown = state.fillColorIsKnown
+        strokeColorIsKnown = state.strokeColorIsKnown
+        fillColorSpace = state.fillColorSpace
+        strokeColorSpace = state.strokeColorSpace
+        hasActiveClippingPath = state.hasActiveClippingPath
+        usesUnsupportedGraphicsState = state.usesUnsupportedGraphicsState
     }
 
     func concatenate(_ scanner: CGPDFScannerRef) {
@@ -817,28 +993,40 @@ private final class PDFGraphicsTrace {
 
     func setFillRGB(_ scanner: CGPDFScannerRef) {
         fillColor = popRGB(scanner, alpha: fillColor.alpha)
+        fillColorSpace = .deviceRGB
+        fillColorIsKnown = true
     }
 
     func setStrokeRGB(_ scanner: CGPDFScannerRef) {
         strokeColor = popRGB(scanner, alpha: strokeColor.alpha)
+        strokeColorSpace = .deviceRGB
+        strokeColorIsKnown = true
     }
 
     func setFillGray(_ scanner: CGPDFScannerRef) {
         let gray = popNumber(scanner)
         fillColor = PDFTextColor(red: gray, green: gray, blue: gray, alpha: fillColor.alpha)
+        fillColorSpace = .deviceGray
+        fillColorIsKnown = true
     }
 
     func setStrokeGray(_ scanner: CGPDFScannerRef) {
         let gray = popNumber(scanner)
         strokeColor = PDFTextColor(red: gray, green: gray, blue: gray, alpha: strokeColor.alpha)
+        strokeColorSpace = .deviceGray
+        strokeColorIsKnown = true
     }
 
     func setFillCMYK(_ scanner: CGPDFScannerRef) {
         fillColor = popCMYK(scanner, alpha: fillColor.alpha)
+        fillColorSpace = .deviceCMYK
+        fillColorIsKnown = true
     }
 
     func setStrokeCMYK(_ scanner: CGPDFScannerRef) {
         strokeColor = popCMYK(scanner, alpha: strokeColor.alpha)
+        strokeColorSpace = .deviceCMYK
+        strokeColorIsKnown = true
     }
 
     func setLineWidth(_ scanner: CGPDFScannerRef) {
@@ -866,6 +1054,60 @@ private final class PDFGraphicsTrace {
         )
     }
 
+    private func popComponents(
+        _ scanner: CGPDFScannerRef,
+        colorSpace: SimpleColorSpace,
+        alpha: CGFloat
+    ) -> PDFTextColor? {
+        guard let componentCount = colorSpace.componentCount else {
+            // `scn`/`SCN` may carry an arbitrary Pattern or Separation name
+            // in addition to colour components. A CGPDFScanner callback owns
+            // the operator's operand stack, so leave no operands behind when
+            // we intentionally decline that non-RGB colour space.
+            discardRemainingOperands(scanner)
+            return nil
+        }
+        var reversedComponents: [CGFloat] = []
+        reversedComponents.reserveCapacity(componentCount)
+        for _ in 0..<componentCount {
+            var number: CGPDFReal = 0
+            guard CGPDFScannerPopNumber(scanner, &number) else {
+                discardRemainingOperands(scanner)
+                return nil
+            }
+            reversedComponents.append(min(1, max(0, CGFloat(number))))
+        }
+        let components = Array(reversedComponents.reversed())
+        switch colorSpace {
+        case .deviceGray:
+            guard let gray = components.first else { return nil }
+            return PDFTextColor(red: gray, green: gray, blue: gray, alpha: alpha)
+        case .deviceRGB:
+            guard components.count == 3 else { return nil }
+            return PDFTextColor(
+                red: components[0],
+                green: components[1],
+                blue: components[2],
+                alpha: alpha
+            )
+        case .deviceCMYK:
+            guard components.count == 4 else { return nil }
+            return PDFTextColor(
+                red: 1 - min(1, components[0] + components[3]),
+                green: 1 - min(1, components[1] + components[3]),
+                blue: 1 - min(1, components[2] + components[3]),
+                alpha: alpha
+            )
+        case .unsupported:
+            return nil
+        }
+    }
+
+    private func discardRemainingOperands(_ scanner: CGPDFScannerRef) {
+        var ignored: CGPDFObjectRef?
+        while CGPDFScannerPopObject(scanner, &ignored) {}
+    }
+
     private func popNumber(_ scanner: CGPDFScannerRef) -> CGFloat {
         min(1, max(0, popRawNumber(scanner)))
     }
@@ -887,32 +1129,54 @@ private final class PDFGraphicsTrace {
         return point.x.isFinite && point.y.isFinite ? point : nil
     }
 
-    private func emitPending(fill: PDFTextColor?) {
-        for rectangle in pendingRectangles {
-            paintOrder += 1
-            let selectedFill = fill.map { $0.alpha > 0 ? $0 : nil } ?? nil
-            let eligible = rectangle.bounds.width.isFinite
-                && rectangle.bounds.height.isFinite
-                && rectangle.lineWidth.isFinite
-                && rectangle.lineWidth >= 0
-                && abs(rectangle.rotation.truncatingRemainder(dividingBy: 90)) < 0.01
-            vectors.append(
-                PDFSceneVector(
-                    id: "vector-\(paintOrder)",
-                    kind: .rectangle,
-                    bounds: rectangle.bounds,
-                    stroke: rectangle.stroke,
-                    fill: selectedFill,
-                    lineWidth: rectangle.lineWidth,
-                    rotation: rectangle.rotation,
-                    paintOrder: paintOrder,
-                    nativeEligible: eligible
-                )
-            )
-        }
-        pendingRectangles.removeAll(keepingCapacity: true)
+    private func emitPending(
+        fill: PDFTextColor?,
+        emitsStroke: Bool
+    ) {
+        let canRepresentPath = !pathUsesClipping
+            && !pathHasUnsupportedGeometry
+            && !hasActiveClippingPath
+            && !usesUnsupportedGraphicsState
+        let selectedFill = canRepresentPath && fillColorIsKnown
+            ? fill.flatMap { $0.alpha > 0 ? $0 : nil }
+            : nil
+        let selectedStroke = canRepresentPath
+            && emitsStroke
+            && strokeColorIsKnown
+            && strokeColor.alpha > 0
+            ? strokeColor
+            : nil
 
-        if fill == nil, currentPath.count == 2,
+        if canRepresentPath && (selectedFill != nil || selectedStroke != nil) {
+            for rectangle in pendingRectangles {
+                let eligible = rectangle.bounds.width.isFinite
+                    && rectangle.bounds.height.isFinite
+                    && lineWidth.isFinite
+                    && lineWidth >= 0
+                    && abs(rectangle.rotation.truncatingRemainder(dividingBy: 90)) < 0.01
+                guard eligible else { continue }
+                paintOrder += 1
+                vectors.append(
+                    PDFSceneVector(
+                        id: "vector-\(paintOrder)",
+                        kind: .rectangle,
+                        bounds: rectangle.bounds,
+                        stroke: selectedStroke,
+                        fill: selectedFill,
+                        lineWidth: lineWidth,
+                        rotation: rectangle.rotation,
+                        paintOrder: paintOrder,
+                        nativeEligible: true,
+                        isSafetyNetVerifiedOpaque: false
+                    )
+                )
+            }
+        }
+
+        if canRepresentPath,
+           selectedFill == nil,
+           let selectedStroke,
+           currentPath.count == 2,
            let first = currentPath.first,
            let last = currentPath.last {
             let dx = last.x - first.x
@@ -931,25 +1195,118 @@ private final class PDFGraphicsTrace {
                   bounds.width < 100_000,
                   bounds.height < 100_000
             else {
-                currentPath.removeAll(keepingCapacity: true)
+                resetCurrentPath()
                 return
             }
             paintOrder += 1
             vectors.append(
                 PDFSceneVector(
-                    id: "vector-(paintOrder)",
+                    id: "vector-\(paintOrder)",
                     kind: .line,
                     bounds: bounds,
-                    stroke: strokeColor,
+                    stroke: selectedStroke,
                     fill: nil,
                     lineWidth: lineWidth,
                     rotation: atan2(dy, dx) * 180 / .pi,
                     paintOrder: paintOrder,
-                    nativeEligible: axisAligned
+                    nativeEligible: axisAligned,
+                    isSafetyNetVerifiedOpaque: false
                 )
             )
         }
+        resetCurrentPath()
+    }
+
+    private func resetCurrentPath() {
+        pendingRectangles.removeAll(keepingCapacity: true)
         currentPath.removeAll(keepingCapacity: true)
+        pathUsesClipping = false
+        pathHasUnsupportedGeometry = false
+    }
+
+    private static func vectorMatchesSafetyNet(
+        _ vector: PDFSceneVector,
+        cropBox: CGRect,
+        bitmap: NSBitmapImageRep?
+    ) -> Bool {
+        guard let bitmap,
+              vector.nativeEligible,
+              vector.kind == .rectangle,
+              vector.stroke == nil,
+              let fill = vector.fill,
+              fill.alpha >= 0.999,
+              cropBox.width > 0,
+              cropBox.height > 0,
+              bitmap.pixelsWide > 0,
+              bitmap.pixelsHigh > 0
+        else {
+            return false
+        }
+
+        let bounds = vector.bounds.intersection(cropBox)
+        guard !bounds.isNull,
+              bounds.width > 2,
+              bounds.height > 2,
+              bounds.width < cropBox.width * 0.95,
+              bounds.height < cropBox.height * 0.95
+        else {
+            return false
+        }
+
+        let inset = min(bounds.width, bounds.height) * 0.12
+        let interior = bounds.insetBy(dx: max(0.5, inset), dy: max(0.5, inset))
+        guard interior.width > 1, interior.height > 1 else { return false }
+
+        let columns = min(48, max(12, Int((interior.width / 8).rounded())))
+        let rows = min(48, max(12, Int((interior.height / 8).rounded())))
+        let scaleX = CGFloat(bitmap.pixelsWide) / cropBox.width
+        let scaleY = CGFloat(bitmap.pixelsHigh) / cropBox.height
+        let fillRGB = [
+            Int((fill.red * 255).rounded()),
+            Int((fill.green * 255).rounded()),
+            Int((fill.blue * 255).rounded())
+        ]
+        var mismatches = 0
+        let samples = columns * rows
+
+        for row in 0..<rows {
+            let v = (CGFloat(row) + 0.5) / CGFloat(rows)
+            let pageY = min(
+                bitmap.pixelsHigh - 1,
+                max(
+                    0,
+                    Int(((cropBox.maxY - (interior.maxY - v * interior.height)) * scaleY).rounded())
+                )
+            )
+            for column in 0..<columns {
+                let u = (CGFloat(column) + 0.5) / CGFloat(columns)
+                let pageX = min(
+                    bitmap.pixelsWide - 1,
+                    max(
+                        0,
+                        Int((((interior.minX + u * interior.width) - cropBox.minX) * scaleX).rounded())
+                    )
+                )
+                guard let color = bitmap.colorAt(x: pageX, y: pageY)?
+                    .usingColorSpace(.deviceRGB)
+                else {
+                    return false
+                }
+                let observed = [
+                    Int((color.redComponent * 255).rounded()),
+                    Int((color.greenComponent * 255).rounded()),
+                    Int((color.blueComponent * 255).rounded())
+                ]
+                let greatestDifference = zip(observed, fillRGB)
+                    .map { abs($0 - $1) }
+                    .max() ?? Int.max
+                if greatestDifference > 12 {
+                    mismatches += 1
+                }
+            }
+        }
+
+        return Double(mismatches) / Double(max(1, samples)) <= 0.01
     }
 }
 
@@ -1073,6 +1430,98 @@ private func pdfTraceEndPath(
     Unmanaged<PDFGraphicsTrace>.fromOpaque(info).takeUnretainedValue().endPath()
 }
 
+private func pdfTraceClip(
+    _ scanner: CGPDFScannerRef,
+    _ info: UnsafeMutableRawPointer?
+) {
+    guard let info else { return }
+    Unmanaged<PDFGraphicsTrace>.fromOpaque(info).takeUnretainedValue().clip()
+}
+
+private func pdfTraceFillStroke(
+    _ scanner: CGPDFScannerRef,
+    _ info: UnsafeMutableRawPointer?
+) {
+    guard let info else { return }
+    Unmanaged<PDFGraphicsTrace>.fromOpaque(info).takeUnretainedValue().fillStroke()
+}
+
+private func pdfTraceUnknownFillColor(
+    _ scanner: CGPDFScannerRef,
+    _ info: UnsafeMutableRawPointer?
+) {
+    guard let info else { return }
+    var name: UnsafePointer<CChar>?
+    _ = CGPDFScannerPopName(scanner, &name)
+    let selectedName = name.map { String(cString: $0) }
+    Unmanaged<PDFGraphicsTrace>.fromOpaque(info).takeUnretainedValue()
+        .selectFillColorSpace(named: selectedName)
+}
+
+private func pdfTraceUnknownStrokeColor(
+    _ scanner: CGPDFScannerRef,
+    _ info: UnsafeMutableRawPointer?
+) {
+    guard let info else { return }
+    var name: UnsafePointer<CChar>?
+    _ = CGPDFScannerPopName(scanner, &name)
+    let selectedName = name.map { String(cString: $0) }
+    Unmanaged<PDFGraphicsTrace>.fromOpaque(info).takeUnretainedValue()
+        .selectStrokeColorSpace(named: selectedName)
+}
+
+private func pdfTraceFillComponents(
+    _ scanner: CGPDFScannerRef,
+    _ info: UnsafeMutableRawPointer?
+) {
+    guard let info else { return }
+    Unmanaged<PDFGraphicsTrace>.fromOpaque(info).takeUnretainedValue()
+        .setFillComponents(scanner)
+}
+
+private func pdfTraceStrokeComponents(
+    _ scanner: CGPDFScannerRef,
+    _ info: UnsafeMutableRawPointer?
+) {
+    guard let info else { return }
+    Unmanaged<PDFGraphicsTrace>.fromOpaque(info).takeUnretainedValue()
+        .setStrokeComponents(scanner)
+}
+
+private func pdfTraceUnsupportedGraphicsState(
+    _ scanner: CGPDFScannerRef,
+    _ info: UnsafeMutableRawPointer?
+) {
+    guard let info else { return }
+    var ignored: UnsafePointer<CChar>?
+    _ = CGPDFScannerPopName(scanner, &ignored)
+    Unmanaged<PDFGraphicsTrace>.fromOpaque(info).takeUnretainedValue().markUnsupportedGraphicsState()
+}
+
+private func pdfTraceUnsupportedCubicPath(
+    _ scanner: CGPDFScannerRef,
+    _ info: UnsafeMutableRawPointer?
+) {
+    guard let info else { return }
+    var ignored: CGPDFReal = 0
+    for _ in 0..<6 {
+        _ = CGPDFScannerPopNumber(scanner, &ignored)
+    }
+    Unmanaged<PDFGraphicsTrace>.fromOpaque(info).takeUnretainedValue().markUnsupportedPath()
+}
+
+private func pdfTraceUnsupportedQuadraticPath(
+    _ scanner: CGPDFScannerRef,
+    _ info: UnsafeMutableRawPointer?
+) {
+    guard let info else { return }
+    var ignored: CGPDFReal = 0
+    for _ in 0..<4 {
+        _ = CGPDFScannerPopNumber(scanner, &ignored)
+    }
+    Unmanaged<PDFGraphicsTrace>.fromOpaque(info).takeUnretainedValue().markUnsupportedPath()
+}
+
 private func pdfTraceStroke(
     _ scanner: CGPDFScannerRef,
     _ info: UnsafeMutableRawPointer?
@@ -1120,7 +1569,8 @@ private enum PDFImageExtractor {
         page: PDFPage,
         pageIndex: Int,
         cropBox: CGRect,
-        maximumDimension: CGFloat
+        maximumDimension: CGFloat,
+        pageSafetyNetPNG: Data
     ) -> Result {
         guard let pageRef = page.pageRef,
               let pageDictionary = pageRef.dictionary,
@@ -1143,6 +1593,7 @@ private enum PDFImageExtractor {
             availableNames: Set(byName.keys)
         )
         let occurrenceCount = placements.isEmpty ? records.count : placements.count
+        let pageSafetyNet = NSBitmapImageRep(data: pageSafetyNetPNG)
         var extracted: [PDFSceneImage] = []
         extracted.reserveCapacity(placements.count)
         for (order, placement) in placements.enumerated() {
@@ -1162,6 +1613,28 @@ private enum PDFImageExtractor {
             else {
                 continue
             }
+            let isPageBackdrop = safeBounds.width >= cropBox.width * 0.98
+                && safeBounds.height >= cropBox.height * 0.98
+            // `hasAlpha` records the source image model.  A soft mask can
+            // still leave an RGBA buffer whose individual alpha samples are
+            // not all opaque, so inspect the alpha channel as well.  Iterate
+            // by pixel rather than enumerating every RGBA component: large
+            // background images are common in slide PDFs and this check runs
+            // for every image occurrence.
+            let isFullyOpaque = !decoded.hasAlpha
+                && stride(from: 3, to: decoded.rgba.count, by: 4).allSatisfy {
+                    decoded.rgba[$0] == 255
+                }
+            let canBeIndependent = isFullyOpaque
+                && !decoded.maskApplied
+                && !isPageBackdrop
+            let matchesSafetyNet = canBeIndependent
+                && imageMatchesSafetyNet(
+                    decoded,
+                    placement: safeBounds,
+                    cropBox: cropBox,
+                    bitmap: pageSafetyNet
+                )
             extracted.append(
                 PDFSceneImage(
                     id: "pdf-image-\(pageIndex + 1)-\(order + 1)",
@@ -1171,7 +1644,11 @@ private enum PDFImageExtractor {
                     paintOrder: placement.paintOrder,
                     hasAlpha: decoded.hasAlpha,
                     maskApplied: decoded.maskApplied,
-                    isBackdropIndependent: !decoded.maskApplied
+                    // A page-sized image is itself the visual safety-net or
+                    // a template backdrop. Replaying it over that safety-net
+                    // would hide logos/text that were painted later.
+                    isBackdropIndependent: canBeIndependent,
+                    isSafetyNetVerifiedOpaque: matchesSafetyNet
                 )
             )
         }
@@ -1230,7 +1707,17 @@ private enum PDFImageExtractor {
             guard let source = CGImageSourceCreateWithData(data as CFData, nil),
                   let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
             else { return nil }
-            return decodedImage(from: image, maximumDimension: maximumDimension)
+            guard var decoded = decodedImage(
+                from: image,
+                maximumDimension: maximumDimension
+            ) else {
+                return nil
+            }
+            // JPEG/JPX streams can carry a PDF soft mask separately. ImageIO
+            // decodes only the color stream, so returning here used to drop
+            // the transparency and turn transparent logos into black boxes.
+            applyMask(record.dictionary, to: &decoded)
+            return decoded
         }
 
         var width: CGPDFInteger = 0
@@ -1420,6 +1907,96 @@ private enum PDFImageExtractor {
             )
         }
         mask.rgba.removeAll(keepingCapacity: false)
+    }
+
+    /// An opaque image may be replayed on top of the full-page fallback only
+    /// if its own decoded pixels are already the final visible pixels at that
+    /// placement. This catches images that sit below later text, images with a
+    /// missed transform, and any decoder/color-space disagreement before they
+    /// can cover correct fallback content in the Office document.
+    private static func imageMatchesSafetyNet(
+        _ image: DecodedImage,
+        placement: CGRect,
+        cropBox: CGRect,
+        bitmap: NSBitmapImageRep?
+    ) -> Bool {
+        guard let bitmap,
+              image.width > 1,
+              image.height > 1,
+              placement.width > 0,
+              placement.height > 0,
+              cropBox.width > 0,
+              cropBox.height > 0,
+              bitmap.pixelsWide > 0,
+              bitmap.pixelsHigh > 0
+        else {
+            return false
+        }
+
+        let imageAspect = CGFloat(image.width) / CGFloat(image.height)
+        let placementAspect = placement.width / placement.height
+        // A rotated/sheared Image XObject needs a full transform serializer,
+        // not a resized OOXML rectangle. Refuse it until that representation
+        // is available instead of guessing an orientation.
+        guard abs(imageAspect - placementAspect) / max(imageAspect, placementAspect) < 0.025 else {
+            return false
+        }
+
+        let columns = min(64, max(12, Int((placement.width / 10).rounded())))
+        let rows = min(64, max(12, Int((placement.height / 10).rounded())))
+        let bitmapScaleX = CGFloat(bitmap.pixelsWide) / cropBox.width
+        let bitmapScaleY = CGFloat(bitmap.pixelsHigh) / cropBox.height
+        var totalDifference = 0.0
+        var mismatchedSamples = 0
+        let sampleCount = columns * rows
+
+        for row in 0..<rows {
+            let v = (CGFloat(row) + 0.5) / CGFloat(rows)
+            let imageY = min(
+                image.height - 1,
+                max(0, Int((v * CGFloat(image.height - 1)).rounded()))
+            )
+            let pageY = min(
+                bitmap.pixelsHigh - 1,
+                max(
+                    0,
+                    Int(((cropBox.maxY - (placement.maxY - v * placement.height)) * bitmapScaleY).rounded())
+                )
+            )
+            for column in 0..<columns {
+                let u = (CGFloat(column) + 0.5) / CGFloat(columns)
+                let imageX = min(
+                    image.width - 1,
+                    max(0, Int((u * CGFloat(image.width - 1)).rounded()))
+                )
+                let pageX = min(
+                    bitmap.pixelsWide - 1,
+                    max(
+                        0,
+                        Int((((placement.minX + u * placement.width) - cropBox.minX) * bitmapScaleX).rounded())
+                    )
+                )
+                guard let pageColor = bitmap.colorAt(x: pageX, y: pageY)?
+                    .usingColorSpace(.deviceRGB)
+                else {
+                    return false
+                }
+                let sourceOffset = (imageY * image.width + imageX) * 4
+                let difference = max(
+                    abs(Int(image.rgba[sourceOffset]) - Int((pageColor.redComponent * 255).rounded())),
+                    abs(Int(image.rgba[sourceOffset + 1]) - Int((pageColor.greenComponent * 255).rounded())),
+                    abs(Int(image.rgba[sourceOffset + 2]) - Int((pageColor.blueComponent * 255).rounded()))
+                )
+                totalDifference += Double(difference)
+                if difference > 16 {
+                    mismatchedSamples += 1
+                }
+            }
+        }
+
+        let meanDifference = totalDifference / Double(max(1, sampleCount))
+        let mismatchRatio = Double(mismatchedSamples) / Double(max(1, sampleCount))
+        return meanDifference <= 6 && mismatchRatio <= 0.015
     }
 
     private static func pngData(from image: DecodedImage) -> Data? {

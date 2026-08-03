@@ -177,6 +177,10 @@ struct PDFSceneImage {
     let hasAlpha: Bool
     let maskApplied: Bool
     let isBackdropIndependent: Bool
+    /// The decoded opaque image has been compared against the rendered page
+    /// safety-net at its original placement. Only a match can be drawn above
+    /// that safety-net without hiding later PDF paint.
+    let isSafetyNetVerifiedOpaque: Bool
 
     /// Native image placement is safe only when it cannot alter pixels that
     /// are already represented by the full-page visual safety net.  An opaque
@@ -184,7 +188,10 @@ struct PDFSceneImage {
     /// or masked image would blend a second time and become too dark or leave
     /// a mask edge in Word/PowerPoint.
     var canOverlayOnPageSafetyNet: Bool {
-        isBackdropIndependent && !hasAlpha && !maskApplied
+        isBackdropIndependent
+            && !hasAlpha
+            && !maskApplied
+            && isSafetyNetVerifiedOpaque
     }
 }
 
@@ -376,20 +383,27 @@ struct PDFSceneVector {
     let id: String
     let kind: PDFSceneVectorKind
     let bounds: CGRect
-    let stroke: PDFTextColor
+    /// `nil` means that the original path was filled without a stroke. OOXML
+    /// must emit an explicit no-line rather than inventing a black outline.
+    let stroke: PDFTextColor?
     let fill: PDFTextColor?
     let lineWidth: CGFloat
     let rotation: CGFloat
     let paintOrder: Int
     let nativeEligible: Bool
+    /// Replaying a vector above a full-page raster is safe only when its
+    /// visible pixels are independently confirmed to be the topmost source
+    /// pixels in that area.
+    let isSafetyNetVerifiedOpaque: Bool
 
     /// The page safety net already contains the source vector. Repainting an
     /// opaque vector is stable, but repainting a translucent stroke/fill would
     /// apply alpha blending twice. Keep those vectors in the visual fallback.
     var canOverlayOnPageSafetyNet: Bool {
         nativeEligible
-            && stroke.alpha >= 0.999
+            && (stroke?.alpha ?? 1) >= 0.999
             && (fill?.alpha ?? 1) >= 0.999
+            && isSafetyNetVerifiedOpaque
     }
 }
 
