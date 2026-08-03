@@ -32,6 +32,8 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
+APPLICATION_DIR="$ROOT_DIR/application"
+APPLICATION_BUNDLE="$APPLICATION_DIR/$APP_NAME.app"
 STAGING_ROOT="${TMPDIR:-/tmp}/KCDeepL-build.$$"
 STAGING_BUNDLE="$STAGING_ROOT/$APP_NAME.app"
 APP_CONTENTS="$STAGING_BUNDLE/Contents"
@@ -275,6 +277,51 @@ open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
 }
 
+# `application/` is a user-facing handoff location, not the normal debug
+# output. Keep the default run path in `dist/`, and require this explicit mode
+# before replacing the copy a user may launch directly from Finder.
+install_application_bundle() {
+  local install_staging="$APPLICATION_DIR/.${APP_NAME}.app.staging.$$"
+  local install_backup="$APPLICATION_DIR/.${APP_NAME}.app.backup.$$"
+
+  mkdir -p "$APPLICATION_DIR"
+  rm -rf "$install_staging" "$install_backup"
+  /usr/bin/ditto "$APP_BUNDLE" "$install_staging"
+  # Copying through a file-provider-backed folder can add Finder metadata to
+  # the staging bundle. It is not executable content, but codesign correctly
+  # rejects it if left attached to the app package.
+  /usr/bin/xattr -cr "$install_staging"
+  codesign --verify --deep --strict "$install_staging"
+
+  # Replacing a running bundle can leave Finder launching an old executable.
+  # Stop only this app name, then wait briefly for its process to exit.
+  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    if ! pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
+  if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+    echo "error: $APP_NAME is still running; cannot replace $APPLICATION_BUNDLE." >&2
+    exit 1
+  fi
+
+  if [[ -d "$APPLICATION_BUNDLE" ]]; then
+    mv "$APPLICATION_BUNDLE" "$install_backup"
+  fi
+  if ! mv "$install_staging" "$APPLICATION_BUNDLE"; then
+    if [[ -d "$install_backup" ]]; then
+      mv "$install_backup" "$APPLICATION_BUNDLE"
+    fi
+    echo "error: Could not install $APPLICATION_BUNDLE; the prior bundle was restored." >&2
+    exit 1
+  fi
+  rm -rf "$install_backup"
+  codesign --verify --deep --strict "$APPLICATION_BUNDLE"
+  echo "Installed bundle: $APPLICATION_BUNDLE"
+}
+
 case "$MODE" in
   --release|release)
     echo "Release bundle: $APP_BUNDLE"
@@ -298,8 +345,11 @@ case "$MODE" in
     sleep 1
     pgrep -x "$APP_NAME" >/dev/null
     ;;
+  --install-application|install-application)
+    install_application_bundle
+    ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--release]" >&2
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--release|--install-application]" >&2
     exit 2
     ;;
 esac
