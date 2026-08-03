@@ -30,7 +30,8 @@ enum PopClipIntegration {
         AppActionDispatcher.shared.perform(
             .textTranslation,
             capturedText: request.text,
-            statusMessage: "PopClip에서 선택한 텍스트를 가져왔습니다."
+            statusMessage: "PopClip에서 선택한 텍스트를 가져왔습니다.",
+            windowPolicy: .reuseExisting
         )
     }
 }

@@ -41,7 +41,11 @@ struct KCDeepLApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("KC DeepL", id: "main") {
+        // KC DeepL is a single-workspace utility. A singleton Window scene is
+        // important here because PopClip delivers an external URL; a
+        // WindowGroup may create a new scene for each URL before onOpenURL is
+        // called, while Window routes the request to the existing workspace.
+        Window("KC DeepL", id: "main") {
             ContentView(
                 viewModel: translationViewModel,
                 comparisonViewModel: translationComparisonViewModel,

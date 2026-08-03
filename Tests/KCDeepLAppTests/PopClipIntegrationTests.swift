@@ -19,11 +19,32 @@ final class PopClipIntegrationTests: XCTestCase {
             return payload.action == .textTranslation
                 && payload.capturedText == "Translate this"
                 && payload.statusMessage == "PopClip에서 선택한 텍스트를 가져왔습니다."
+                && payload.windowPolicy == .reuseExisting
         }
 
         PopClipIntegration.handle(url)
 
         await fulfillment(of: [dispatched], timeout: 1)
+    }
+
+    @MainActor
+    func testPopClipDoesNotRequestAnotherWindowWhenNoWindowIsFound() throws {
+        let dispatcher = AppActionDispatcher.shared
+        let previousOpenMainWindow = dispatcher.openMainWindow
+        var didRequestNewWindow = false
+        dispatcher.openMainWindow = {
+            didRequestNewWindow = true
+        }
+        defer {
+            dispatcher.openMainWindow = previousOpenMainWindow
+        }
+
+        let url = try XCTUnwrap(
+            URL(string: "kcdeepl://translate?text=Reuse%20the%20current%20window")
+        )
+        PopClipIntegration.handle(url)
+
+        XCTAssertFalse(didRequestNewWindow)
     }
 
     func testTranslationRequestDecodesSelectedTextWithoutChangingLayout() throws {

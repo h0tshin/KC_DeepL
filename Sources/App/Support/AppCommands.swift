@@ -20,6 +20,17 @@ enum AppCommandAction: String, Hashable {
     }
 }
 
+/// Controls whether an app command may create the main window when no main
+/// window is currently available.
+///
+/// PopClip already sends its request to the running app. Reusing an existing
+/// window keeps that request in the user's current translation context and
+/// avoids requesting another main-window scene.
+enum AppActionWindowPolicy: Equatable {
+    case reuseExisting
+    case openIfNeeded
+}
+
 extension Notification.Name {
     static let kcDeepLPerformAction = Notification.Name("KCDeepLPerformAction")
     static let kcDeepLShortcutRegistrationFailed = Notification.Name(
@@ -33,6 +44,7 @@ struct AppCommandPayload {
     let capturedAttributedText: NSAttributedString?
     let statusMessage: String?
     let pasteBackTarget: PasteBackTarget?
+    let windowPolicy: AppActionWindowPolicy
 }
 
 @MainActor
@@ -48,16 +60,18 @@ final class AppActionDispatcher {
         capturedText: String? = nil,
         capturedAttributedText: NSAttributedString? = nil,
         statusMessage: String? = nil,
-        pasteBackTarget: PasteBackTarget? = nil
+        pasteBackTarget: PasteBackTarget? = nil,
+        windowPolicy: AppActionWindowPolicy = .openIfNeeded
     ) {
-        showMainWindow()
+        showMainWindow(using: windowPolicy)
 
         let payload = AppCommandPayload(
             action: action,
             capturedText: capturedText,
             capturedAttributedText: capturedAttributedText,
             statusMessage: statusMessage,
-            pasteBackTarget: pasteBackTarget
+            pasteBackTarget: pasteBackTarget,
+            windowPolicy: windowPolicy
         )
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(120))
@@ -68,19 +82,35 @@ final class AppActionDispatcher {
         }
     }
 
-    private func showMainWindow() {
+    private func showMainWindow(using policy: AppActionWindowPolicy) {
         let application = NSApplication.shared
-        application.setActivationPolicy(.regular)
-        application.activate(ignoringOtherApps: true)
 
-        if let window = application.windows.first(where: { $0.title == "KC DeepL" }) {
+        if let window = mainWindow(in: application) {
+            application.setActivationPolicy(.regular)
+            application.activate(ignoringOtherApps: true)
             if window.isMiniaturized {
                 window.deminiaturize(nil)
             }
             window.makeKeyAndOrderFront(nil)
-        } else {
-            openMainWindow?()
+            return
         }
+
+        guard policy == .openIfNeeded else {
+            return
+        }
+
+        application.setActivationPolicy(.regular)
+        application.activate(ignoringOtherApps: true)
+        openMainWindow?()
+    }
+
+    private func mainWindow(in application: NSApplication) -> NSWindow? {
+        let candidates = application.windows.filter { $0.title == "KC DeepL" }
+
+        return candidates.first(where: \.isKeyWindow)
+            ?? candidates.first(where: \.isMainWindow)
+            ?? candidates.first(where: { !$0.isMiniaturized })
+            ?? candidates.first
     }
 }
 
