@@ -57,7 +57,7 @@ Developer ID Release 번들:
 
 Release 모드는 `Developer ID Application` 인증서, Hardened Runtime, 보안 타임스탬프와 마이크 입력 entitlement를 적용해 `dist/KCDeepL.app`을 생성합니다. App Store 밖에서 다른 Mac에 배포하려면 이 번들을 Apple 공증한 뒤 공증 티켓을 stapling해야 합니다.
 
-Finder에서 직접 실행할 사용자 전달용 번들을 최신 빌드로 교체하려면, 명시적으로 다음 명령을 실행합니다. 기본 실행 경로는 의도적으로 `dist/KCDeepL.app`만 갱신하며, 이 명령만 `application/KCDeepL.app`을 안전하게 교체합니다.
+Finder에서 직접 실행할 사용자 전달용 번들을 최신 빌드로 교체하려면, 명시적으로 다음 명령을 실행합니다. 기본 실행 경로는 의도적으로 `dist/KCDeepL.app`만 갱신하며, 이 명령만 `/Applications/KCDeepL.app`을 안전하게 교체합니다.
 
 ```bash
 ./script/build_and_run.sh --install-application

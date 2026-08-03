@@ -32,7 +32,7 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
-APPLICATION_DIR="$ROOT_DIR/application"
+APPLICATION_DIR="/Applications"
 APPLICATION_BUNDLE="$APPLICATION_DIR/$APP_NAME.app"
 STAGING_ROOT="${TMPDIR:-/tmp}/KCDeepL-build.$$"
 STAGING_BUNDLE="$STAGING_ROOT/$APP_NAME.app"
@@ -277,7 +277,7 @@ open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
 }
 
-# `application/` is a user-facing handoff location, not the normal debug
+# `/Applications` is the user-facing install location, not the normal debug
 # output. Keep the default run path in `dist/`, and require this explicit mode
 # before replacing the copy a user may launch directly from Finder.
 install_application_bundle() {
@@ -318,6 +318,7 @@ install_application_bundle() {
     exit 1
   fi
   rm -rf "$install_backup"
+  /usr/bin/xattr -cr "$APPLICATION_BUNDLE"
   codesign --verify --deep --strict "$APPLICATION_BUNDLE"
   echo "Installed bundle: $APPLICATION_BUNDLE"
 }
