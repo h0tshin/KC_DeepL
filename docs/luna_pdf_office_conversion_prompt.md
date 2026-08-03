@@ -26,6 +26,10 @@
    - `Tests/KCDeepLAppTests/`
    - `Tests/KCDeepLCoreTests/`
 
+### 현재 저장소 구현 프로파일
+
+현재 브랜치에는 이미 macOS native baseline이 구현되어 있다. `PDFKit`·`CoreGraphics`·`ImageIO`·`Vision`과 순수 Swift ZIP/OOXML writer를 사용하며, PDFium/XCFramework/helper, ZIPFoundation, .NET/DLL, LibreOffice를 실행 의존성으로 추가하지 않는다. 기존 baseline의 page-RGBA safety net, editable text boxes, decoded image assets/masks, conservative native rectangles, operation gate와 lifecycle을 먼저 유지하고 확장한다. PDFium worker는 실제 pinned artifact·license·universal build·signed sandbox helper를 함께 추가할 때만 별도 고충실도 프로파일로 도입하며, 존재하지 않는 artifact를 구현 완료로 보고하지 않는다.
+
 현재 저장소 root에는 tracked `AGENTS.md`가 없고, `AGENTS 2.md`는 기존 사용자 소유 untracked 파일이다. Luna는 `AGENTS 2.md`를 canonical instruction으로 추측하거나 변경·stage하지 않는다. 문서가 충돌하면 PDF 변환 기능에는 `docs/pdf_office_conversion_implementation_guide.md`가 우선하고, 보안·파괴적 작업·Git 범위에는 Luna task에 주입된 `AGENTS.md instructions`가 우선한다.
 
 과거 worktree snapshot을 현재 상태로 가정하지 않는다. 구현 시작 직전에 `git status --short`, `git diff`, 현재 HEAD/remote를 직접 확인하고, 그 시점의 tracked/untracked 변경을 사용자 또는 병렬 작업으로 보존한다. 변환 ViewModel 주입 때문에 `ContentView.swift`를 수정할 때도 현재 파일을 통째로 교체하지 말고 최소 병합한다. 현재 확인되는 `application/`, `image/`, `output/`, `tmp/`와 기타 untracked 파일은 build input/release golden으로 추측하거나 삭제·덮어쓰기·stage하지 않는다.
@@ -34,6 +38,8 @@
 
 ```text
 너는 KC DeepL macOS 앱의 PDF → PowerPoint/Word 변환 기능을 끝까지 구현하는 담당자 GPT Luna다.
+
+현재 저장소에는 PDFKit/CoreGraphics/ImageIO/Vision 기반 native baseline과 순수 Swift OOXML/ZIP writer가 이미 들어 있을 수 있다. 먼저 이를 재사용·검증하라. PDFium/XCFramework/helper가 실제로 존재하지 않는다면 PDFium이 포함된 것처럼 보고하거나 .NET/DLL/LibreOffice를 shipping runtime으로 추가하지 말고, page-RGBA fallback과 품질 보고서를 유지한 채 native baseline을 완성하라.
 
 작업 저장소:
 /Users/h0tshin/Documents/KC_DeepL

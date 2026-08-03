@@ -7,6 +7,7 @@ import KCDeepLCore
 
 struct FileTranslationWorkspace: View {
     @ObservedObject var viewModel: FileTranslationViewModel
+    @ObservedObject var conversionViewModel: DocumentConversionViewModel
     @Binding var sourceLanguage: LanguageOption
     @Binding var targetLanguage: LanguageOption
 
@@ -85,6 +86,10 @@ struct FileTranslationWorkspace: View {
         viewModel.documentKind ?? .pdf
     }
 
+    private var isAnyFileOperationBusy: Bool {
+        viewModel.isBusy || conversionViewModel.isBusy
+    }
+
     private var activeModelID: String {
         engine == .codexAppServer ? codexModelID : apiModelID
     }
@@ -102,6 +107,7 @@ struct FileTranslationWorkspace: View {
         viewModel.documentKind != nil
             && viewModel.translatableBlockCount > 0
             && !viewModel.isBusy
+            && !conversionViewModel.isBusy
             && (sourceLanguage == .autoDetect || sourceLanguage != targetLanguage)
             && isEngineReady
     }
@@ -164,7 +170,7 @@ struct FileTranslationWorkspace: View {
         ) { result in
             switch result {
             case .success(let urls):
-                if let url = urls.first {
+                if !isAnyFileOperationBusy, let url = urls.first {
                     importDocument(url)
                 }
             case .failure(let error):
@@ -245,7 +251,7 @@ struct FileTranslationWorkspace: View {
         .padding(.horizontal, 18)
         .frame(height: 54)
         .background(AppTheme.toolbarBackground)
-        .disabled(viewModel.isBusy)
+        .disabled(isAnyFileOperationBusy)
     }
 
     @ViewBuilder
@@ -269,7 +275,7 @@ struct FileTranslationWorkspace: View {
                     }
                     .buttonStyle(.plain)
                     .help("문서 닫기")
-                    .disabled(viewModel.isBusy)
+                    .disabled(isAnyFileOperationBusy)
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 44)
@@ -313,7 +319,7 @@ struct FileTranslationWorkspace: View {
                     }
                 }
                 .dropDestination(for: URL.self) { urls, _ in
-                    guard !viewModel.isBusy else {
+                    guard !isAnyFileOperationBusy else {
                         return false
                     }
                     guard let supportedURL = urls.first(where: isSupportedDocument) else {
@@ -341,7 +347,7 @@ struct FileTranslationWorkspace: View {
                 onChoose: { isShowingImporter = true }
             )
             .dropDestination(for: URL.self) { urls, _ in
-                guard !viewModel.isBusy else {
+                guard !isAnyFileOperationBusy else {
                     return false
                 }
                 guard let supportedURL = urls.first(where: isSupportedDocument) else {
@@ -518,10 +524,16 @@ struct FileTranslationWorkspace: View {
                     readinessSection
                 }
 
+                DocumentConversionSection(
+                    conversionViewModel: conversionViewModel,
+                    fileTranslationViewModel: viewModel,
+                    downloadLocation: $downloadLocation
+                )
+
                 engineSettings
-                    .disabled(viewModel.isBusy)
+                    .disabled(isAnyFileOperationBusy)
                 outputSettings
-                    .disabled(viewModel.isBusy)
+                    .disabled(isAnyFileOperationBusy)
 
                 if let errorMessage = viewModel.errorMessage {
                     Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
@@ -1085,13 +1097,14 @@ struct FileTranslationWorkspace: View {
 
     private func reanalyzeForOCRSetting() {
         guard let sourceURL = viewModel.sourceURL,
-              !viewModel.isBusy else {
+              !viewModel.isBusy,
+              !conversionViewModel.isBusy else {
             return
         }
         guard viewModel.isPDFDocument else {
             return
         }
-        viewModel.importPDF(
+        viewModel.reanalyzeSelectedPDF(
             from: sourceURL,
             sourceLanguage: sourceLanguage,
             includeOCR: includeOCR

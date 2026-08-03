@@ -7,6 +7,7 @@ struct ContentView: View {
     @ObservedObject var comparisonViewModel: TranslationComparisonViewModel
     @ObservedObject var liveTranslationViewModel: LiveTranslationViewModel
     @ObservedObject var fileTranslationViewModel: FileTranslationViewModel
+    @ObservedObject var documentConversionViewModel: DocumentConversionViewModel
     @SceneStorage("kc.main.showTools") private var showTools = false
     @AppStorage(PreferenceKeys.mainSourceLanguage) private var sourceLanguageCode = LanguageOption.english.code
     @AppStorage(PreferenceKeys.mainTargetLanguage) private var targetLanguageCode = LanguageOption.korean.code
@@ -113,6 +114,7 @@ struct ContentView: View {
                     } else if selectedMode == .files {
                         FileTranslationWorkspace(
                             viewModel: fileTranslationViewModel,
+                            conversionViewModel: documentConversionViewModel,
                             sourceLanguage: sourceLanguageBinding,
                             targetLanguage: targetLanguageBinding
                         )

@@ -158,15 +158,19 @@ final class FileTranslationViewModel: ObservableObject {
     @Published private(set) var codexModelErrorMessage: String?
     @Published private(set) var appleRequestGeneration: UInt = 0
     @Published private(set) var appleCancellationGeneration: UInt = 0
+    @Published private(set) var selectedFileSnapshot: SelectedFileSnapshot?
     private(set) var pendingAppleConfiguration: FileTranslationConfiguration?
 
     private let apiClient: any TranslationClient
     private let appServerClient: any TranslationClient
     private let codexModelProvider: any CodexAppServerModelProviding
     private let outputURLResolver: FileTranslationOutputURLResolver
+    private let operationGate: FileWorkspaceOperationGate
     private var operationTask: Task<Void, Never>?
     private var appleLanguageModelWatchdogTask: Task<Void, Never>?
     private var operationGeneration: UInt = 0
+    private var selectionGeneration: UInt = 0
+    private var workspaceLease: FileWorkspaceOperationGate.Lease?
 
     /// Apple Translation can wait indefinitely while the system language pack
     /// is being prepared. A bounded watchdog turns that silent wait into an
@@ -177,12 +181,14 @@ final class FileTranslationViewModel: ObservableObject {
         apiClient: any TranslationClient = GeminiTranslationClient(requestTimeout: 120),
         appServerClient: any TranslationClient,
         codexModelProvider: any CodexAppServerModelProviding,
-        outputURLResolver: FileTranslationOutputURLResolver = FileTranslationOutputURLResolver()
+        outputURLResolver: FileTranslationOutputURLResolver = FileTranslationOutputURLResolver(),
+        operationGate: FileWorkspaceOperationGate? = nil
     ) {
         self.apiClient = apiClient
         self.appServerClient = appServerClient
         self.codexModelProvider = codexModelProvider
         self.outputURLResolver = outputURLResolver
+        self.operationGate = operationGate ?? .shared
     }
 
     deinit {
@@ -195,7 +201,7 @@ final class FileTranslationViewModel: ObservableObject {
     }
 
     var sourceURL: URL? {
-        analysis?.sourceURL ?? textAnalysis?.sourceURL
+        selectedFileSnapshot?.url ?? analysis?.sourceURL ?? textAnalysis?.sourceURL
     }
 
     var documentKind: SupportedFileDocumentKind? {
@@ -288,7 +294,54 @@ final class FileTranslationViewModel: ObservableObject {
         sourceLanguage: LanguageOption,
         includeOCR: Bool = true
     ) {
+        importFile(
+            from: sourceURL,
+            sourceLanguage: sourceLanguage,
+            includeOCR: includeOCR,
+            preservesSelection: false
+        )
+    }
+
+    func reanalyzeSelectedPDF(
+        from sourceURL: URL,
+        sourceLanguage: LanguageOption,
+        includeOCR: Bool = true
+    ) {
+        importFile(
+            from: sourceURL,
+            sourceLanguage: sourceLanguage,
+            includeOCR: includeOCR,
+            preservesSelection: true
+        )
+    }
+
+    private func importFile(
+        from sourceURL: URL,
+        sourceLanguage: LanguageOption,
+        includeOCR: Bool,
+        preservesSelection: Bool
+    ) {
         cancelCurrentOperation(setCancelledStage: false)
+        let selectionSnapshotGeneration: UInt
+        do {
+            if preservesSelection {
+                selectionSnapshotGeneration = selectionGeneration
+            } else {
+                selectionGeneration &+= 1
+                selectionSnapshotGeneration = selectionGeneration
+                selectedFileSnapshot = Self.makeSelectedFileSnapshot(
+                    sourceURL: sourceURL,
+                    selectionGeneration: selectionSnapshotGeneration
+                )
+            }
+            workspaceLease = try operationGate.acquire(
+                kind: .analysisOrTranslation,
+                selectionGeneration: selectionSnapshotGeneration
+            )
+        } catch {
+            reportFileSelectionError(error)
+            return
+        }
         let generation = nextOperationGeneration()
 
         analysis = nil
@@ -395,6 +448,7 @@ final class FileTranslationViewModel: ObservableObject {
                     let typeName = textAnalysis.kind == .markdown ? "Markdown" : "텍스트"
                     self.statusMessage = "\(typeName)에서 \(textAnalysis.translatableSegmentCount)개 영역, \(textAnalysis.chunks.count)개 번역 청크를 준비했습니다."
                 }
+                self.releaseWorkspaceLease()
                 self.operationTask = nil
             } catch is CancellationError {
                 guard let self, self.operationGeneration == generation else {
@@ -402,12 +456,14 @@ final class FileTranslationViewModel: ObservableObject {
                 }
                 self.stage = .cancelled
                 self.statusMessage = "파일 분석을 취소했습니다."
+                self.releaseWorkspaceLease()
                 self.operationTask = nil
             } catch {
                 guard let self, self.operationGeneration == generation else {
                     return
                 }
                 self.fail(with: error)
+                self.releaseWorkspaceLease()
                 self.operationTask = nil
             }
         }
@@ -428,6 +484,12 @@ final class FileTranslationViewModel: ObservableObject {
     func startTranslation(configuration: FileTranslationConfiguration) {
         do {
             let input = try validatedInputs(for: configuration)
+            if workspaceLease == nil {
+                workspaceLease = try operationGate.acquire(
+                    kind: .analysisOrTranslation,
+                    selectionGeneration: selectionGeneration
+                )
+            }
             let client: TranslationClientDocumentPageAdapter
 
             switch configuration.engine {
@@ -489,6 +551,10 @@ final class FileTranslationViewModel: ObservableObject {
             }
 
             cancelCurrentOperation(setCancelledStage: false)
+            workspaceLease = try operationGate.acquire(
+                kind: .analysisOrTranslation,
+                selectionGeneration: selectionGeneration
+            )
             pendingAppleConfiguration = configuration
             appleRequestGeneration &+= 1
             errorMessage = nil
@@ -545,6 +611,7 @@ final class FileTranslationViewModel: ObservableObject {
                 )
             }
         } catch is CancellationError {
+            releaseWorkspaceLease()
             stage = .cancelled
             statusMessage = "파일 번역을 취소했습니다."
         } catch {
@@ -560,6 +627,8 @@ final class FileTranslationViewModel: ObservableObject {
         cancelCurrentOperation(setCancelledStage: false)
         analysis = nil
         textAnalysis = nil
+        selectedFileSnapshot = nil
+        selectionGeneration &+= 1
         outputURL = nil
         outputData = nil
         textOutput = nil
@@ -631,7 +700,11 @@ final class FileTranslationViewModel: ObservableObject {
         renderMode: PDFTranslationRenderMode,
         continueOnError: Bool
     ) {
-        cancelCurrentOperation(setCancelledStage: false)
+        operationTask?.cancel()
+        operationTask = nil
+        appleLanguageModelWatchdogTask?.cancel()
+        appleLanguageModelWatchdogTask = nil
+        pendingAppleConfiguration = nil
         let generation = nextOperationGeneration()
         let translatablePages = analysis.pages.filter { !$0.blocks.isEmpty }
         errorMessage = nil
@@ -670,7 +743,11 @@ final class FileTranslationViewModel: ObservableObject {
         translateMarkdownCodeBlocks: Bool,
         continueOnError: Bool
     ) {
-        cancelCurrentOperation(setCancelledStage: false)
+        operationTask?.cancel()
+        operationTask = nil
+        appleLanguageModelWatchdogTask?.cancel()
+        appleLanguageModelWatchdogTask = nil
+        pendingAppleConfiguration = nil
         let preparedAnalysis = analysis
             .withMarkdownStructurePreserved(preserveMarkdownStructure)
             .withMarkdownCodeBlocksTranslated(translateMarkdownCodeBlocks)
@@ -855,11 +932,13 @@ final class FileTranslationViewModel: ObservableObject {
             progress = 1
             stage = .completed
             statusMessage = "번역 \(preparedAnalysis.kind.displayName) 파일을 저장했습니다: \(destinationURL.lastPathComponent)"
+            releaseWorkspaceLease()
             operationTask = nil
         } catch is CancellationError {
             guard operationGeneration == generation else {
                 return
             }
+            releaseWorkspaceLease()
             stage = .cancelled
             statusMessage = "파일 번역을 취소했습니다."
             operationTask = nil
@@ -1092,11 +1171,13 @@ final class FileTranslationViewModel: ObservableObject {
             progress = 1
             stage = .completed
             statusMessage = "번역 PDF를 저장했습니다: \(destinationURL.lastPathComponent)"
+            releaseWorkspaceLease()
             operationTask = nil
         } catch is CancellationError {
             guard operationGeneration == generation else {
                 return
             }
+            releaseWorkspaceLease()
             stage = .cancelled
             statusMessage = "파일 번역을 취소했습니다."
             operationTask = nil
@@ -1270,6 +1351,7 @@ final class FileTranslationViewModel: ObservableObject {
         appleLanguageModelWatchdogTask = nil
         pendingAppleConfiguration = nil
         appleCancellationGeneration &+= 1
+        releaseWorkspaceLease()
 
         if setCancelledStage, stage.isBusy {
             stage = .cancelled
@@ -1280,6 +1362,34 @@ final class FileTranslationViewModel: ObservableObject {
     private func nextOperationGeneration() -> UInt {
         operationGeneration &+= 1
         return operationGeneration
+    }
+
+    private func releaseWorkspaceLease() {
+        if let workspaceLease {
+            operationGate.release(workspaceLease)
+            self.workspaceLease = nil
+        }
+    }
+
+    private static func makeSelectedFileSnapshot(
+        sourceURL: URL,
+        selectionGeneration: UInt
+    ) -> SelectedFileSnapshot {
+        let resourceValues = try? sourceURL.resourceValues(
+            forKeys: [.fileSizeKey, .fileResourceIdentifierKey]
+        )
+        let resourceIdentifier = resourceValues?.fileResourceIdentifier.map {
+            String(describing: $0)
+        }
+        return SelectedFileSnapshot(
+            url: sourceURL,
+            kind: sourceURL.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame
+                ? .pdf
+                : (SupportedFileDocumentKind.kind(forFileExtension: sourceURL.pathExtension) ?? .plainText),
+            selectionGeneration: selectionGeneration,
+            expectedByteCount: resourceValues?.fileSize.map(Int64.init),
+            resourceIdentifier: resourceIdentifier
+        )
     }
 
     private func startAppleLanguageModelWatchdog() {
@@ -1310,6 +1420,7 @@ final class FileTranslationViewModel: ObservableObject {
     }
 
     private func fail(with error: Error) {
+        releaseWorkspaceLease()
         errorMessage = Self.userFacingMessage(for: error)
         stage = .failed
         if outputData == nil {

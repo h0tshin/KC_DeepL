@@ -8,6 +8,7 @@ struct KCDeepLApp: App {
     @StateObject private var translationComparisonViewModel: TranslationComparisonViewModel
     @StateObject private var liveTranslationViewModel: LiveTranslationViewModel
     @StateObject private var fileTranslationViewModel: FileTranslationViewModel
+    @StateObject private var documentConversionViewModel: DocumentConversionViewModel
     private let codexAppServerClient: CodexAppServerClient
 
     init() {
@@ -17,6 +18,7 @@ struct KCDeepLApp: App {
         UserDefaults.standard.registerKCDeepLDefaults()
         let codexAppServerClient = CodexAppServerClient()
         self.codexAppServerClient = codexAppServerClient
+        let workspaceOperationGate = FileWorkspaceOperationGate()
         _translationViewModel = StateObject(
             wrappedValue: TranslationViewModel(
                 appServerClient: codexAppServerClient
@@ -32,9 +34,22 @@ struct KCDeepLApp: App {
         _fileTranslationViewModel = StateObject(
             wrappedValue: FileTranslationViewModel(
                 appServerClient: codexAppServerClient,
-                codexModelProvider: codexAppServerClient
+                codexModelProvider: codexAppServerClient,
+                operationGate: workspaceOperationGate
             )
         )
+        let documentConversionViewModel = DocumentConversionViewModel(
+            operationGate: workspaceOperationGate
+        )
+        _documentConversionViewModel = StateObject(
+            wrappedValue: documentConversionViewModel
+        )
+        PendingPersistenceRegistry.shared.registerPreparation { [weak documentConversionViewModel] in
+            documentConversionViewModel?.prepareForApplicationTermination()
+        }
+        PendingPersistenceRegistry.shared.register { [weak documentConversionViewModel] in
+            await documentConversionViewModel?.shutdownAndReapWorker()
+        }
         PendingPersistenceRegistry.shared.register {
             await codexAppServerClient.shutdown()
         }
@@ -50,7 +65,8 @@ struct KCDeepLApp: App {
                 viewModel: translationViewModel,
                 comparisonViewModel: translationComparisonViewModel,
                 liveTranslationViewModel: liveTranslationViewModel,
-                fileTranslationViewModel: fileTranslationViewModel
+                fileTranslationViewModel: fileTranslationViewModel,
+                documentConversionViewModel: documentConversionViewModel
             )
                 .frame(minWidth: 980, minHeight: 600)
                 .font(AppFont.swiftUIFont(size: 13))

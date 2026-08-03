@@ -25,6 +25,18 @@
 
 현재 앱은 SwiftUI가 화면·상태의 source of truth이고 AppKit은 `NSSavePanel`, `NSWorkspace`, app lifecycle 같은 좁은 경계에만 사용한다. 새 기능도 이 경계를 유지한다. SwiftPM executable build가 `.app` bundle이나 helper embedding을 자동으로 해 준다고 가정하지 않으며, 실제 staging bundle을 검사하지 않은 상태에서 universal, sandboxed, signed, notarization-ready라고 보고하지 않는다.
 
+### 0.1 현재 저장소의 구현 프로파일(중요한 현실화 addendum)
+
+이 저장소의 현재 shipping 경로는 별도 PDFium binary/XCFramework, PDFium helper, ZIPFoundation, .NET runtime을 포함하지 않는다. 실제 변환 코드는 macOS 기본 프레임워크만으로 동작하는 `PDFKit`·`CoreGraphics`·`ImageIO`·`Vision` 기반 native extractor와 순수 Swift 저장 ZIP/OOXML writer를 사용한다. 따라서 Luna가 작업을 이어받을 때 이 프로파일을 “이미 구현된 baseline”으로 간주해야 한다.
+
+- 텍스트는 기존 PDF 분석기의 문단/블록 그룹을 사용해 여러 시각적 줄을 하나의 글상자로 만든다.
+- 이미지 XObject는 가능한 경우 JPEG/JPX 및 DeviceGray/RGB/CMYK raw sample을 PNG로 재구성하고 `/SMask`, `/Mask`, image mask, color-key mask의 알파를 적용한다.
+- 단순 사각형 등 검증 가능한 경로만 네이티브 도형으로 만들고, 나머지 합성·클리핑·blend·복합 투명도는 페이지 RGBA fallback과 품질 경고로 보존한다.
+- 페이지 RGBA는 현재 의도적인 시각 안전망이다. 그러므로 모든 PDF 객체가 네이티브로 편집 가능하다고 주장하지 말고, 변환 보고서의 `nativeVectorCount`, `extractedImageAssetCount`, `pageRasterFallbackCount`, 경고를 함께 제공한다.
+- 반복 배경 fingerprint는 보고서에 `sharedTemplate` 후보로 분류하지만, master/header로 실제 승격하려면 별도 z-order·합성 안전성 증명과 golden corpus가 필요하다. 현재 writer는 안전한 page-local fallback을 우선한다.
+
+이 addendum과 아래 PDFium worker 설계가 충돌하는 경우, **현재 저장소에서 이미 동작하는 native baseline을 깨지 않는 것**이 우선이다. PDFium을 도입하려면 고정된 upstream commit, 라이선스/notice, arm64·x86_64 artifact, helper 서명·sandbox·lifecycle, golden corpus를 모두 추가한 별도 Phase 0 변경으로 다루고, artifact 없이 PDFium이 포함된 것처럼 보고하지 않는다. 어떤 경우에도 .NET/DLL/Office/LibreOffice를 앱 실행 또는 변환 필수 경로로 추가하지 않는다.
+
 ## 1. 먼저 고정해야 할 결론
 
 ### 1.1 “완벽한 변환”의 기술적 의미
