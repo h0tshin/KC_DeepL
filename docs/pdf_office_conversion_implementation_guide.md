@@ -1,10 +1,29 @@
 # PDF → PPTX/DOCX 고충실도 문서 변환기 구현 지침서
 
-- 문서 상태: 구현 기준선
+- 문서 상태: 구현 기준선 · 현재 저장소 재검토 완료
 - 작성일: 2026-08-03
+- 최종 재검토일: 2026-08-03
 - 대상 저장소: KC DeepL macOS 앱
 - 대상 구현자: GPT Luna 또는 동등한 구현 에이전트
 - 우선순위: 이 기능에 대해서는 본 문서가 기존 `technical_spec.md`와 `execution_plan.md`보다 우선한다.
+
+## 0. 재검토 결론과 현재 저장소 기준선
+
+이 지침서는 아래의 현실적인 품질 계약을 전제로 하면 구현을 시작하기에 충분하다. 다만 “임의 PDF의 모든 작성 의미를 되살리면서 픽셀까지 완전히 동일”하다는 불가능한 약속으로 읽어서는 안 된다. Office가 동등하게 표현하는 객체는 네이티브화하고, 동등성이 증명되지 않는 합성은 최소 render island 또는 명시적 page fallback으로 보존하며, 모든 판단을 보고서와 gate로 검증하는 것이 완료 조건이다.
+
+2026-08-03에 실제 저장소와 로컬 산출물을 다시 확인한 기준선은 다음과 같다. Luna는 구현 시작 직전에 같은 항목을 다시 검사하고, 이 snapshot보다 실제 코드가 우선한다.
+
+| 확인 항목 | 현재 기준선 | 구현 시 계약 |
+| --- | --- | --- |
+| 빌드 구조 | SwiftPM, macOS 14+, `KCDeepL` executable과 `KCDeepLCore` library | 기존 product와 Finder 중복 파일 제외 로직을 보존하고 변환 module/worker만 추가 |
+| 상태 소유권 | `KCDeepLApp`이 `FileTranslationViewModel`을 `@StateObject`로 소유하고 `ContentView`를 통해 workspace에 주입 | `DocumentConversionViewModel`도 같은 app-scoped 주입 패턴 사용 |
+| 파일번역 UI | `FileTranslationWorkspace`의 고정 `HSplitView` 오른쪽 `inspectorPane`에 `engineSettings`가 있음 | root/split 구조를 교체하지 않고 바로 위에 변환 섹션 삽입 |
+| 종료 처리 | `AppDelegate.applicationShouldTerminate`가 `PendingPersistenceRegistry.flushAll()`을 기다림 | 변환 취소와 worker/temp drain도 같은 registry에 등록 |
+| 권한 | main app entitlement는 현재 audio input뿐이며 App Sandbox는 꺼져 있음 | main entitlement를 임의 확대하지 않고 PDF worker만 독립 최소 sandbox로 검증 |
+| 패키징 | `script/build_and_run.sh`는 현재 host architecture 한 번만 빌드하고 서명에 `--deep`을 사용 | release 경로를 dual-architecture, nested-first explicit signing, outer-last signing으로 교체 |
+| 기존 `.app` | `dist/`와 `application/`의 확인 가능한 bundle은 현재 x86_64 thin이며 strict signature 검증을 release 증거로 쓸 수 없음 | 사용자 소유 산출물을 수정하지 말고 새 staging/export artifact에서 다시 증명 |
+
+현재 앱은 SwiftUI가 화면·상태의 source of truth이고 AppKit은 `NSSavePanel`, `NSWorkspace`, app lifecycle 같은 좁은 경계에만 사용한다. 새 기능도 이 경계를 유지한다. SwiftPM executable build가 `.app` bundle이나 helper embedding을 자동으로 해 준다고 가정하지 않으며, 실제 staging bundle을 검사하지 않은 상태에서 universal, sandboxed, signed, notarization-ready라고 보고하지 않는다.
 
 ## 1. 먼저 고정해야 할 결론
 
@@ -78,7 +97,7 @@ ZIPFoundation은 `Package.swift`에 SwiftPM source dependency로 추가하고 `P
 | 투명도·SMask·마스크 보존 | 단순 alpha는 PNG/shape alpha, 복합 mask는 투명 render island | 검정·흰색·색 배경 합성 diff 허용 오차 이하 |
 | 배경·워터마크·머리글·꼬리글 템플릿화 | 반복 fingerprint와 z-order 안전성으로 master/header/footer 분류 | template precision 0.98 이상, 오탐 시 승격 금지 |
 | PDF의 여러 시각적 줄을 한 글상자로 병합 | glyph → word → line → paragraph → text box 계층화 | 문단별 textbox, 줄별 textbox 금지 |
-| 다이어그램·선·도형을 네이티브화 | preset geometry/connector/table/custom geometry 순으로 복원 | 지원 가능한 primitive의 native 변환 100% |
+| 다이어그램·선·도형을 네이티브화 | preset geometry/connector/table/custom geometry 순으로 복원 | 독립 labeled eligible primitive fixture의 native 변환 100%, false-positive 0 |
 | 반투명 색·레이어 순서 보존 | 원본 paint order를 단일 정수로 유지하고 target z-order로 직렬화 | 겹침 fixture에서 순서 오류 0 |
 | 글 위치·페이지 좌표 보존 | double PDF point를 유지하고 마지막에만 EMU 변환 | text bbox 중앙값 오차 0.5pt 이하 |
 | 편집 가능성과 시각 충실도 동시 확보 | native-first + 최소 render island | 페이지별 native 비율과 island 면적 보고 |
@@ -88,13 +107,17 @@ ZIPFoundation은 `Package.swift`에 SwiftPM source dependency로 추가하고 `P
 
 ### 3.1 정확한 UI 위치
 
-현재 오른쪽 inspector는 [`FileTranslationWorkspace.swift`](../Sources/App/Views/FileTranslationWorkspace.swift)의 `inspectorPane` 안에서 `engineSettings`를 표시한다. 다음 순서로 새 섹션을 삽입한다.
+현재 오른쪽 inspector는 [`FileTranslationWorkspace.swift`](../Sources/App/Views/FileTranslationWorkspace.swift)의 `inspectorPane` 안에서 `engineSettings`를 표시한다. 기존 `HSplitView`, preview, toolbar, 번역 섹션을 재작성하지 말고 다음 순서로 새 `DocumentConversionSection`을 삽입한다. SwiftUI가 picker/progress/state를 소유하고 AppKit은 저장 패널과 결과 열기라는 좁은 edge만 담당한다.
 
 ```swift
 documentConversionSettings
-    .disabled(isAnyFileOperationBusy)
+    // 번역 중에는 섹션을 막지만 변환 중인 자기 취소 버튼은 살린다.
+    .disabled(fileTranslationViewModel.isBusy)
 
 engineSettings
+    .disabled(isAnyFileOperationBusy)
+
+outputSettings
     .disabled(isAnyFileOperationBusy)
 ```
 
@@ -120,6 +143,34 @@ PDF의 편집 가능한 텍스트·도형을 복원하고,
 - PDF에 번역 가능한 텍스트가 0개여도 변환 버튼은 활성화할 수 있다.
 - 번역 엔진과 언어 선택은 문서 변환에 영향을 주지 않는다.
 - 상단 toolbar의 번역 엔진 picker에는 `번역 엔진` help/label을 유지해 변환 형식과 혼동되지 않게 한다.
+- `Picker`의 시각 label을 숨겨도 accessibility label/value는 `변환 형식`과 현재 형식으로 제공한다. 시작/취소/완료 버튼, 진행률, 오류에는 VoiceOver label/help를 제공하고 full-keyboard-access의 Tab/Space 조작을 막는 custom gesture를 쓰지 않는다.
+- 기존 `⌘O` 파일 선택 단축키와 번역 action을 유지한다. 새 전역 keyboard shortcut은 기존 command와 충돌 검사를 통과하기 전에는 추가하지 않는다.
+- 변환 섹션 구현이 커지면 독립 `DocumentConversionSection` SwiftUI subview로 분리하되 ViewModel을 새로 생성하거나 AppKit 객체를 장기 보관하지 않는다.
+
+화면 공통 busy projection은 단순히 두 버튼만 막는 것이 아니다.
+
+```swift
+let isAnyFileOperationBusy = fileTranslationViewModel.isBusy
+    || documentConversionViewModel.isBusy
+```
+
+- `fileToolbar`, file importer trigger, drop destination, 문서 닫기/교체, 번역 engine/output setting, 번역 시작, 변환 format/start를 이 값으로 일관되게 제어한다. 단, 실행 중인 작업의 취소 control을 포함한 상위 container 전체에 `.disabled(isAnyFileOperationBusy)`를 걸지 않는다.
+- 번역 중에는 변환 시작이, 변환 중에는 번역 시작이 비활성이다. 현재 실행 중인 작업의 **취소 버튼만** 계속 활성이다.
+- 이미 열린 importer의 늦은 completion, 외부 URL/drop, source 재분석 callback이 들어와도 operation generation/source version 검사를 다시 해 실행 중 job을 다른 파일의 결과로 덮어쓰지 않는다.
+- `.files`에서 다른 mode로 이동하는 것만으로 작업을 취소하지 않는다. 앱 범위 ViewModel이 진행 상태를 보존하며 돌아왔을 때 같은 progress/output을 표시한다.
+
+| control | idle/ready | 번역 중 | 변환 중 |
+| --- | --- | --- | --- |
+| 파일 선택·drop·닫기 | 활성 | 비활성 | 비활성 |
+| 변환 format picker/start | 활성 조건 계산 | 비활성 | picker/start 숨김 또는 비활성 |
+| 변환 cancel | 없음 | 없음 | **활성** |
+| 번역 settings/start | 기존 조건 계산 | start 대신 진행/cancel | 비활성 |
+| 번역 cancel | 없음 | **활성** | 없음 |
+| 결과 open/reveal/report | 결과가 있을 때 활성 | 기존 결과는 열 수 있으나 source mutation 금지 | 기존 결과는 열 수 있으나 source mutation 금지 |
+
+UI disable만으로 상호 배제를 보장하지 않는다. `KCDeepLApp` composition root에서 하나의 `@MainActor FileWorkspaceOperationGate`를 만들고 `FileTranslationViewModel`과 `DocumentConversionViewModel`에 동일 인스턴스를 주입한다. Gate는 `analysisOrTranslation`과 `conversion` 종류, 불투명 operation ID, source selection generation을 가진 lease를 원자적으로 발급한다. 모든 public start/import 진입점은 작업 전에 lease를 얻어야 하며, 이미 다른 종류가 활성이라면 호출 순서나 같은 run-loop click과 관계없이 사용자 표시 가능한 busy 오류로 거부한다. 성공·오류·취소·worker crash·stale generation의 모든 terminal path에서 **자신의 ID와 일치하는 lease만** 한 번 해제한다. `isAnyFileOperationBusy`는 이 실제 gate/VM 상태의 UI projection이지 배제의 유일한 장치가 아니다.
+
+새 source 선택은 현재 변환에 cancellation을 요청하고 gate lease가 종료된 뒤에만 새 analysis lease를 얻는다. 분석과 번역을 하나의 무제한 동시 작업으로 만들지 말고 현재 `FileTranslationViewModel`의 직렬 lifecycle을 보존한다. 두 ViewModel의 start 메서드를 같은 actor turn에서 직접 연속 호출하는 테스트로 동시 실행이 절대 생기지 않음을 증명한다.
 
 ### 3.2 파일과 저장 규칙
 
@@ -127,10 +178,15 @@ PDF의 편집 가능한 텍스트·도형을 복원하고,
 - Word: `<원본파일명>.converted.docx`
 - 충돌 시 기존 resolver와 동일하게 ` (2)`, ` (3)`을 붙인다.
 - 원본 PDF와 기존 파일은 절대 덮어쓰지 않는다.
+- 별도 저장 위치 picker를 만들지 않고 현재 file workspace의 `downloadLocation`(`데스크탑`, `다운로드`, `매번 묻기`)을 번역과 공유하되 출력 resolver는 형식별로 분리한다.
 - `매번 묻기`에서는 다음 UTI를 사용한다.
   - PPTX: `org.openxmlformats.presentationml.presentation`
   - DOCX: `org.openxmlformats.wordprocessingml.document`
 - 품질 보고서는 `Application Support/KCDeepL/ConversionReports/<source-sha256>-<timestamp>.json`에 저장하고 결과 UI에서 연다. 사용자의 출력 폴더에는 Office 문서 하나만 만든다.
+
+`NSSavePanel`은 현재 `FileTranslationPanel`처럼 `@MainActor`의 작은 panel service에서만 생성한다. 변환 resolver/panel은 기존 번역 resolver의 `.pdf/.txt/.md` 의미를 바꾸지 않는 별도 타입으로 둔다. `UTType(filenameExtension:)`을 우선 사용하고 위 identifier를 검증된 fallback으로 사용하며, `allowedContentTypes`, `isExtensionHidden=false`, `canCreateDirectories=true`, 추천 파일명을 형식별로 설정한다. Panel 취소는 오류가 아니라 아무 작업도 시작하지 않은 상태다.
+
+현재 main app은 비-sandbox지만 file importer/drop에서 받은 source URL에는 `startAccessingSecurityScopedResource()`를 호출한 범위에서 read-only descriptor를 열고, descriptor 수명과 security-scope 종료 순서를 명시한다. Save panel이 준 destination도 향후 main sandbox 전환을 고려해 output commit이 끝날 때까지 필요한 security scope를 유지한다. `startAccessing...`이 `false`여도 일반 filesystem 권한으로 접근 가능한 현재 비-sandbox URL은 정상 경로다. 장기 bookmark는 앱 재실행 후 자동 재개 요구가 생기기 전에는 저장하지 않으며, broad Documents/Downloads entitlement를 추가해 우회하지 않는다.
 
 ### 3.3 진행 상태
 
@@ -152,7 +208,7 @@ failed
 
 진행률 가중치는 preflight 5%, scene extraction 40%, semantic/template 분석 20%, fallback 계획 10%, OOXML 작성 15%, 검증 10%로 시작한다. 실제 계측 후 조정할 수 있지만 단계가 역행해서는 안 된다.
 
-번역과 변환은 동시에 실행하지 않는다. `translationViewModel.isBusy || conversionViewModel.isBusy`를 화면 공통 busy 상태로 사용한다. 새 파일을 선택하면 진행 중 변환을 취소하고 generation이 다른 늦은 결과를 폐기한다.
+번역과 변환은 동시에 실행하지 않는다. `fileTranslationViewModel.isBusy || documentConversionViewModel.isBusy`를 화면 표시용 공통 busy 상태로 사용하되 실제 상호 배제는 section 3.1의 shared `FileWorkspaceOperationGate` lease가 담당한다. 새 파일을 선택하면 진행 중 변환을 취소·회수하고 generation이 다른 늦은 결과를 폐기한다.
 
 ## 4. 전체 아키텍처
 
@@ -247,8 +303,13 @@ Configuration/PDFWorker/
   Info.plist.template
 
 Sources/App/Support/
+  FileWorkspaceOperationGate.swift
+  SelectedFileSnapshot.swift
   DocumentConversionViewModel.swift
   DocumentConversionOutputURLResolver.swift
+
+Sources/App/Views/
+  DocumentConversionSection.swift
 
 Tests/KCDeepLDocumentConversionTests/
 Tests/KCDeepLPDFWorkerCoreTests/
@@ -382,6 +443,35 @@ let package = Package(
 
 SwiftPM이 executable product를 빌드한다고 해서 `.app`의 `Contents/Helpers`로 자동 복사되는 것은 아니다. `script/build_and_run.sh`의 release/package 경로는 두 architecture용 앱과 워커를 각각 빌드하고, 워커를 universal binary로 `lipo -create`한 뒤 `KCDeepL.app/Contents/Helpers/KCDeepLPDFWorker.app/Contents/MacOS/KCDeepLPDFWorker`에 넣는다. Helper app의 최소 `Info.plist`에는 `CFBundleIdentifier=com.h0tshin.KCDeepL.PDFWorker`, `CFBundleExecutable=KCDeepLPDFWorker`, `CFBundlePackageType=APPL`, `CFBundleName`, outer app과 맞춘 `CFBundleShortVersionString`/`CFBundleVersion`, `LSBackgroundOnly=true`, `LSMinimumSystemVersion=14.0`을 넣는다. 워커의 전용 entitlements로 inner helper app을 먼저 서명하고, framework/resource 검사를 거친 다음 바깥 앱을 마지막에 서명한다. `codesign --deep`에 중첩 코드 서명 책임을 맡기지 않는다. local debug는 host architecture 워커를 같은 위치에 넣을 수 있지만 release universal 증거로 사용하지 않는다.
 
+각 architecture/product는 서로 다른 scratch path에서 명시적으로 빌드한다. 예시는 다음과 같으며 실제 Swift toolchain이 요구하는 triple spelling을 `swift -version`/smoke build로 확인한다.
+
+```text
+swift build -c release --triple arm64-apple-macosx14.0 \
+  --scratch-path .build/release-arm64 --product KCDeepL
+swift build -c release --triple arm64-apple-macosx14.0 \
+  --scratch-path .build/release-arm64 --product KCDeepLPDFWorker
+swift build -c release --triple x86_64-apple-macosx14.0 \
+  --scratch-path .build/release-x86_64 --product KCDeepL
+swift build -c release --triple x86_64-apple-macosx14.0 \
+  --scratch-path .build/release-x86_64 --product KCDeepLPDFWorker
+```
+
+Arm app는 arm app와, x86 worker는 x86 worker와 같이 각 product identity를 확인한 뒤 **같은 product의 두 thin unsigned binary만** `lipo -create`한다. `lipo` 전에 code-sign하지 않는다. Resource bundle hash와 deployment target/load commands도 architecture 간 일치 여부를 검사한다.
+
+서명 gate는 다음 표를 따른다.
+
+| gate | worker helper | outer app | 허용 주장 |
+| --- | --- | --- | --- |
+| local debug | Apple Development identity + worker 전용 sandbox entitlement로 inner 먼저 서명 | 개발 identity로 outer 마지막 서명 | host architecture 로컬 실행만 |
+| offline release readiness | Developer ID Application + `--options runtime --timestamp` + worker entitlement로 inner 먼저 서명 | Developer ID Application + `--options runtime --timestamp` + 기존 host entitlement로 outer 마지막 서명 | 구조·서명·hardened runtime 준비 완료, notarized라는 주장은 금지 |
+| credentialed distribution | 위 release artifact를 ZIP 제출·승인·staple | top-level app ticket 검증 | 실제 notarization/Gatekeeper gate 통과 |
+
+서명 명령에는 `--deep`을 사용하지 않는다. Helper를 먼저 명시적으로 서명·검증하고 outer를 마지막에 서명한다. `codesign --verify --deep --strict`의 `--deep`은 완성 bundle의 **검증**에만 허용된다. Worker와 outer 각각에서 identifier, Team ID, signed entitlement exact-key allowlist, 모든 architecture, release runtime flag와 secure timestamp를 검사한다. Worker signed entitlement는 `com.apple.security.app-sandbox=true` 외 key가 없어야 하고 outer entitlement는 기존 기능이 실제로 요구하는 key만 유지한다.
+
+Credentialed distribution 절차는 `ditto -c -k --keepParent`로 app ZIP 생성 → `xcrun notarytool submit ... --keychain-profile <profile> --wait` → 승인 결과/로그 보관 → `xcrun stapler staple` → `xcrun stapler validate` → `spctl --assess --type execute -vv` 순서다. Credential이나 network가 없는 환경은 offline readiness까지만 판정하고 notarization 성공으로 표시하지 않는다. Local debug에는 notarization을 요구하지 않는다.
+
+현재 [`validation_plan.md`](validation_plan.md)는 기존 outer app/audio-input 중심이므로 구현 PR에서 반드시 helper bundle 구조/Info.plist, worker entitlement allowlist, helper/outer identifier·Team ID, 두 Mach-O의 arm64+x86_64, nested-first/outer-last 서명, 각각의 strict verification, hardened runtime/timestamp와 credentialed stapler/`spctl` gate를 추가한다.
+
 `PDFium.xcframework`를 Git에 직접 넣을지 release artifact로 관리할지는 binary 크기와 저장소 정책을 확인해 Phase 0에서 결정한다. 어느 쪽이든 `script/bootstrap_pdfium.sh`가 고정 commit과 build flags에서 같은 SHA를 재현해야 한다. Git에 넣지 않는 경우 local path를 만족하도록 bootstrap을 먼저 실행하고 CI cache/artifact의 SHA-256을 검증한다. 인터넷은 build/bootstrap 때만 필요할 수 있으며 앱 실행·변환에는 필요하지 않다.
 
 ### 4.3 PDFium build artifact 계약
@@ -406,7 +496,9 @@ target_cpu = "arm64" 또는 "x64"
 
 `pdf_is_complete_lib = true`로 transitive static objects를 `libpdfium.a`에 포함하고 `ninja -C <out> pdfium`만 release artifact 대상으로 빌드한다. V8/XFA/Skia를 끄면 이 제품에 필요 없는 JavaScript/XFA/graphics 실행면과 binary 규모를 줄일 수 있다. 반면 `pdf_use_partition_alloc=false`는 Apple system toolchain과의 static-link 호환성을 위한 초기 기준선이지 보안 강화가 아니다. PDFium의 hardened allocator를 포기하는 trade-off를 `Vendor/PDFium/threat-model.md`에 기록하고, 고정 corpus·sanitizer/fuzz 결과와 worker 격리로 보완한다. 같은 deployment target에서 PartitionAlloc을 켠 complete static build가 안정적으로 링크·서명·실행되면 Phase 0에서 그 구성을 우선 재평가한다. 고정 commit에서 arg가 제거·변경되면 임의로 무시하지 말고 GN args dump와 linker smoke test를 갱신한다.
 
-두 architecture archive는 같은 macOS platform과 동일 설정에서 빌드한 경우에만 universal archive로 결합한다. iOS/device/simulator artifact를 `lipo`로 섞지 않는다. `xcodebuild -create-xcframework -library <universal-libpdfium.a> -headers <public-headers>`로 local binary target을 만들고 module map은 public C headers만 export한다. `CPDFiumBridge` target이 C++ runtime, AppKit, CoreFoundation link requirement를 소유한다.
+두 architecture archive는 같은 macOS platform과 동일 설정에서 빌드한 경우에만 universal archive로 결합한다. iOS/device/simulator artifact를 `lipo`로 섞지 않는다. `xcodebuild -create-xcframework -library <universal-libpdfium.a> -headers <public-headers>`로 local binary target을 만들고 module map은 public C headers만 export한다. 생성 후 각 macOS slice의 `Headers/`와 `Modules/module.modulemap`, module/library name, public header inventory를 검사하고 `CPDFiumBridge`의 `publicHeadersPath`/module import를 깨끗한 SwiftPM smoke target에서 compile+link+1-page render한다. XCFramework 폴더가 존재한다는 사실만으로 binary target 소비 성공으로 인정하지 않는다. `CPDFiumBridge` target이 C++ runtime, AppKit, CoreFoundation link requirement를 소유한다.
+
+`manifest.json`에는 입력 GN args뿐 아니라 고정 commit에서 실제 resolve된 `gn args --list`, `gn desc` dependency closure, `libpdfium.a` member inventory/hash와 최종 system framework/library allowlist를 저장한다. Upstream build graph가 변했으면 과거 linker setting을 무조건 유지하지 말고 diff를 검토한다. PDFium 자체뿐 아니라 정적으로 포함된 third-party license/notice도 추출해 앱 고지와 `THIRD_PARTY_NOTICES.md`에 포함한다.
 
 Phase 0 smoke test는 다음을 모두 증명해야 한다.
 
@@ -421,7 +513,9 @@ Phase 0 smoke test는 다음을 모두 증명해야 한다.
 
 ### 4.4 네이티브 worker 프로토콜과 lifecycle
 
-워커는 PDF 하나당 새 process 하나를 사용하고 같은 process에서 다른 사용자 문서를 재사용하지 않는다. 앱은 `Bundle.main.bundleURL/Contents/Helpers/KCDeepLPDFWorker.app/Contents/MacOS/KCDeepLPDFWorker`라는 고정 executable URL만 전용 `NativeChildProcess`의 `posix_spawn`에 직접 전달한다. `posix_spawn_file_actions`로 stdin/stdout/stderr pipe만 연결하고 close-on-exec를 강제한다. Environment도 locale 등 필요한 값만 새로 만들고 `DYLD_*`, `LD_*`, `PATH`, credential/token을 상속하지 않는다. Shell, executable 검색, 사용자 제공 executable/argument, `/bin/sh -c`를 사용하지 않는다. 실행 전 helper bundle과 executable이 symlink가 아니고 bundle 내부의 regular file이며, 바깥 앱과 같은 Team ID로 서명되고 예상 identifier `com.h0tshin.KCDeepL.PDFWorker`의 dedicated requirement를 만족하는 sealed code인지 `SecStaticCodeCheckValidity`로 확인한다. 앱과 helper의 bundle identifier가 다르므로 둘의 designated requirement 문자열이 동일하다고 비교해서는 안 된다.
+워커는 PDF 하나당 새 process 하나를 사용하고 같은 process에서 다른 사용자 문서를 재사용하지 않는다. 앱은 `Bundle.main.bundleURL/Contents/Helpers/KCDeepLPDFWorker.app/Contents/MacOS/KCDeepLPDFWorker`라는 고정 executable URL만 전용 `NativeChildProcess`의 `posix_spawn`에 직접 전달한다. `posix_spawn_file_actions`로 stdin/stdout/stderr pipe만 연결하고 close-on-exec를 강제한다. Environment도 locale 등 필요한 값만 새로 만들고 `DYLD_*`, `LD_*`, `PATH`, credential/token을 상속하지 않는다. Shell, executable 검색, 사용자 제공 executable/argument, `/bin/sh -c`를 사용하지 않는다. 실행 전 `lstat`/bundle containment 검사로 helper bundle과 executable이 symlink가 아니고 bundle 내부 regular file인지 확인하고, 예상 identifier `com.h0tshin.KCDeepL.PDFWorker`와 outer와 같은 Team ID를 요구하는 별도 **designated requirement**를 만든다. `SecStaticCodeCheckValidity`에는 worker 기준 `kSecCSCheckAllArchitectures | kSecCSStrictValidate | kSecCSRestrictSymlinks`를 사용하고, outer release bundle 검사에는 `kSecCSCheckNestedCode`도 더한다. `SecCodeCopySigningInformation`으로 signed Info identifier, Team ID와 entitlement dictionary의 exact allowlist를 확인한다. 앱과 helper의 bundle identifier가 다르므로 둘의 designated requirement 문자열이 동일하다고 비교해서는 안 된다.
+
+이 실행 직전 검사는 잘못 배치되거나 변조된 helper를 조기에 거부하는 defense-in-depth이지 OS code signing/notarization이나 안전한 packaging의 대체물이 아니며 concurrent filesystem mutation에 대한 완전한 TOCTOU 증명으로 과장하지 않는다. Spawn에는 검증한 bundle 내부 경로만 사용하고 staging/installed app이 일반 사용자에게 writable하지 않다는 배포 전제를 strict signing과 함께 검사한다.
 
 stdin/stdout은 newline JSON이 아니라 길이 제한이 있는 framed binary protocol을 쓴다. 모든 multi-byte 정수는 network byte order로 고정한다.
 
@@ -505,6 +599,7 @@ referenceRenderAssetID
 stableID
 pageIndex
 paintOrder
+sourceEventIDs/sourcePaintSpan
 sourceObjectID/xref/formPath/markedContentID
 kind
 boundsPt
@@ -515,6 +610,7 @@ blendMode
 isolated/knockout
 softMaskRef
 optionalContentRef
+compositingSignature
 templateRole/templateConfidence
 targetCapabilities
 fallbackReason
@@ -535,7 +631,7 @@ annotation
 rasterIsland
 ```
 
-`paintOrder`는 실제 표시 순서대로 단조 증가하고 재귀 Form XObject 안에서도 전역 순서가 유지되어야 한다. Source object ID가 없어도 stable ID는 페이지, form 경로, occurrence index, 정규화한 geometry hash로 결정적으로 만든다.
+`paintOrder`는 실제 표시 순서대로 단조 증가하고 재귀 Form XObject 안에서도 전역 순서가 유지되어야 한다. 여러 glyph/line event를 하나의 semantic text block으로 합칠 수 있으므로 block은 모든 `sourceEventIDs`, 최소/최대 `sourcePaintSpan`, effective clip/mask/blend/opacity를 정규화한 `compositingSignature`를 보존한다. Source object ID가 없어도 stable ID는 페이지, form 경로, occurrence index, 정규화한 geometry hash로 결정적으로 만든다.
 
 ### 5.3 좌표 규칙
 
@@ -590,11 +686,13 @@ rasterIsland
 
 각 페이지를 동일한 PDFium build, sRGB, annotation/OCG 표시 정책으로 렌더한다.
 
-- 빠른 개발 검증: 192 DPI
+- shipping runtime/빠른 개발 검증: 192 DPI
 - release/golden 검증: 300 DPI
 - alpha 검증용 isolated render: 투명 BGRA surface
 - 모든 비교 렌더는 같은 CropBox와 rotation을 사용한다.
 - main visual reference는 scene의 명시적 `pageBackdropPolicy`와 같은 배경을 쓰고, alpha/island 독립성 reference는 투명 surface와 black/white/color probe를 별도로 사용한다.
+
+한 페이지 전체 bitmap이 page/reference pixel budget을 넘으면 해상도를 조용히 낮추거나 거대한 surface를 할당하지 않는다. 동일한 page transform과 color profile로 bounded tile을 렌더하고 anti-alias kernel을 위한 overlap/guard band를 둔 뒤 core region만 hash/metric에 사용한다. Source와 target preview에 같은 tile grid를 적용하고 SSIM/ΔE/edge/text metric의 충분통계 또는 bounded artifact tile을 streaming 집계한다. Tile seam, edge object, 회전/CropBox와 한 객체가 여러 tile을 가로지르는 fixture를 둔다. Page fallback media 자체가 Office consumer limit을 넘으면 bounded tile 여러 개를 원래 z/order와 정확한 좌표로 배치하고 seam-free Office round-trip을 검증하거나 명시적으로 실패한다.
 
 reference render는 변환 결과에 넣는 배경이 아니라 검증 oracle이다.
 
@@ -627,10 +725,11 @@ PDFium 호출 동시성은 항상 1이다. Concurrency 2는 host가 validated im
 | --- | --- |
 | mask 없음, 단순 scale/rotate/flip, `/DCTDecode`가 완전한 standalone JPEG이고 Decode/색공간이 Office와 동등 | 원본 JPEG codestream 검증 후 passthrough + native picture transform |
 | mask 없음이지만 Flate/LZW/RunLength/CCITT/JBIG2/JPX, 여러 filter chain, 특수 Decode/색공간 | PDFium으로 decode/color-convert한 뒤 lossless PNG |
-| `/SMask` | base와 gray mask를 합친 lossless RGBA PNG |
-| `/Matte` 포함 SMask | premultiplied color를 역산한 뒤 alpha 결합 |
-| `/Mask` color-key | 해당 sample range를 alpha 0으로 변환한 PNG |
-| `/ImageMask true` | 현재 fill color·alpha를 적용한 RGBA PNG |
+| `/SMask`가 `/S /Alpha`, identity transfer, aligned standalone mask, Normal blend, 지원 clip이며 group/backdrop dependency 없음 | mask sample을 alpha로 결합한 lossless straight-alpha RGBA PNG |
+| `/SMask /Luminosity`, `/BC`, 비-identity `/TR`, group `/CS`, isolation/knockout/backdrop 의존 | mask group과 영향받는 content의 dependency render island |
+| `/Matte` 포함 SMask | 같은 합성 색공간에서 premultiplied color를 역산한 뒤 alpha 결합; 증명 불가 시 island |
+| `/Mask` color-key | filter와 `/Decode` 후, 색공간 변환 전의 정의된 source sample stage에서 range를 판정해 alpha 0으로 변환 |
+| `/ImageMask true` | `/Decode`의 0/1 반전을 적용한 stencil coverage에 현재 nonstroking fill color·fill alpha를 적용한 RGBA PNG |
 | 비직사각 page/Form clip | 원래 graphics-state를 유지한 isolated page/Form render로 clip을 alpha에 bake한 PNG. 불가능하면 dependency island |
 | shear/perspective | 투명 canvas에 pre-warp한 PNG |
 | graphics-state soft mask | mask subtree 전체를 render island 처리 |
@@ -639,6 +738,10 @@ PDFium 호출 동시성은 항상 1이다. Concurrency 2는 host가 validated im
 | Separation/DeviceN/spot/overprint 또는 backdrop-dependent color | 영향을 받는 backdrop까지 dependency closure에 포함한 render island |
 
 PDF image stream은 PNG 파일 자체가 아니며 raw stream bytes를 확장자만 바꿔 media part로 넣어서는 안 된다. Passthrough는 JPEG SOI/EOI·dimensions·component count를 독립 decoder로 검증하고 PDF `/Decode`, colorspace, interpolate semantics가 동일한 DCT occurrence에만 허용한다.
+
+Soft mask를 “회색 PNG 하나”로 단순화하지 않는다. `/S /Alpha`는 source group의 alpha를 사용하지만 `/S /Luminosity`는 group color space와 backdrop color `/BC`에서 얻은 luminosity를 사용하며 transfer function `/TR`도 결과를 바꿀 수 있다. Direct pixel combine은 위 결정표의 좁은 조건을 모두 증명한 경우에만 허용한다. 그 밖에는 PDF renderer가 원 graphics state에서 mask group과 대상 content를 함께 그리는 dependency island를 사용한다.
+
+`/Matte` 역산은 straight-alpha 변환 전 동일 색공간의 각 component에 대해 `C = (Cpremul - (1 - a) × Matte) / a`를 사용하고 `a == 0`은 RGB를 0으로 정리하며 결과를 유효 범위로 clamp한다. Base와 mask dimension/transform/interpolation이 맞지 않으면 임의 resample 공식을 만들지 않고 renderer island로 승격한다. Alpha `1/255` 오차 기준은 이 known-vector sample 계산에 적용하고 PDFium/Office anti-aliasing을 포함한 최종 edge에는 section 17의 visual/percentile metric을 사용한다.
 
 `FPDFImageObj_GetImageDataDecoded`는 filter를 해제한 원시 sample을 주며 정규 RGBA를 보장하지 않는다. 이 bytes는 bit depth, component count와 원본 sample 분석에만 사용한다. `/Decode`, Indexed lookup, ICC/Lab/CMYK/Separation color conversion, interpolate, SMask/Mask까지 직접 완전하게 적용하고 ColorSync로 sRGB straight-alpha RGBA를 검증한 경로 또는 PDFium reference renderer의 결과만 PNG encoder에 넣는다.
 
@@ -702,6 +805,10 @@ MCID/structure role
 source confidence
 ```
 
+Logical Unicode/reading order와 visual glyph/paint order를 별도 field로 유지한다. `ActualText`는 의미 복원에 우선하지만 그 문자열을 원본 glyph appearance라고 간주하지 않는다. PDF text rendering mode 0–7의 fill/stroke/invisible/clip 의미를 모두 기록한다. 특히 mode 4–7의 glyph outline이 후속 paint의 clipping path에 참여하면 text를 독립 native box로 떼지 않고 clip dependency closure에 포함한다. Text object가 graphics-state SMask, non-Normal blend, pattern/spot color 또는 서로 다른 backdrop에 의존해도 같은 원칙을 적용한다.
+
+Type3 font, color glyph, invalid/missing ToUnicode/CMap, glyph-to-Unicode가 비가역인 custom encoding은 native editable text로 허위 복원하지 않는다. 유효한 `ActualText`/OCR이 있으면 logical/search text에만 사용하고, appearance는 glyph outline/SVG 또는 최소 transparent island로 보존한다. Outline이나 island 위에 보이지 않는 text를 얹는 경우 그것을 시각적으로 편집 가능한 text라고 보고하지 않는다.
+
 ### 8.2 줄과 문단 병합
 
 고정 파이프라인은 다음과 같다.
@@ -721,12 +828,21 @@ glyph → token/word → visual line → logical paragraph → text box + styled
 9. PDF 시각 줄 끝의 분할 hyphen만 제거한다. nonbreaking hyphen, 실제 복합어 hyphen, URL hyphen은 보존한다.
 10. 연속 line은 한 text box의 한 paragraph로, 연속 paragraph는 필요하면 한 text box 안의 여러 paragraph/run으로 출력한다.
 
+10번의 병합은 의미·geometry만 맞는다고 허용하지 않는다. Office text box 하나는 target z-order slot 하나만 차지하므로 다음 compositing safety gate를 먼저 통과해야 한다.
+
+1. 합칠 line/glyph의 `sourcePaintSpan` 사이에 들어온 image/path/shading/annotation event를 열거한다.
+2. Intervening event의 실제 pixel support가 text ink bounds와 겹치지 않고, 각 line의 clip/mask/blend/opacity `compositingSignature`가 하나의 Office text box/run으로 동등하게 표현되면 한 box로 병합한다. Paint order가 끼어 있어도 pixel support가 불겹침이면 병합 가능하다.
+3. Intervening event가 text와 겹쳐 box 전체의 앞 또는 뒤 어느 한 z-slot으로 이동할 수 없거나, line별 clip/soft mask/blend/backdrop 의존성이 다르면 native one-box 병합을 금지한다.
+4. 이 경우 의미 계층에는 하나의 logical paragraph와 source Unicode를 유지하되, 시각 계층은 해당 text와 intervening dependency의 최소 render island/outline으로 보존한다. 여러 native textbox로 조용히 쪼개 요구를 회피하지 말고 편집성 저하와 원인을 보고한다.
+5. 겹침이 없지만 target text engine이 서로 다른 rotation/writing mode를 한 box에서 표현하지 못하면 의미상 적절한 box 분리 또는 최소 run outline을 사용하고 근거를 기록한다.
+
 금지 규칙:
 
 - PDF 한 줄마다 text box를 만들지 않는다.
 - 서식이 바뀌었다는 이유만으로 text box를 쪼개지 않고 run을 쪼갠다.
 - 서로 다른 column, table cell, 회전 방향, 독립 caption을 억지로 합치지 않는다.
 - model/LLM을 필수 문단 판정기로 사용하지 않는다. 변환은 로컬·결정적이어야 한다.
+- z-order 충돌을 숨기기 위해 line별 native textbox를 만드는 것을 성공으로 처리하지 않는다.
 
 권장 초기 threshold는 configuration 구조체로 모으고 fixture로 보정한다.
 
@@ -744,7 +860,7 @@ glyph → token/word → visual line → logical paragraph → text box + styled
 - 원본 font size를 먼저 유지하고 box width, internal margin, character spacing, line spacing 순으로 보정한다.
 - PowerPoint/Word 자동 축소에 전적으로 의존하지 않는다.
 - CoreText로 target font의 visible range를 측정하고 모든 문자가 들어가는지 확인한다.
-- 목표 bbox를 넘으면 1차로 box를 같은 column의 안전 경계까지 확장하고, 2차로 character spacing을 제한 범위에서 조정하고, 마지막에만 font size를 미세 조정한다.
+- 최초 box는 source paragraph의 모든 line ink bbox와 ascent/descent를 합친 고정 `sourceParagraphEnvelope`로 만든다. 이 envelope 밖으로 box를 이동·확장하지 않는다. Envelope 안에서 inset/safe padding, character/line spacing을 제한 범위로 조정하고 마지막에만 font size를 미세 조정한다.
 - 자연 wrap과 보정으로 원본 visual line break/baseline을 threshold 안에 재현하지 못하면 text box를 쪼개지 않고 같은 paragraph/run 구조 안의 원본 visual-line 경계에 PPTX `a:br` 또는 DOCX `w:br`를 삽입한다. 이 deterministic fallback을 `visualLineBreakLocked`로 보고하고 다시 baseline/overflow를 검증한다.
 - overflow, clipping, 누락 glyph는 성공으로 처리하지 않는다.
 
@@ -759,6 +875,8 @@ glyph → token/word → visual line → logical paragraph → text box + styled
 7. 포함할 수 없으면 설치 글꼴에서 family, PANOSE, weight, width, glyph coverage, metrics로 대체 후보를 고른다.
 8. 대체 글꼴의 폭을 CoreText로 측정해 size/spacing/box를 다시 fit한다.
 9. 대체 불가능한 특수 glyph만 최소 outline/raster fallback하고 이유를 기록한다.
+
+Type3 charproc, bitmap/color glyph, text clipping mode, invalid CMap은 이 font-substitution 절차의 정상 TrueType/OpenType embedding 후보가 아니다. 독립된 `PDFType3TextFallback`/`textClipDependency` 사유로 처리하고 logical text와 visual disposition을 각각 보고한다.
 
 다른 컴퓨터에서 font가 없으면 Office가 대체해 레이아웃이 달라질 수 있으므로 허용되고 실제 run에서 사용한 face만 관계 part로 포함한다. 사용하지 않은 regular/bold/italic/boldItalic variant를 묶어 넣거나 PDF style name만 보고 임의 face를 포함하지 않는다. 보고서에는 원본 font, target font, 정확한 `fsType` bit, full/subset 여부, embedding 권한, 대체 사유를 기록한다.
 
@@ -783,6 +901,19 @@ PDF path는 원래 의미가 아니라 그리기 결과이므로 다음 순서�
 8. known preset과 맞지 않는 normal path → DrawingML `a:custGeom`
 9. mesh shading, pattern, 복합 clip/blend → SVG 또는 render island
 
+Primitive fitter는 다음 결정적 순서를 사용한다.
+
+1. Page/Form CTM과 page normalization을 적용해 canvas point 좌표로 바꾸되 원본 segment와 transform도 보존한다.
+2. 길이 epsilon 이하 degenerate segment, 연속 duplicate point, tolerance 안의 collinear point만 제거한다. Curve를 임의 저해상도 polyline으로 바꾸지 않는다.
+3. Open/closed subpath, winding, self-intersection, hole, corner angle, curvature extrema를 계산한다.
+4. Primitive별 least-squares fit 후 Hausdorff/residual/angle/closure threshold를 모두 검사한다. 초기 기준은 line max distance `max(0.25pt, 0.25 × strokeWidth)`, rect edge angle 90°에서 0.5° 이내·corner residual 0.5pt 이하, ellipse normalized radial RMS 0.5% 이하/max 1.5% 이하로 두고 중앙 config와 labeled golden corpus로만 조정한다.
+5. Geometry가 맞아도 effective fill rule, stroke/fill alpha, dash/cap/join, gradient/pattern, clip/mask, blend와 z-interleave가 target native 표현과 동등해야 eligibility를 통과한다.
+6. `NativePrimitiveEligibility` fixture manifest가 source primitive와 기대 target/fallback을 독립적으로 label한다. “현재 recognizer가 성공한 것”을 분모로 native 100%를 계산하는 순환 정의를 금지한다.
+
+`a:custGeom`은 source bbox를 0 이상의 deterministic local coordinate space로 정규화하고 move/line/cubic/quadratic/close와 transform을 typed builder로 쓴다. 여러 subpath의 hole/even-odd/nonzero fill이 DrawingML consumer에서 동등하다는 golden proof가 없으면 SVG+PNG 또는 island로 보낸다. Group은 child transform을 group-local 좌표로 역변환한 뒤 group ext/chExt와 회전/flip을 재적용하고, ungroup/reopen 후 geometry가 같은지 검사한다.
+
+Arrowhead는 shaft와 marker가 같은 compositing signature이고 marker geometry/방향/scale이 Office arrow enum과 threshold 안에서 맞을 때만 line property로 흡수한다. Table은 수평/수직 grid line cluster, cell topology, merge span, text containment가 모두 결정적일 때만 native table로 만들고 border가 장식 path와 구분되지 않으면 shape group으로 유지한다. Axial/radial shading은 stop 위치·색·alpha·spread·transform이 DrawingML `a:gradFill`로 동등하고 Office golden test를 통과한 경우만 native화하며 mesh/function/pattern shading은 fallback한다.
+
 Native 변환은 geometry fit만으로 결정하지 않는다. fill rule, fill/stroke 색, alpha, line width, dash, cap, join, arrow, transform까지 target이 표현 가능한지 함께 검사한다.
 
 Connector endpoint가 shape 경계에서 `max(2pt, 1.5 × strokeWidth)` 이내이고 방향이 맞을 때만 실제 connector로 연결한다. 확신이 낮으면 일반 line으로 유지한다. 원본 chart/SmartArt 데이터가 PDF에 없으면 임의의 native chart 데이터를 만들지 않고 shape group 또는 image로 복원한다.
@@ -805,7 +936,15 @@ Office 2019+ SVG를 쓸 때는 SVG만 단독 media로 두지 않는다. Normal p
 - 숫자, 날짜, roman numeral, `n / total`을 wildcard한 text signature
 - PDF `/Artifact` subtype 또는 structure role
 
-### 10.2 분류와 clustering
+### 10.2 page-local 역할 분류와 clustering
+
+“배경인가”와 “여러 페이지가 재사용하는 템플릿인가”를 같은 판정으로 합치지 않는다. 먼저 반복성 없이 각 페이지의 역할을 판정하고, 그다음 같은 역할의 occurrence를 shared template로 clustering한다.
+
+- 단일 페이지라도 page 면적 80% 이상을 덮는 self-contained 최저 z underlay이고 local node를 mask/clip/blend input으로 소비하지 않으면 `pageLocalBackground` 후보로 분류한다.
+- PDF structure의 `/Artifact` subtype이 `Header`, `Footer`, `Pagination`, `Watermark`를 명시하면 반복이 없어도 해당 page-local 역할 후보가 되지만, geometry·visibility·z-order safety와 실제 paint 결과를 반드시 교차검증한다.
+- PPTX의 안전한 opaque/gradient/picture `pageLocalBackground`는 selectable body shape가 아니라 slide-local `p:bg/p:bgPr`로 직렬화한다. Shared repetition이 확인되면 master/layout background로 dedupe할 수 있다.
+- DOCX의 안전한 최저 underlay는 해당 page section만 참조하는 header part의 page-anchored `behindDoc` drawing으로 둘 수 있다. Header/body story 순서나 section pagination이 검증되지 않으면 body-local 최저 anchor로 되돌린다.
+- `pageLocalBackground`와 `sharedTemplate`을 scene/report에서 별도 disposition/role로 기록한다. 한 페이지 문서라는 이유로 배경을 일반 selectable object에 남기지 않고, 반복된다는 이유만으로 page-local 합성 의존성을 master/header로 옮기지도 않는다.
 
 - 페이지 크기·방향별로 먼저 cluster한다.
 - 같은 위치 오차 0.5pt 이하, bbox IoU 0.98 이상, style hash 일치인 occurrence만 같은 후보로 묶는다.
@@ -816,6 +955,8 @@ Office 2019+ SVG를 쓸 때는 SVG만 단독 media로 두지 않는다. Normal p
 - watermark: 중앙/대각선, 같은 angle/opacity/size, 반복
 - common mask/template: 같은 Form XObject 또는 canonical operation set 반복
 - 각 페이지의 반복 signature set을 Jaccard similarity로 묶어 문서 section별 template cluster를 만든다.
+
+Page-number field/placeholder 변환은 PDF의 표시값이 실제 물리 page sequence, 시작 번호, section numbering과 정확히 일치하고 target Office field가 같은 문자열을 재현할 때만 허용한다. Roman numeral, custom page label, 장식이 섞인 번호, 임의 날짜는 wildcard로 cluster하더라도 literal text로 유지한다.
 
 Common mask fingerprint는 dedupe/template **후보**일 뿐이다. 독립적으로 보이는 self-contained underlay/overlay이며 local content를 mask/clip/blend input으로 소비하지 않을 때만 template placement로 승격한다. Page-local content에 작용하는 SMask provider, clip, transparency group은 반복되어도 master/header로 분리하지 않고 section 7.2의 dependency closure와 page-local island에 유지한다.
 
@@ -886,7 +1027,7 @@ if dependencyClosure를 신뢰할 수 없거나 페이지 전체로 확대:
 
 `p:spTree`의 XML 순서는 낮은 z에서 높은 z 순으로 쓴다. Shape non-visual ID는 각 shape tree 안에서, relationship ID는 각 source `.rels` part 안에서 유일하고 결정적이어야 한다. 전혀 관계없는 part의 `rId1` 재사용은 정상이며 문서 전체 uniqueness를 강제하지 않는다. 반면 Word drawing의 `wp:docPr@id`는 body/header/footer를 포함한 문서 전체 allocator로 충돌을 막는다.
 
-단순 shape opacity는 color의 `a:alpha`, image opacity는 blip alpha effect, crop은 `a:srcRect`를 사용한다. PNG pixel alpha는 그대로 보존한다. Office에 동등한 blend가 없는 경우 `a:alpha`만으로 근사하지 않고 render island를 사용한다.
+단순 shape/gradient-stop opacity는 해당 color의 `a:alpha`, picture 전체 opacity는 `a:blip/a:alphaModFix`, crop은 `a:srcRect`를 사용한다. 이 DrawingML alpha mapping은 PPTX picture와 DOCX picture 양쪽에 동일하게 적용하고 값은 0–100000 범위를 검증한다. PNG pixel alpha는 그대로 보존한다. Office에 동등한 blend가 없는 경우 alpha만으로 근사하지 않고 render island를 사용한다.
 
 ### 12.2 master와 layout
 
@@ -908,6 +1049,19 @@ PowerPoint 한 파일의 모든 slide는 같은 크기와 방향을 사용한다
 - 보고서에 mixed-size normalization을 기록한다.
 - PowerPoint desktop의 custom width/height 허용 범위는 1–56 inch다. 공통 canvas의 어느 한 축이 이를 벗어나면 모든 좌표·크기·stroke/font를 같은 비율로 균일 scale해 범위 안에 넣고 `targetCanvasScale`을 보고한다. strict mode에서는 대신 명확히 실패한다.
 - strict export 옵션을 향후 제공할 경우에는 크기 cluster별 여러 PPTX로 분리할 수 있다. 현재 단일 picker UX에서는 공통 canvas가 기본이다.
+
+### 12.4 PPTX text box 직렬화 계약
+
+Native text block은 단순히 문자열을 `a:txBody`에 넣는 것으로 끝나지 않는다.
+
+- `p:sp/p:nvSpPr/p:cNvSpPr@txBox="1"`, deterministic `p:cNvPr@id/name`, `p:spPr/a:xfrm`의 offset/extent/rotation/flip과 rectangle geometry를 쓴다.
+- `a:txBody` child 순서는 `a:bodyPr`, `a:lstStyle`, 하나 이상의 `a:p`다. `a:bodyPr`에는 source inset, wrap, vertical anchor, text rotation/writing mode를 명시하고 기본 fixed-layout 경로는 `a:noAutofit`을 사용한다.
+- 각 `a:pPr`에 alignment, margin/indent, line spacing, bullet/numbering, tab, RTL을 source semantic model에서 결정적으로 매핑한다. Visual line lock fallback은 같은 paragraph 안의 `a:br`이며 별도 box가 아니다.
+- 각 `a:r/a:rPr`에는 Unicode logical order를 유지하면서 language, Latin/East Asian/complex-script font, size, bold/italic/underline, character spacing, baseline shift, fill/stroke/alpha를 typed value로 쓴다. `a:endParaRPr`도 마지막 run policy와 일치시킨다.
+- RTL은 logical text order와 visual glyph geometry를 뒤집어 혼동하지 않고 `a:pPr@rtl`, run language/font와 target Office shaping으로 표현한다. Vertical text는 검증된 `a:bodyPr@vert`/shape rotation 조합만 허용한다.
+- CoreText/Office golden에서 shaping, bidi, vertical baseline이나 glyph coverage가 threshold를 통과하지 못하면 해당 run/line appearance를 outline 또는 최소 island로 전환하고 logical text는 별도 의미 mapping에 보존한다.
+
+`OfficeTextBoxContractTests`는 inset/wrap/noAutofit, paragraph/run property, explicit break, bullet, RTL, vertical, rotation, alpha, reopen 후 text/geometry를 검사한다.
 
 ## 13. DOCX 작성 규칙
 
@@ -936,7 +1090,7 @@ DOCX 기본 모드는 reflow 문서가 아니라 fixed-layout editable canvas다
 | picture/island | `wp:anchor` + `pic:pic` |
 | basic shape | `wps:wsp` preset geometry |
 | arbitrary path | 검증된 WPS custom geometry, 아니면 PNG-primary + SVG extension 또는 PNG |
-| table | anchored text box 안의 native `w:tbl` 또는 page-positioned table |
+| table | fixed-layout 기본은 page-anchored text box 안의 native `w:tbl`; flow/page-positioned table은 round-trip이 별도 증명된 경우만 |
 | template background/header/footer | 재사용되는 header/footer part의 anchored drawing |
 | page number | `PAGE` field |
 
@@ -945,6 +1099,16 @@ WordprocessingShape는 Office 2010+ namespace를 사용하므로 `mc:AlternateCo
 Typed `WordAnchorBuilder`는 위 attribute와 child cardinality/order를 생성 시점에 강제하고 `OOXMLPackageValidator`가 reopen 후 다시 확인한다. `DOCXWriterContractTests`에는 2페이지 이상 mixed section, body와 header/footer anchor, 여러 z-order, effect/no-effect, 마지막 section 뒤 빈 페이지 없음 fixture를 둔다.
 
 Header/footer story에 둔 floating shape가 body foreground와 교차할 때는 최소한 지원 대상인 macOS Word에서 round-trip을 검증한다. 선택적으로 Windows Word를 교차 검사할 수 있지만 Windows 구성 요소가 구현이나 배포의 필수 조건이 되어서는 안 된다. 검증되지 않으면 template promotion을 취소하고 page-local drawing group으로 되돌린다.
+
+### 13.3 DOCX text box 직렬화 계약
+
+- `wp:anchor/a:graphic/a:graphicData` 안의 `wps:wsp`는 `wps:cNvSpPr@txBox="1"`, `wps:spPr`의 geometry/transform, `wps:txbx/w:txbxContent`, `wps:bodyPr`를 typed order로 생성한다.
+- `wps:bodyPr`에는 source inset, wrap, anchor, writing direction과 fixed-layout no-autofit policy를 넣는다. Target Word에서 검증되지 않은 자동 fit에 위치 보존을 맡기지 않는다.
+- `w:txbxContent`의 `w:p/w:pPr`에는 alignment, indent, exact line spacing, keep/widow 영향 차단, bullet/numbering, `w:bidi`를 명시한다. 각 `w:r/w:rPr`에는 `w:rFonts`의 ascii/hAnsi/eastAsia/cs, `w:lang`, `w:rtl`, `w:sz/w:szCs`, spacing, position, style와 color/alpha 대응을 기록한다.
+- Source visual-line lock은 같은 paragraph 안 `w:br`로 표현한다. RTL/vertical logical order와 visual geometry를 분리하고, `wps:bodyPr`/shape rotation으로 동등한 결과가 검증되지 않으면 run outline/island로 fallback한다.
+- Text box 안 native table은 cell width/height, merge, margin, paragraph property를 고정하고 전체 table box가 page anchor 하나의 z-slot을 갖게 한다. Body flow table을 절대좌표 문서의 기본값으로 사용하지 않는다.
+
+`DOCXWriterContractTests`와 `OfficeTextBoxContractTests`는 WPS namespace/`mc:AlternateContent`, child order, bidi/vertical, line spacing, 마지막 paragraph, box overflow, anchor geometry와 Word reopen 결과를 검증한다.
 
 ## 14. 순수 Swift OOXML writer 계약
 
@@ -1004,12 +1168,15 @@ DOCX는 최소한 다음 관계가 유효해야 한다.
 
 ```text
 [Content_Types].xml
-_rels/.rels → word/document.xml
-word/document.xml → styles, settings, theme, fontTable, headers/footers, media
-word/_rels/document.xml.rels
-word/header*.xml / word/footer*.xml + 각 relationship part
+_rels/.rels → word/document.xml, docProps/core.xml, docProps/app.xml
+word/document.xml
+word/_rels/document.xml.rels → styles, settings, theme, fontTable, headers/footers, media, allowed hyperlinks
+word/styles.xml, word/settings.xml, word/theme/theme*.xml, word/fontTable.xml
+word/header*.xml / word/footer*.xml + 각 part의 media/hyperlink relationship part
 docProps/core.xml, docProps/app.xml
 ```
+
+Root relationship type은 officeDocument, core-properties, extended-properties를 각각 정확히 한 번 가리킨다. 각 section `w:sectPr`의 `w:headerReference`/`w:footerReference` ID는 `word/_rels/document.xml.rels`의 실제 part와 연결되고, header/footer 내부 image/link는 그 header/footer 자신의 `.rels`에서 해석된다. 포함한 property/header/footer part를 orphan으로 남기거나 document relationship namespace로 잘못 연결하지 않는다.
 
 빈 파일 spike부터 PowerPoint/Word가 repair 없이 여는 최소 package를 golden fixture로 고정한다. 이후 writer가 생성한 part를 그 golden binary에서 복사하는 방식이 아니라, spec에 맞는 typed builder로 매번 생성한다.
 
@@ -1024,7 +1191,7 @@ Writer는 temp package를 저장한 직후 ZIPFoundation으로 다시 열고 `OO
 - external relationship은 section 14.1 allowlist를 통과한 hyperlink만 허용하며 file/package/path/script relationship은 0
 - duplicate shape/non-visual/`docPr` ID 0
 - PPTX `sldMasterIdLst`/`sldIdLst`의 numeric ID와 `r:id`, master→layout/theme, layout→master, presentation→property/tableStyles 관계가 모두 일치하고 slide/master/layout/theme count가 scene plan과 맞음
-- DOCX section/anchor-host/header/footer count가 scene plan과 일치하고 각 `wp:anchor`의 required attribute, child cardinality/schema order, extent, global `docPr` ID/name이 유효함. Pure XML validator가 Word의 실제 rendered page count를 안다고 주장하지 않으며 그 수는 macOS Word release QA에서 확인
+- DOCX root의 officeDocument/core/extended property relationship, section→document rels→header/footer→own rels chain과 part content type이 완전함. Section/anchor-host/header/footer count가 scene plan과 일치하고 각 `wp:anchor`의 required attribute, child cardinality/schema order, extent, global `docPr` ID/name이 유효함. Pure XML validator가 Word의 실제 rendered page count를 안다고 주장하지 않으며 그 수는 macOS Word release QA에서 확인
 - media decode, MIME, dimensions, SHA-256 일치
 - text character count와 source node mapping 일치
 - EMU extent가 양수이고 허용 범위 내
@@ -1047,11 +1214,38 @@ operationTask/operationGeneration
 conversionService/outputResolver
 ```
 
-현재 원본 URL/data는 번역 분석이 성공한 뒤에만 안정적으로 노출된다. 이미지-only 또는 번역 preflight에 실패한 PDF도 변환해야 하므로 `FileTranslationViewModel`에 번역 분석과 독립적인 `selectedSourceURL`, `selectedDocumentKind`, `selectedFileVersion`, file size/identity를 추가한다. 형식을 감지한 직후 설정하고 번역 분석 결과는 기존 property에 별도로 유지한다. 큰 PDF 전체를 UI ViewModel에서 중복 `Data`로 복사하는 것을 변환 전제로 삼지 않는다.
+현재 원본 URL/data는 번역 분석이 성공한 뒤에만 안정적으로 노출된다. 이미지-only 또는 번역 preflight에 실패한 PDF도 변환해야 하므로 번역 결과와 독립적인 다음 immutable snapshot을 앱의 파일 workspace 상태에 추가한다.
 
-변환 VM은 버튼을 누를 때 immutable `SelectedConversionInput`으로 source URL, selected version, expected file identity/size와 표시용 filename을 받는다. Host client가 read-only file descriptor를 열고 `fstat`한 뒤 고정 descriptor에서 PDF bytes를 worker stdin으로 chunk streaming하면서 SHA-256을 계산한다. Wire의 `beginDocument` declared size와 `endDocument` hash를 worker가 재검증한다. 이미 메모리에만 존재하는 import라면 owned immutable `Data` source variant를 허용하되 추가 full copy를 만들지 않는다. 작업 도중 선택 version이 바뀌면 취소하며, path가 바뀌어도 열린 descriptor가 가리키는 bytes와 계산된 source hash가 해당 job의 진실이다.
+```text
+SelectedFileSnapshot
+  url
+  kind
+  selectionGeneration
+  expectedByteCount
+  fileResourceIdentifier/inode-device identity when available
+  displayFilename
+```
 
-ViewModel의 lifetime은 `FileTranslationWorkspace` view-local이 아니라 앱 범위다. [`KCDeepLApp.swift`](../Sources/App/App/KCDeepLApp.swift)에서 `@StateObject private var documentConversionViewModel`을 생성하고 `ContentView`의 `@ObservedObject`를 거쳐 `FileTranslationWorkspace`에 주입한다. 사용자가 파일번역에서 다른 mode로 갔다 돌아와도 변환 task/progress/output/report가 보존되어야 한다. 앱 종료 시에는 task를 취소하고 소유 temp를 정리한다. `KCDeepLApp → ContentView → FileTranslationWorkspace` 주입, mode switch 중 실행, workspace 재생성 후 stale callback 방지를 테스트한다.
+형식을 감지하고 source read 권한을 확인한 직후 snapshot을 설정하고 번역 분석 결과는 기존 property에 별도로 유지한다. `selectionGeneration`은 실제 새 파일 선택과 `clearDocument`에서만 증가한다. 현재 OCR toggle이 수행하는 같은 PDF 재분석은 `reanalyzeSelectedPDF`라는 별도 경로로 두며 generation을 바꾸지 않는다. Importer/drop/clear는 공통 source-mutation coordinator를 거쳐 진행 중 변환을 먼저 취소·회수한다. 번역 분석 실패는 snapshot을 지우지 않고 conversion preflight가 독립적으로 변환 가능 여부를 결정한다. 큰 PDF 전체를 UI ViewModel에서 중복 `Data`로 복사하는 것을 변환 전제로 삼지 않는다.
+
+변환 VM은 버튼을 누를 때 snapshot에서 immutable `SelectedConversionInput`을 만든다. Host client는 source security-scope lease를 얻은 상태로 read-only descriptor를 열고 `fstat`한 뒤 descriptor가 닫힐 때까지 scope를 균형 있게 유지한다. 고정 descriptor에서 PDF bytes를 worker stdin으로 chunk streaming하면서 SHA-256을 계산한다. Wire의 `beginDocument` declared size와 `endDocument` hash를 worker가 재검증한다. 이미 메모리에만 존재하는 import라면 owned immutable `Data` source variant를 허용하되 추가 full copy를 만들지 않는다. 작업 도중 실제 selection generation이 바뀌면 취소하며, OCR 재분석 version 변화만으로는 취소하지 않는다. Path가 바뀌어도 열린 descriptor가 가리키는 bytes와 계산된 source hash가 해당 job의 진실이다.
+
+ViewModel의 lifetime은 `FileTranslationWorkspace` view-local이 아니라 앱 범위다. [`KCDeepLApp.swift`](../Sources/App/App/KCDeepLApp.swift)에서 shared `FileWorkspaceOperationGate`, `@StateObject private var documentConversionViewModel`을 정확히 한 번 만들고, 기존 `FileTranslationViewModel`에도 같은 gate를 주입한 뒤 `ContentView`의 `@ObservedObject`를 거쳐 `FileTranslationWorkspace`에 전달한다. 사용자가 파일번역에서 다른 mode로 갔다 돌아와도 변환 task/progress/output/report가 보존되어야 한다. `DocumentConversionSection`은 binding/value/callback만 받고 task나 장기 AppKit object를 소유하지 않는다.
+
+앱 종료는 `deinit`에 맡기지 않는다. 현재 [`AppDelegate.swift`](../Sources/App/App/AppDelegate.swift)가 [`PendingPersistenceRegistry.swift`](../Sources/App/Support/PendingPersistenceRegistry.swift)의 preparation 후 async flusher를 기다리므로, `KCDeepLApp.init`의 composition root에서 conversion VM을 weak capture해 정확히 한 번 등록한다.
+
+```swift
+PendingPersistenceRegistry.shared.registerPreparation { [weak conversionViewModel] in
+    conversionViewModel?.prepareForApplicationTermination()
+}
+PendingPersistenceRegistry.shared.register { [weak conversionViewModel] in
+    await conversionViewModel?.shutdownAndReapWorker()
+}
+```
+
+`prepareForApplicationTermination()`은 새 gate lease를 막고 generation을 무효화하며 Swift task 취소, cancel frame과 pipe close를 즉시 시작한다. `shutdownAndReapWorker()`는 bounded deadline 안에서 section 4.5의 exact-child SIGTERM/SIGKILL/`waitpid` 계약으로 child를 회수하고 writer/file descriptor를 닫은 뒤 자신이 소유한 UUID temp만 정리한다. 종료가 시작된 뒤 output/report를 새로 commit하지 않는다. Deadline이 끝나도 main application termination을 무기한 붙잡지 않도록 terminal 상태와 남은 owned path를 진단 로그에 남기고 안전한 강제 회수 경로를 완료한다.
+
+`KCDeepLApp → ContentView → FileTranslationWorkspace` 주입, mode switch 중 실행, workspace 재생성 후 stale callback, 종료 중 helper hang/이미 종료된 child/report 저장, 실제 새 파일/clear와 OCR 재분석의 generation 차이를 테스트한다.
 
 ### 15.2 원자적 저장
 
@@ -1103,10 +1297,13 @@ job decoded asset budget: 4 GiB
 
 - scene node ID/paintOrder/asset ref/font ref 무결성
 - expanded visible paint-event ledger의 각 image occurrence에 terminal disposition이 정확히 하나 존재. Reused Form/XObject의 한 raw object가 여러 occurrence가 되는 것은 정상이며 raw asset dedupe/unused resource는 별도 inventory로 기록
+- 동일 extractor ledger를 자기 자신과 비교해 “누락 0”을 주장하지 않는다. Content-stream scanner event, PDFium object occurrence, object/subtree active-state knockout delta render를 fixture별 독립 oracle로 교차검사하고 설명되지 않는 reference pixel support가 있으면 page를 성공 처리하지 않는다.
 - clip/mask dangling reference 0
 - template promotion 후 node 누락·중복 0
 - Swift OOXML package validator error 0
 - release QA corpus의 macOS Office repair dialog 0
+
+Annotation은 subtype, appearance stream, Rect/matrix와 `Hidden`, `Invisible`, `NoView`, `Print` flag를 기록하고 reference profile의 screen/print 정책에 따라 별도 ordered stratum을 만든다. Screen에 보이지 않는 annotation을 body object로 만들거나 print-only 상태를 임의로 섞지 않으며 link/AcroForm appearance z-order fixture로 정책을 고정한다.
 
 ### 17.2 시각 검증
 
@@ -1125,10 +1322,10 @@ macOS에 Microsoft PowerPoint/Word가 설치된 release QA 장비에서는 생�
 | text bbox p95 error | 1.5pt 이하 | 2.0pt 이하 |
 | baseline median error | 0.5pt 이하 | 0.75pt 이하 |
 | decodable digital text character preservation | 99.9% 이상 | 99.9% 이상 |
-| alpha channel sample error | 1/255 이하 | 1/255 이하 |
+| direct mask/Matte known-vector alpha sample error | 1/255 이하 | 1/255 이하 |
 | template classification precision | 0.98 이상 | 0.98 이상 |
 
-표의 threshold는 internal plan preview와 release Office corpus에 모두 적용하되 보고서에서 두 결과를 섞지 않는다. Raw pixel equality만 사용하지 않는다. PDFium, CoreGraphics, Office의 anti-aliasing 차이를 고려해 SSIM, edge, bbox, color metric을 함께 본다.
+표의 visual threshold는 internal plan preview와 release Office corpus에 모두 적용하되 보고서에서 두 결과를 섞지 않는다. Direct alpha sample 기준은 decoder/compositor known-vector에 적용하며 Office-exported anti-aliased edge에는 SSIM, edge와 color percentile을 적용한다. Raw pixel equality만 사용하지 않는다. PDFium, CoreGraphics, Office의 anti-aliasing 차이를 고려해 SSIM, edge, bbox, color metric을 함께 본다.
 
 ### 17.3 자동 보완 loop
 
@@ -1159,18 +1356,20 @@ pages[]:
   SSIM, ΔE2000, edge F1, text bbox/baseline/alpha metrics
 nodeMappings[]:
   source stableID, page, kind, paintOrder
-  disposition nativeEditable|nativeGrouped|template|embeddedVectorFallback|transparentRasterIsland|backdropBakedRasterIsland|pageRasterFallback|rejected
+  disposition nativeEditable|nativeGrouped|pageLocalBackground|sharedTemplate|embeddedVectorFallback|transparentRasterIsland|backdropBakedRasterIsland|pageRasterFallback|rejected
   output part/object/relationship IDs or raster-island stableID
   confidence, fallbackReason, dependency source IDs
   islandBackdropMode, baked backdrop color/ICC, alpha presence, replacement z/rectangle proof, background-edit constraint
 assets[]: source/derived hashes, MIME, dimensions, alpha/mask/ICC transform
 fonts[]: source/target face, fsType, embed/substitute/outline decision, affected node IDs
-templates[]: cluster, role, fingerprint, page coverage, confidence, z-order proof
+templates[]: page-local/shared classification, cluster, role, fingerprint, page coverage, confidence, z-order proof
 validation: package checks, optional Office round-trip, visual metrics, retries
 warnings[] and terminalStatus
 ```
 
-Validator는 visible source paint occurrence마다 terminal disposition이 정확히 하나인지 검사한다. Render island가 여러 source node를 소유할 수는 있지만 같은 source node를 native/template과 동시에 소유해서는 안 된다. `rejected`는 성공 문서에서 허용되지 않으며 job 실패 보고서에만 존재한다. URL은 민감 경로 전체를 기록하지 않고 표시용 filename과 hash만 남기며 원문 텍스트 전체를 로그/보고서에 복제하지 않는다.
+Validator는 visible source paint occurrence마다 terminal disposition이 정확히 하나인지 검사한다. Render island가 여러 source node를 소유할 수는 있지만 같은 source node를 native/background/template과 동시에 소유해서는 안 된다. `rejected`는 성공 문서에서 허용되지 않으며 job 실패 보고서에만 존재한다. URL은 민감 경로 전체를 기록하지 않고 표시용 filename과 hash만 남기며 원문 텍스트 전체를 로그/보고서에 복제하지 않는다.
+
+`template classification precision`은 사람이 label한 corpus manifest의 `(document,page,sourceEventID,expectedRole)`을 ground truth로 하며 `TP/(TP+FP)`로 계산한다. 최소 positive/negative sample 수와 document family를 corpus manifest에 기록하고, 동일 계열 변형만 train/tuning과 gate 양쪽에 중복시키지 않는다. Native editable ratio는 visible source occurrence 또는 visible painted area 중 선택한 분모를 report schema에 명시하고, render-island area ratio는 page canvas union area 기준으로 계산해 겹치는 island를 중복 합산하지 않는다.
 
 ## 18. 테스트 corpus
 
@@ -1180,15 +1379,15 @@ Validator는 visible source paint occurrence마다 terminal disposition이 정�
 
 1. 0/90/180/270도, 비영점 CropBox, `/UserUnit`
 2. JPEG/PNG/inline image/Form-reused image
-3. `/SMask`, `/Matte`, color-key `/Mask`, stencil ImageMask
+3. `/SMask /Alpha`와 `/Luminosity`, `/BC`, `/TR`, `/Matte` alpha=0, color-key `/Mask`, Decode 반전 stencil ImageMask
 4. non-rect clip, nested clip, shear image
 5. Normal alpha, Multiply, Screen, isolated/knockout group
 6. CMYK/ICC/Lab/Separation/DeviceN color
-7. 여러 시각적 줄로 쪼개진 한 문단, bullet, 다단, 표 cell, caption
-8. 한글/CJK/영문/RTL, ligature, ActualText, invisible OCR layer
+7. 여러 시각적 줄로 쪼개진 한 문단, line 사이 비겹침/겹침 z-interleave object, 서로 다른 clip/mask line, bullet, 다단, 표 cell, caption
+8. 한글/CJK/영문/RTL/vertical, ligature, ActualText, invisible OCR layer, Type3/color glyph/text clipping mode
 9. OpenType `fsType` installable/restricted/preview-print/editable/no-subsetting/bitmap-only 조합, PDF subset-only font, 실제 사용 face만 embedding
-10. line/rect/rounded-rect/ellipse/polygon/arrow/connector/table/custom path
-11. 5페이지 반복 배경·header/footer·page number·foreground watermark
+10. line/rect/rounded-rect/ellipse/polygon/arrow/connector/table/custom path와 threshold 근처 false-positive/hole/even-odd/gradient
+11. 단일 페이지 full background/Artifact와 5페이지 반복 배경·header/footer·page number·foreground watermark
 12. 혼합 page size/orientation
 13. annotation/link/AcroForm appearance/서명 경고
 14. corrupt xref, recursive Form, 거대 dimensions와 cancellation
@@ -1199,11 +1398,18 @@ Validator는 visible source paint occurrence마다 terminal disposition이 정�
 PDFSceneExtractionTests
 PDFContentStreamStateResolverTests
 PDFImageMaskTests
+PDFMaskSemanticTests
 PDFTransparencyIslandTests
 OfficeBackdropPolicyTests
 PDFTextReconstructionTests
+PDFTextCompositingSafetyTests
+PDFBidirectionalVerticalTextTests
+PDFType3TextFallbackTests
+OfficeTextBoxContractTests
 PDFVectorRecognitionTests
+PDFNativeGeometryEligibilityTests
 DocumentTemplateClassifierTests
+SinglePageTemplateRoleTests
 OfficeCapabilityPlannerTests
 PPTXWriterContractTests
 DOCXWriterContractTests
@@ -1215,6 +1421,13 @@ PDFWorkerSandboxIntegrationTests
 DocumentConversionViewModelTests
 DocumentConversionOutputURLResolverTests
 DocumentConversionVisualRegressionTests
+LargePageTiledVisualValidationTests
+FileWorkspaceOperationGateTests
+FileSelectionSnapshotTests
+SecurityScopedConversionAccessTests
+DocumentConversionAppLifecycleTests
+DocumentConversionWorkspaceIntegrationTests
+DocumentConversionAccessibilityTests
 ```
 
 Golden output binary 전체를 무분별하게 커밋하지 않는다. 작은 fixture, expected scene JSON, expected metrics, 필요한 최소 Office package만 관리한다. Visual diff 실패 시 source/target/diff heatmap을 test artifact로 남긴다.
@@ -1232,6 +1445,7 @@ Golden output binary 전체를 무분별하게 커밋하지 않는다. 작은 fi
 - 순수 Swift OPC/XML writer로 빈 PPTX/DOCX 생성 및 앱 내 validator 구현
 - host `swift build`/`swift test`/strict-concurrency build, 두 target triple release build와 universal app/worker executable link 검증
 - Release `.app`에서 정적 링크 여부, bundle 구조, signing, hardened runtime/notarization 준비 상태 검증
+- `docs/validation_plan.md`를 helper/dual-architecture/signing/notarization gate까지 갱신
 
 통과 조건:
 
@@ -1244,6 +1458,7 @@ Golden output binary 전체를 무분별하게 커밋하지 않는다. 작은 fi
 - 최소 PPTX/DOCX가 PowerPoint/Word에서 repair dialog 없이 열림
 - ZIP reopen, XML parse, relationship/content-type 검사가 통과
 - 라이선스 고지 완비
+- Debug/release 서명 매트릭스, worker exact entitlement allowlist, 모든 architecture와 credentialed notarization gate가 section 4.2대로 증명됨
 
 Notarization은 일반 local debug 실행의 전제 조건이 아니다. 배포 artifact가 만들어진 뒤에만 `codesign --verify --deep --strict`, hardened runtime/entitlements, nested code 여부와 notarization을 확인한다. 정적 PDFium이면 별도 PDFium dylib를 bundle에 복사·서명하지 않는 것이 정상이며, 실제 exported `.app`과 실행 파일을 검사한 증거 없이 distribution-ready라고 단정하지 않는다.
 
@@ -1264,12 +1479,14 @@ Notarization은 일반 local debug 실행의 전제 조건이 아니다. 배포 
 
 - occurrence asset 추출
 - SMask/Matte/Mask/ImageMask/clip/shear
+- Alpha/Luminosity `/SMask`, `/BC`/`/TR`, Matte 역산과 Decode known-vector
 - transparency dependency closure
 - RGBA render island
 
 통과 조건:
 
 - alpha fixture sample error 1/255 이하
+- direct mask combine eligibility와 dependency island 판정 fixture 전부 일치
 - non-Normal blend fixture visual threshold 통과
 - 흰색 matte contamination 0
 
@@ -1277,6 +1494,8 @@ Notarization은 일반 local debug 실행의 전제 조건이 아니다. 배포 
 
 - tag/ActualText/char geometry
 - reading order, column, line, paragraph, run
+- text paint-span/intervening-object compositing gate와 Type3/text-clip fallback
+- PPTX/DOCX text box/bidi/vertical typed serialization contract
 - Vision partial OCR와 dedup
 - font permission/mapping/fit
 
@@ -1284,17 +1503,21 @@ Notarization은 일반 local debug 실행의 전제 조건이 아니다. 배포 
 
 - multi-line logical paragraph를 line별 textbox로 분할한 사례 0; 독립 단일행 제목·캡션·label box는 허용
 - 문단 fixture의 box/run/reading order 일치
+- 비겹침 interleave 문단은 한 box, 실제 겹침 interleave는 silent z-order 변화 없이 island/fallback
+- RTL/vertical/Type3/text clipping fixture의 logical text와 visual disposition 일치
 - 유효한 ToUnicode/ActualText로 decode 가능한 corpus의 character preservation 99.9% 이상; undecodable glyph는 별도 outline/raster 및 경고
 
 ### Phase 4 — vector와 template
 
 - basic/preset/custom shape와 connector/table
-- repeated fingerprint, template cluster, z-order safety
+- deterministic primitive eligibility/fitter와 false-positive corpus
+- page-local background/Artifact role, repeated fingerprint, template cluster, z-order safety
 
 통과 조건:
 
 - 지원 primitive native 변환 100%
 - template precision 0.98 이상
+- single-page background가 safe `pageLocalBackground`으로 분류되고 shared template와 혼동되지 않음
 - foreground watermark 순서 변화 0
 
 ### Phase 5 — PPTX/DOCX writer
@@ -1314,14 +1537,19 @@ Notarization은 일반 local debug 실행의 전제 조건이 아니다. 배포 
 
 - inspector의 문서 변환 섹션
 - 별도 VM, progress, cancel, save/open/report
-- 번역/변환 mutual exclusion
+- shared operation gate에 의한 번역/변환 mutual exclusion과 실행 중 cancel 활성
 - atomic output/no overwrite
+- selection snapshot/OCR 재분석 generation 분리, security-scoped source/destination lease
+- app termination registry worker reap/temp cleanup와 keyboard/VoiceOver
 
 통과 조건:
 
 - 이미지-only PDF 변환 가능
 - TXT/MD에서 안전하게 비활성
 - 취소·새 파일 선택 후 늦은 결과/부분 파일 0
+- public start 메서드를 직접 연속 호출해도 두 작업 동시 lease 0
+- OCR 재분석은 변환을 취소하지 않고 실제 새 선택/clear는 안전하게 취소
+- 종료 중 hang worker 회수, mode 전환 중 진행 보존, 변환 cancel/번역 cancel 모두 활성
 - 기존 파일 번역 테스트 회귀 0
 
 ### Phase 7 — round-trip QA와 hardening
@@ -1329,6 +1557,7 @@ Notarization은 일반 local debug 실행의 전제 조건이 아니다. 배포 
 - Office export visual diff
 - 자동 보정/island 확대
 - malformed/large PDF, memory/cancellation
+- large page tiled reference/fallback의 seam과 bounded-memory 검증
 - Intel/Apple Silicon과 macOS PowerPoint/Word corpus; Windows Office는 선택적 호환성 교차 검사
 
 통과 조건:
@@ -1347,16 +1576,22 @@ Notarization은 일반 local debug 실행의 전제 조건이 아니다. 배포 
 - 변환은 텍스트가 없는 PDF에서도 동작한다.
 - 이미지 occurrence, alpha, SMask, clipping, z-order가 검증된다.
 - 연속된 PDF 줄이 문단 단위 한 text box로 만들어진다.
+- Text paint span 사이의 겹치는 객체/clip/mask 때문에 한 z-slot 병합이 불가능하면 순서를 깨거나 line별 box로 위장하지 않고 최소 island와 경고로 처리한다.
+- PPTX/DOCX text box의 inset/wrap/no-autofit/run/paragraph, RTL/vertical/Type3/text clipping 계약과 logical/visual mapping이 검증된다.
 - 지원 가능한 선·도형·table은 네이티브 객체다.
-- 반복 underlay/header/footer는 안전할 때만 master/header/footer로 분리된다.
+- 단일 페이지의 안전한 full background는 page-local background가 되고, 반복 underlay/header/footer는 안전할 때만 shared master/header/footer로 분리된다.
 - foreground 반복 객체는 잘못된 master z-order로 이동하지 않는다.
 - 미지원 합성은 최소 render island로 보존되고 이유가 보고된다.
 - PPTX/DOCX가 Swift OOXML package validation error 없이 열리고 Office repair dialog가 없다.
 - 원본 대비 visual threshold를 통과한다.
 - 취소·오류·충돌에서 원본과 기존 파일을 덮어쓰지 않고 부분 결과를 남기지 않는다.
+- Shared operation gate가 public API 수준에서 번역/변환 동시 실행을 막고, 실행 중인 자기 취소 버튼은 비활성화되지 않는다.
+- 실제 file selection generation과 OCR 재분석 version이 분리되고 source/destination security scope가 모든 terminal path에서 균형 있게 종료된다.
+- 앱 종료 registry가 새 작업을 차단하고 exact worker를 bounded하게 회수하며 소유 temp만 정리한다.
 - PDFium은 signed/sandboxed universal `KCDeepLPDFWorker`에만 정적으로 링크되고 메인 app target에는 링크되지 않는다.
 - worker protocol의 크기/hash/order 검증, network/file sandbox, crash/hang/cancel watchdog과 exact-child cleanup test가 통과한다.
 - 신규 테스트와 기존 `swift test`, strict concurrency build, 앱 verify가 통과한다.
+- Debug/release 서명 매트릭스, 모든 architecture, helper exact entitlement/identifier/Team ID와 credentialed distribution 시 notarization/stapler/`spctl` 결과가 실제 artifact에서 검증된다.
 - PDFium XCFramework, ZIPFoundation과 모든 shipping 제3자 라이선스·버전·hash가 고정되어 있다.
 - shipping app과 변환 경로에 .NET runtime, DLL, Python, Java, LibreOffice 또는 Office 설치 의존성이 없다.
 - 사용자/병렬 작업의 기존 tracked 변경과 untracked 파일을 덮어쓰기·stage·delete하지 않는다. 필요한 동일 파일은 기존 hunk를 보존해 최소 병합한다.
@@ -1417,6 +1652,11 @@ Notarization은 일반 local debug 실행의 전제 조건이 아니다. 배포 
 - [Apple: app bundle의 표준 nested-code 위치](https://developer.apple.com/documentation/bundleresources/placing-content-in-a-bundle)
 - [Apple: nested code는 안쪽부터 서명하고 main app은 마지막에 서명](https://developer.apple.com/documentation/xcode/using-the-latest-code-signature-format)
 - [Apple: `codesign --deep`로 배포 서명하지 말 것](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac)
+- [Apple: macOS software notarization, hardened runtime, timestamp와 stapling](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+- [Apple: command-line notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+- [Apple Security: `SecStaticCodeCheckValidity`](https://developer.apple.com/documentation/security/1395809-secstaticcodecheckvalidity)
+- [Apple Security: `SecCodeCopySigningInformation`](https://developer.apple.com/documentation/security/1397673-seccodecopysigninginformation)
+- [Apple Foundation: security-scoped URL access](https://developer.apple.com/documentation/foundation/nsurl/startaccessingsecurityscopedresource())
 - [Apple: XPC service의 독립 sandbox 경계](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingXPCServices.html)
 - [ZIPFoundation — SwiftPM 설치와 MIT license](https://github.com/weichsel/ZIPFoundation)
 
