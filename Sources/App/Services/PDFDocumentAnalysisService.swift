@@ -254,6 +254,11 @@ private extension PDFDocumentAnalysisService {
         let text: String
         let runs: [PDFTextRun]
         let bounds: CGRect
+        /// Derived only for native PDF text by inspecting rendered ink against
+        /// its sampled background. OCR has a trustworthy rectangle but no
+        /// source-paint signal, so it keeps the `nil` fallback and writers use
+        /// its selection bounds.
+        var inkTopY: CGFloat?
         let fontName: String
         let fontSize: CGFloat
         var textColor: PDFTextColor
@@ -382,7 +387,6 @@ private extension PDFDocumentAnalysisService {
             guard !bounds.isNull, bounds.width > 0.25, bounds.height > 0.25 else {
                 return nil
             }
-
             let attributedString = lineSelection.attributedString
             let attributes = attributedString.flatMap {
                 attributedString -> [NSAttributedString.Key: Any]? in
@@ -708,6 +712,15 @@ private extension PDFDocumentAnalysisService {
             candidate.sourceMaskBounds = estimate.maskBounds
             candidate.sourceMaskIsSafe = !estimate.isComplex
                 && candidate.extractionSource == .native
+            if candidate.sourceMaskIsSafe,
+               candidate.foregroundColorIsTrusted {
+                candidate.inkTopY = Self.visibleInkTopY(
+                    for: candidate,
+                    backgroundColor: estimate.color,
+                    cropBox: cropBox,
+                    bitmap: bitmap
+                )
+            }
             let outputIndex = candidates.count
             candidates.append(candidate)
             if estimate.isComplex {
@@ -735,7 +748,11 @@ private extension PDFDocumentAnalysisService {
             return nil
         }
         let longestSide = max(cropBox.width, cropBox.height)
-        let scale = min(2, 2_000 / longestSide)
+        // Three pixels per PDF point preserves sub-point visual anchors while
+        // remaining below the 2,400px budget already used by the conversion
+        // scene extractor. The bitmap is shared by background sampling and
+        // ink-anchor detection, so this does not add another page render.
+        let scale = min(3, 2_400 / longestSide)
         let targetSize = CGSize(
             width: max(1, (cropBox.width * scale).rounded(.up)),
             height: max(1, (cropBox.height * scale).rounded(.up))
@@ -954,6 +971,117 @@ private extension PDFDocumentAnalysisService {
             maximumY: maximumY
         )
         return (dominant.color, isComplex, resolvedMaskBounds)
+    }
+
+    /// Finds the visible top edge of a native text line in the already-rendered
+    /// source page. PDFKit's character bounds describe font cells rather than
+    /// the actual painted glyphs, which makes a mixed-font marker/body line
+    /// appear to have the wrong vertical anchor. This detector uses only
+    /// candidates whose foreground and simple background were independently
+    /// verified, so textured/transparent regions safely retain selection-box
+    /// geometry instead of risking a false offset.
+    static func visibleInkTopY(
+        for candidate: TextCandidate,
+        backgroundColor: PDFTextColor,
+        cropBox: CGRect,
+        bitmap: NSBitmapImageRep
+    ) -> CGFloat? {
+        guard bitmap.pixelsWide > 0,
+              bitmap.pixelsHigh > 0,
+              cropBox.width > 0,
+              cropBox.height > 0,
+              candidate.bounds.width > 0,
+              candidate.bounds.height > 0
+        else {
+            return nil
+        }
+
+        let foregroundContrast = colorDistanceSquared(
+            candidate.textColor,
+            backgroundColor
+        )
+        // A nearly identical foreground/background is either hidden source
+        // paint or too low-contrast for a stable raster anchor.
+        guard foregroundContrast.isFinite, foregroundContrast >= 0.01 else {
+            return nil
+        }
+
+        let scaleX = CGFloat(bitmap.pixelsWide) / cropBox.width
+        let scaleY = CGFloat(bitmap.pixelsHigh) / cropBox.height
+        let bounds = candidate.bounds.intersection(cropBox)
+        guard !bounds.isNull, bounds.width > 0, bounds.height > 0 else {
+            return nil
+        }
+        let pixelRect = CGRect(
+            x: (bounds.minX - cropBox.minX) * scaleX,
+            y: (cropBox.maxY - bounds.maxY) * scaleY,
+            width: bounds.width * scaleX,
+            height: bounds.height * scaleY
+        )
+        let minimumX = max(0, Int((pixelRect.minX - 0.5).rounded(.up)))
+        let maximumX = min(
+            bitmap.pixelsWide - 1,
+            Int((pixelRect.maxX - 0.5).rounded(.down))
+        )
+        let minimumY = max(0, Int((pixelRect.minY - 0.5).rounded(.up)))
+        let maximumY = min(
+            bitmap.pixelsHigh - 1,
+            Int((pixelRect.maxY - 0.5).rounded(.down))
+        )
+        guard minimumX <= maximumX, minimumY <= maximumY else {
+            return nil
+        }
+
+        // Bound work for an unusually broad selection while retaining enough
+        // samples to distinguish a true glyph edge from one antialiased pixel.
+        let horizontalPixels = maximumX - minimumX + 1
+        let horizontalStride = max(1, Int((CGFloat(horizontalPixels) / 1_800).rounded(.up)))
+        let sampledColumns = max(1, (horizontalPixels + horizontalStride - 1) / horizontalStride)
+        let minimumRowSupport = max(
+            1,
+            min(10, Int((CGFloat(sampledColumns) * 0.006).rounded(.up)))
+        )
+        // This threshold accepts antialiased glyph edges but rejects ordinary
+        // raster noise and slight colour-management differences in a sampled
+        // flat background.
+        let minimumSignal = max(0.0025, foregroundContrast * 0.025)
+
+        for y in minimumY...maximumY {
+            var support = 0
+            for x in stride(
+                from: minimumX,
+                through: maximumX,
+                by: horizontalStride
+            ) {
+                guard let sourceColor = bitmap.colorAt(x: x, y: y),
+                      let color = sourceColor.usingColorSpace(.deviceRGB)
+                else {
+                    continue
+                }
+                let pixel = PDFTextColor(
+                    red: color.redComponent,
+                    green: color.greenComponent,
+                    blue: color.blueComponent,
+                    alpha: color.alphaComponent
+                )
+                let backgroundDistance = colorDistanceSquared(pixel, backgroundColor)
+                let foregroundDistance = colorDistanceSquared(pixel, candidate.textColor)
+                guard backgroundDistance >= minimumSignal,
+                      foregroundDistance <= foregroundContrast * 1.35
+                else {
+                    continue
+                }
+                support += 1
+                if support >= minimumRowSupport {
+                    // The top edge of this bitmap row maps most closely to
+                    // the source ink boundary; using the row centre would
+                    // introduce a systematic half-pixel downward drift.
+                    let topY = cropBox.maxY - CGFloat(y) / scaleY
+                    return min(cropBox.maxY, max(cropBox.minY, topY))
+                }
+            }
+        }
+        return nil
     }
 
     static func trimmedMaskBounds(
@@ -1488,6 +1616,7 @@ private extension PDFDocumentAnalysisService {
                 text: candidate.text,
                 runs: candidate.runs,
                 bounds: candidate.bounds,
+                inkTopY: candidate.inkTopY,
                 sourceMaskBounds: candidate.sourceMaskBounds
                     ?? candidate.bounds,
                 sourceMaskIsSafe: candidate.sourceMaskIsSafe,
@@ -1514,7 +1643,8 @@ private extension PDFDocumentAnalysisService {
         for line in lines.dropFirst() {
             try Task.checkCancellation()
             guard let previous = groupedLines.last?.last,
-                  Self.canJoin(previous, line)
+                  let blockStart = groupedLines.last?.first,
+                  Self.canJoin(previous, line, blockStart: blockStart)
             else {
                 groupedLines.append([line])
                 continue
@@ -1588,6 +1718,7 @@ private extension PDFDocumentAnalysisService {
                 text: line.text,
                 runs: line.runs,
                 bounds: line.bounds,
+                inkTopY: line.inkTopY,
                 sourceMaskBounds: line.sourceMaskBounds,
                 sourceMaskIsSafe: line.sourceMaskIsSafe,
                 fontName: line.fontName,
@@ -1602,7 +1733,11 @@ private extension PDFDocumentAnalysisService {
         }
     }
 
-    static func canJoin(_ previous: PDFTextLine, _ current: PDFTextLine) -> Bool {
+    static func canJoin(
+        _ previous: PDFTextLine,
+        _ current: PDFTextLine,
+        blockStart: PDFTextLine
+    ) -> Bool {
         guard previous.extractionSource == current.extractionSource,
               // A fresh list item starts a new translation unit.  A wrapped
               // continuation line has no marker and can safely share the
@@ -1615,15 +1750,16 @@ private extension PDFDocumentAnalysisService {
 
         let sameColumn = previous.columnIndex >= 0
             && previous.columnIndex == current.columnIndex
-        // A long list line can be classified as a page-spanning candidate
-        // while its short wrapped continuation is assigned to the nearest
-        // body column.  Treat that specific geometry as one text block; if it
-        // is not joined, the translation engine receives `Cloud?` or `data`
-        // as an independent unit and the composer must squeeze the translated
-        // sentence into a tiny source glyph box.
-        let spanningListContinuation = previous.columnIndex < 0
-            && startsWithListMarker(previous.text)
-        guard sameColumn || spanningListContinuation else {
+        // A long list item can start in the page-spanning cluster, while its
+        // wrapped continuations move through the nearest body column as their
+        // widths change. Looking only at `previous` joined one continuation
+        // and then split every later visual line. Keep the *whole active
+        // block* together when its first line is a spanning list item; the
+        // vertical and horizontal geometry checks below still prevent a new
+        // paragraph from being absorbed.
+        let continuesSpanningListItem = blockStart.columnIndex < 0
+            && startsWithListMarker(blockStart.text)
+        guard sameColumn || continuesSpanningListItem else {
             return false
         }
 

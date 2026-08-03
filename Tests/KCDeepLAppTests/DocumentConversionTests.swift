@@ -325,17 +325,97 @@ final class DocumentConversionTests: XCTestCase {
             ),
             18
         )
-        XCTAssertEqual(
-            PDFOfficeTextAppearance.runsReplacingListWhitespace([marker, body]).map(\.text),
-            ["•", "\t", "First item keeps its ordinary spaces"]
+        let resolvedRuns = PDFOfficeTextAppearance.runsReplacingListWhitespace(
+            [marker, body],
+            targetTextOffset: 18
         )
+        let resolvedText = resolvedRuns.map(\.text).joined()
+        XCTAssertFalse(resolvedText.contains("\t"))
+        XCTAssertTrue(resolvedText.hasPrefix("•"))
+        XCTAssertTrue(resolvedText.hasSuffix("First item keeps its ordinary spaces"))
+        XCTAssertGreaterThan(
+            resolvedText.dropFirst().prefix(while: \.isWhitespace).count,
+            0
+        )
+    }
+
+    func testOfficeLayoutBoundsAnchorsFrameToRenderedInk() {
+        let sourceBounds = CGRect(x: 72, y: 640, width: 260, height: 12)
+        let cropBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let run = PDFTextRun(
+            text: "The visible text begins below the PDF selection top.",
+            fontName: "Arial",
+            fontSize: 10,
+            textColor: .black,
+            isOfficeCompatible: true
+        )
+        let anchoredLine = PDFTextLine(
+            id: "ink-anchor",
+            text: run.text,
+            runs: [run],
+            bounds: sourceBounds,
+            // The selection frame has 2pt of source font-cell padding but
+            // the actual paint begins 2pt below its top edge.
+            inkTopY: sourceBounds.maxY - 2,
+            sourceMaskBounds: sourceBounds,
+            sourceMaskIsSafe: true,
+            fontName: "Arial",
+            fontSize: 10,
+            textColor: .black,
+            backgroundColor: .white,
+            alignment: .left,
+            readingOrder: 0,
+            columnIndex: 0,
+            extractionSource: .native
+        )
+        let fallbackLine = PDFTextLine(
+            id: "selection-anchor",
+            text: run.text,
+            runs: [run],
+            bounds: sourceBounds,
+            sourceMaskBounds: sourceBounds,
+            sourceMaskIsSafe: true,
+            fontName: "Arial",
+            fontSize: 10,
+            textColor: .black,
+            backgroundColor: .white,
+            alignment: .left,
+            readingOrder: 0,
+            columnIndex: 0,
+            extractionSource: .native
+        )
+
+        let anchoredBounds = PDFOfficeTextAppearance.officeLayoutBounds(
+            for: [anchoredLine],
+            sourceBounds: sourceBounds,
+            alignment: .left,
+            cropBox: cropBox
+        )
+        let fallbackBounds = PDFOfficeTextAppearance.officeLayoutBounds(
+            for: [fallbackLine],
+            sourceBounds: sourceBounds,
+            alignment: .left,
+            cropBox: cropBox
+        )
+        let wordBounds = PDFOfficeTextAppearance.officeLayoutBounds(
+            for: [anchoredLine],
+            sourceBounds: sourceBounds,
+            alignment: .left,
+            cropBox: cropBox,
+            layoutTarget: .word
+        )
+
+        XCTAssertEqual(fallbackBounds.maxY, sourceBounds.maxY, accuracy: 0.01)
+        XCTAssertEqual(wordBounds.maxY, sourceBounds.maxY, accuracy: 0.01)
+        XCTAssertGreaterThan(anchoredBounds.maxY, fallbackBounds.maxY)
+        XCTAssertLessThan(anchoredBounds.maxY - fallbackBounds.maxY, 4.5)
     }
 
     func testWordWriterKeepsVisualLinesAndAttributedRunsInOneTextBox() throws {
         let firstLine = PDFSceneTextLine(
             id: "line-1",
             text: "•\tFirst line",
-            bounds: CGRect(x: 72, y: 680, width: 200, height: 12),
+            bounds: CGRect(x: 72, y: 680, width: 200, height: 14),
             runs: [
                 PDFSceneTextRun(
                     PDFTextRun(
@@ -366,7 +446,7 @@ final class DocumentConversionTests: XCTestCase {
                     )
                 )
             ],
-            sourceMaskBounds: CGRect(x: 72, y: 680, width: 200, height: 12),
+            sourceMaskBounds: CGRect(x: 72, y: 680, width: 200, height: 14),
             sourceMaskIsSafe: true,
             extractionSource: .native,
             listTabStop: 18
@@ -374,7 +454,7 @@ final class DocumentConversionTests: XCTestCase {
         let secondLine = PDFSceneTextLine(
             id: "line-2",
             text: "Second line",
-            bounds: CGRect(x: 72, y: 664, width: 200, height: 12),
+            bounds: CGRect(x: 90, y: 664, width: 182, height: 10),
             runs: [
                 PDFSceneTextRun(
                     PDFTextRun(
@@ -387,15 +467,15 @@ final class DocumentConversionTests: XCTestCase {
                     )
                 )
             ],
-            sourceMaskBounds: CGRect(x: 72, y: 664, width: 200, height: 12),
+            sourceMaskBounds: CGRect(x: 90, y: 664, width: 182, height: 10),
             sourceMaskIsSafe: true,
             extractionSource: .native
         )
         let textBox = PDFSceneTextBox(
             id: "text-box",
             text: "•\tFirst line\nSecond line",
-            bounds: CGRect(x: 72, y: 664, width: 200, height: 28),
-            layoutBounds: CGRect(x: 70, y: 662, width: 204, height: 30),
+            bounds: CGRect(x: 72, y: 664, width: 200, height: 30),
+            layoutBounds: CGRect(x: 70, y: 662, width: 204, height: 32),
             fontName: "Arial",
             fontSize: 10,
             color: .black,
@@ -443,8 +523,15 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertTrue(documentXML.contains("<w:b/><w:bCs/>"))
         XCTAssertTrue(documentXML.contains("<w:i/><w:iCs/>"))
         XCTAssertTrue(documentXML.contains("w:lineRule=\"atLeast\""))
+        XCTAssertTrue(documentXML.contains("w:line=\"400\""))
+        XCTAssertTrue(documentXML.contains("<w:ind w:left=\"360\" w:right=\"0\" w:firstLine=\"0\"/>"))
         XCTAssertTrue(documentXML.contains("lIns=\"25400\""))
         XCTAssertTrue(fontXML.contains("<w:font w:name=\"Arial\""))
+
+        XCTAssertEqual(
+            textBox.paragraphInsets(for: secondLine),
+            PDFSceneTextParagraphInsets(leading: 18, trailing: 0)
+        )
 
         let presentationParts = try PresentationMLWriter().makeParts(scene: scene)
         let slidePart = try XCTUnwrap(
@@ -456,6 +543,8 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertTrue(slideXML.contains("wrap=\"none\""))
         XCTAssertTrue(slideXML.contains("<a:tab pos=\"228600\"/>"))
         XCTAssertTrue(slideXML.contains("<a:tab/>"))
+        XCTAssertTrue(slideXML.contains("<a:pPr marL=\"228600\" algn=\"l\""))
+        XCTAssertTrue(slideXML.contains("<a:spcPts val=\"2000\"/>"))
     }
 
     @MainActor
@@ -478,6 +567,7 @@ final class DocumentConversionTests: XCTestCase {
             try gate.acquire(kind: .conversion, selectionGeneration: 1)
         )
     }
+
 }
 
 private extension DocumentConversionTests {

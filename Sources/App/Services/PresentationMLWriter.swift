@@ -311,8 +311,8 @@ private extension PresentationMLWriter {
         width: Int,
         height: Int
     ) -> String {
-        let leadingInset = emu(textBox.officeLeadingInset)
-        let trailingInset = emu(textBox.officeTrailingInset)
+        let leadingInset = textMarginEMU(textBox.officeLeadingInset)
+        let trailingInset = textMarginEMU(textBox.officeTrailingInset)
         let paragraphAlignment: String
         switch textBox.alignment {
         case .left: paragraphAlignment = "l"
@@ -343,11 +343,13 @@ private extension PresentationMLWriter {
             ]
             : textBox.lines
         let paragraphs = lines.enumerated().map { index, line in
-            let nextLine = index + 1 < lines.count ? lines[index + 1] : nil
+            let previousLine = index > 0 ? lines[index - 1] : nil
             let spacing = lineSpacingPoints(
                 for: line,
-                nextLine: nextLine
+                previousLine: previousLine
             )
+            let insets = textBox.paragraphInsets(for: line)
+            let marginAttributes = drawingParagraphMarginAttributes(insets)
             let tabs = drawingTabStops(for: line, in: textBox)
             let runs = line.runs.isEmpty
                 ? drawingRun(
@@ -362,7 +364,7 @@ private extension PresentationMLWriter {
                     )
                 )
                 : line.runs.map(drawingRun).joined()
-            return "<a:p><a:pPr algn=\"\(paragraphAlignment)\"><a:lnSpc><a:spcPts val=\"\(spacing)\"/></a:lnSpc>\(tabs)</a:pPr>\(runs)<a:endParaRPr/></a:p>"
+            return "<a:p><a:pPr\(marginAttributes) algn=\"\(paragraphAlignment)\"><a:lnSpc><a:spcPts val=\"\(spacing)\"/></a:lnSpc>\(tabs)</a:pPr>\(runs)<a:endParaRPr/></a:p>"
         }.joined()
         return """
         <p:sp><p:nvSpPr><p:cNvPr id="\(id)" name="Text \(id)"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="\(x)" y="\(y)"/><a:ext cx="\(width)" cy="\(height)"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln w="0"><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr lIns="\(leadingInset)" tIns="0" rIns="\(trailingInset)" bIns="0" wrap="none" anchor="t" vert="horz"><a:noAutofit/></a:bodyPr><a:lstStyle/>\(paragraphs)</p:txBody></p:sp>
@@ -382,13 +384,30 @@ private extension PresentationMLWriter {
         for line: PDFSceneTextLine,
         in textBox: PDFSceneTextBox
     ) -> String {
-        guard let sourceOffset = line.listTabStop else { return "" }
+        guard let sourceOffset = line.listTabStop,
+              line.runs.contains(where: { $0.text.contains("\t") })
+        else {
+            return ""
+        }
         let relativeOffset = max(
             0.5,
             line.bounds.minX + sourceOffset - textBox.bounds.minX
         )
         let position = max(1, emu(relativeOffset))
         return "<a:tabLst><a:tab pos=\"\(position)\"/></a:tabLst>"
+    }
+
+    func drawingParagraphMarginAttributes(
+        _ insets: PDFSceneTextParagraphInsets
+    ) -> String {
+        var attributes = ""
+        if insets.leading > 0.01 {
+            attributes += " marL=\"\(textMarginEMU(insets.leading))\""
+        }
+        if insets.trailing > 0.01 {
+            attributes += " marR=\"\(textMarginEMU(insets.trailing))\""
+        }
+        return attributes
     }
 
     func drawingTextElements(_ text: String) -> String {
@@ -413,10 +432,14 @@ private extension PresentationMLWriter {
 
     func lineSpacingPoints(
         for line: PDFSceneTextLine,
-        nextLine: PDFSceneTextLine?
+        previousLine: PDFSceneTextLine?
     ) -> Int {
-        let sourceAdvance = nextLine.map {
-            max(0, line.bounds.minY - $0.bounds.minY)
+        let sourceAdvance = previousLine.map {
+            // PDF visual-line selection tops retain the source baseline
+            // advance even where a particular line's first painted pixel is
+            // affected by anti-aliasing or glyph shape. Rendered ink is used
+            // only to calibrate the text frame's initial top anchor.
+            max(0, $0.bounds.maxY - line.bounds.maxY)
         } ?? 0
         let fontHeight = line.runs.map(\.fontSize).max() ?? line.bounds.height
         let points = max(line.bounds.height, fontHeight * 1.05, sourceAdvance)
@@ -425,6 +448,10 @@ private extension PresentationMLWriter {
 
     func emu(_ points: CGFloat) -> Int {
         max(1, Int((Double(points) * emuPerPoint).rounded()))
+    }
+
+    func textMarginEMU(_ points: CGFloat) -> Int {
+        max(0, Int((Double(points) * emuPerPoint).rounded()))
     }
 
     func rgbHex(_ color: PDFTextColor) -> String {

@@ -2,6 +2,15 @@ import CoreGraphics
 import Foundation
 import UniformTypeIdentifiers
 
+/// The Office layout engines use different text-frame conventions even when
+/// the source geometry and fonts are identical. Keep that choice explicit at
+/// scene-extraction time so a PowerPoint calibration is never silently reused
+/// for a Word floating text box.
+enum PDFOfficeLayoutTarget: Equatable, Sendable {
+    case presentation
+    case word
+}
+
 /// The two Office packages that the document-conversion surface can produce.
 enum DocumentConversionFormat: String, CaseIterable, Codable, Identifiable, Sendable {
     case pptx
@@ -28,6 +37,13 @@ enum DocumentConversionFormat: String, CaseIterable, Codable, Identifiable, Send
     }
 
     var fileExtension: String { rawValue }
+
+    var officeLayoutTarget: PDFOfficeLayoutTarget {
+        switch self {
+        case .pptx: .presentation
+        case .docx: .word
+        }
+    }
 
     var contentType: UTType {
         switch self {
@@ -214,10 +230,10 @@ struct PDFSceneTextLine {
     let sourceMaskBounds: CGRect
     let sourceMaskIsSafe: Bool
     let extractionSource: PDFTextExtractionSource
-    /// Offset, in source points from `bounds.minX`, of a list item's text tab
-    /// stop. PDFKit commonly collapses a PDF list tab to a normal space; the
-    /// writers restore it as a native Office tab instead of letting the
-    /// substituted marker font shift all following text left.
+    /// Offset, in source points from `bounds.minX`, where a list item's body
+    /// text begins. PDFKit commonly collapses a PDF list tab to a normal
+    /// space; writers use this source anchor when restoring marker-to-text
+    /// geometry with an Office-compatible editable spacer.
     let listTabStop: CGFloat?
 
     init(
@@ -239,6 +255,19 @@ struct PDFSceneTextLine {
         self.extractionSource = extractionSource
         self.listTabStop = listTabStop
     }
+}
+
+/// Paragraph-local horizontal geometry expressed in source PDF points.
+///
+/// A `PDFSceneTextBox` can contain several visual PDF lines.  PDFKit reports
+/// each line's ink origin independently, while Office otherwise starts every
+/// paragraph at the text box's single default margin.  Keeping these values
+/// separate lets the OOXML writers restore hanging indents, continuation
+/// indents, and right/centred line extents without splitting editable text
+/// back into one shape per visual line.
+struct PDFSceneTextParagraphInsets: Equatable {
+    let leading: CGFloat
+    let trailing: CGFloat
 }
 
 struct PDFSceneTextBox {
@@ -308,6 +337,32 @@ struct PDFSceneTextBox {
         alignment == .right
             ? max(0, officeBounds.maxX - bounds.maxX)
             : 0
+    }
+
+    /// Returns paragraph margins relative to the original source text block,
+    /// not to the expanded `officeBounds`.  The body insets above restore that
+    /// source origin before these per-line offsets are applied.
+    func paragraphInsets(for line: PDFSceneTextLine) -> PDFSceneTextParagraphInsets {
+        switch alignment {
+        case .left:
+            return PDFSceneTextParagraphInsets(
+                leading: max(0, line.bounds.minX - bounds.minX),
+                trailing: 0
+            )
+        case .right:
+            return PDFSceneTextParagraphInsets(
+                leading: 0,
+                trailing: max(0, bounds.maxX - line.bounds.maxX)
+            )
+        case .center:
+            // Restrict the paragraph's local line area on both sides.  This
+            // preserves the source centre even when visual lines have
+            // different widths.
+            return PDFSceneTextParagraphInsets(
+                leading: max(0, line.bounds.minX - bounds.minX),
+                trailing: max(0, bounds.maxX - line.bounds.maxX)
+            )
+        }
     }
 }
 

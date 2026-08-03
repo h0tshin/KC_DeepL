@@ -253,8 +253,8 @@ private extension WordprocessingMLWriter {
         height: Int,
         docPrID: Int
     ) -> String {
-        let leadingInset = emu(textBox.officeLeadingInset)
-        let trailingInset = emu(textBox.officeTrailingInset)
+        let leadingInset = textMarginEMU(textBox.officeLeadingInset)
+        let trailingInset = textMarginEMU(textBox.officeTrailingInset)
         let shape = """
         <wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(width)" cy="\(height)"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>\(textBoxContent(textBox))</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz" wrap="none" lIns="\(leadingInset)" tIns="0" rIns="\(trailingInset)" bIns="0" anchor="t"><a:noAutofit/></wps:bodyPr></wps:wsp>
         """
@@ -330,11 +330,13 @@ private extension WordprocessingMLWriter {
             ]
             : textBox.lines
         return lines.enumerated().map { index, line in
-            let nextLine = index + 1 < lines.count ? lines[index + 1] : nil
+            let previousLine = index > 0 ? lines[index - 1] : nil
             let spacing = lineSpacingTwips(
                 for: line,
-                nextLine: nextLine
+                previousLine: previousLine
             )
+            let insets = textBox.paragraphInsets(for: line)
+            let indentation = wordParagraphIndent(insets)
             let tabs = wordTabStops(for: line, in: textBox)
             let runs = line.runs.isEmpty
                 ? wordRun(
@@ -349,7 +351,7 @@ private extension WordprocessingMLWriter {
                     )
                 )
                 : line.runs.map(wordRun).joined()
-            return "<w:p><w:pPr>\(tabs)<w:spacing w:before=\"0\" w:after=\"0\" w:line=\"\(spacing)\" w:lineRule=\"atLeast\"/><w:jc w:val=\"\(alignment)\"/></w:pPr>\(runs)</w:p>"
+            return "<w:p><w:pPr>\(tabs)<w:spacing w:before=\"0\" w:after=\"0\" w:line=\"\(spacing)\" w:lineRule=\"atLeast\"/>\(indentation)<w:jc w:val=\"\(alignment)\"/></w:pPr>\(runs)</w:p>"
         }.joined()
     }
 
@@ -365,13 +367,24 @@ private extension WordprocessingMLWriter {
         for line: PDFSceneTextLine,
         in textBox: PDFSceneTextBox
     ) -> String {
-        guard let sourceOffset = line.listTabStop else { return "" }
+        guard let sourceOffset = line.listTabStop,
+              line.runs.contains(where: { $0.text.contains("\t") })
+        else {
+            return ""
+        }
         let relativeOffset = max(
             0.5,
             line.bounds.minX + sourceOffset - textBox.bounds.minX
         )
         let position = max(1, Int((relativeOffset * twipsPerPoint).rounded()))
         return "<w:tabs><w:tab w:val=\"left\" w:pos=\"\(position)\"/></w:tabs>"
+    }
+
+    func wordParagraphIndent(_ insets: PDFSceneTextParagraphInsets) -> String {
+        guard insets.leading > 0.01 || insets.trailing > 0.01 else {
+            return ""
+        }
+        return "<w:ind w:left=\"\(twips(insets.leading))\" w:right=\"\(twips(insets.trailing))\" w:firstLine=\"0\"/>"
     }
 
     func wordTextElements(_ text: String) -> String {
@@ -396,10 +409,13 @@ private extension WordprocessingMLWriter {
 
     func lineSpacingTwips(
         for line: PDFSceneTextLine,
-        nextLine: PDFSceneTextLine?
+        previousLine: PDFSceneTextLine?
     ) -> Int {
-        let sourceAdvance = nextLine.map {
-            max(0, line.bounds.minY - $0.bounds.minY)
+        let sourceAdvance = previousLine.map {
+            // Selection tops preserve baseline-to-baseline advancement. The
+            // rendered-ink measurement is intentionally reserved for the
+            // text frame's initial top anchor, where it is stable and useful.
+            max(0, $0.bounds.maxY - line.bounds.maxY)
         } ?? 0
         let fontHeight = line.runs.map(\.fontSize).max() ?? line.bounds.height
         let points = max(line.bounds.height, fontHeight * 1.05, sourceAdvance)
@@ -438,6 +454,14 @@ private extension WordprocessingMLWriter {
 
     func emu(_ points: CGFloat) -> Int {
         max(1, Int((Double(points) * emuPerPoint).rounded()))
+    }
+
+    func textMarginEMU(_ points: CGFloat) -> Int {
+        max(0, Int((Double(points) * emuPerPoint).rounded()))
+    }
+
+    func twips(_ points: CGFloat) -> Int {
+        max(0, Int((Double(points) * twipsPerPoint).rounded()))
     }
 
     func rgbHex(_ color: PDFTextColor) -> String {

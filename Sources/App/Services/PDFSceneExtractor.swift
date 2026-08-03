@@ -16,7 +16,10 @@ struct PDFSceneExtractor {
         self.maximumRasterDimension = max(1_024, maximumRasterDimension)
     }
 
-    func extract(sourceURL: URL) throws -> PDFSceneDocument {
+    func extract(
+        sourceURL: URL,
+        layoutTarget: PDFOfficeLayoutTarget = .presentation
+    ) throws -> PDFSceneDocument {
         guard sourceURL.isFileURL,
               sourceURL.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame
         else {
@@ -56,7 +59,10 @@ struct PDFSceneExtractor {
             }
             let cropBox = page.bounds(for: .cropBox)
             let pageAnalysis = analysis?.pages[safe: pageIndex]
-            let textBoxes = Self.textBoxes(from: pageAnalysis)
+            let textBoxes = Self.textBoxes(
+                from: pageAnalysis,
+                layoutTarget: layoutTarget
+            )
             let replacementLineIDs = Set(
                 textBoxes
                     .filter { $0.visualPolicy == .replaceSourcePaint }
@@ -143,7 +149,10 @@ struct PDFSceneExtractor {
 }
 
 private extension PDFSceneExtractor {
-    static func textBoxes(from page: PDFPageAnalysis?) -> [PDFSceneTextBox] {
+    static func textBoxes(
+        from page: PDFPageAnalysis?,
+        layoutTarget: PDFOfficeLayoutTarget
+    ) -> [PDFSceneTextBox] {
         guard let page else { return [] }
         return page.blocks.compactMap { block -> PDFSceneTextBox? in
             let lines = block.lineIDs.compactMap { id in
@@ -170,10 +179,12 @@ private extension PDFSceneExtractor {
                     for: line,
                     continuations: Array(lines.dropFirst(index + 1))
                 )
-                let officeRuns = listTabStop.map { _ in
-                    PDFOfficeTextAppearance.runsReplacingListWhitespace(sourceRuns)
+                let officeRuns = listTabStop.map { targetTextOffset in
+                    PDFOfficeTextAppearance.runsReplacingListWhitespace(
+                        sourceRuns,
+                        targetTextOffset: targetTextOffset
+                    )
                 } ?? sourceRuns
-                let usesListTab = officeRuns.contains { $0.text == "\t" }
                 return PDFSceneTextLine(
                     id: line.id,
                     text: line.text,
@@ -182,7 +193,7 @@ private extension PDFSceneExtractor {
                     sourceMaskBounds: line.sourceMaskBounds,
                     sourceMaskIsSafe: line.sourceMaskIsSafe,
                     extractionSource: line.extractionSource,
-                    listTabStop: usesListTab ? listTabStop : nil
+                    listTabStop: listTabStop
                 )
             }
             let primaryRun = sceneLines.first?.runs.first
@@ -190,7 +201,8 @@ private extension PDFSceneExtractor {
                 for: lines,
                 sourceBounds: block.bounds,
                 alignment: firstLine.alignment,
-                cropBox: page.cropBox
+                cropBox: page.cropBox,
+                layoutTarget: layoutTarget
             )
             return PDFSceneTextBox(
                 id: block.id,

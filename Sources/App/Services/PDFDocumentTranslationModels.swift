@@ -81,6 +81,12 @@ struct PDFTextLine: Identifiable, Equatable, Sendable {
     let text: String
     let runs: [PDFTextRun]
     let bounds: CGRect
+    /// Top edge of visible text ink in PDF page coordinates. This is measured
+    /// from the rendered source page after background sampling rather than
+    /// inferred from PDFKit character rectangles, whose font-cell padding is
+    /// not a visible-text anchor. OCR lines intentionally fall back to their
+    /// selection bounds.
+    let inkTopY: CGFloat?
     let sourceMaskBounds: CGRect
     /// Background sampling verified that this native line can be removed from
     /// the visual safety-net image. This is deliberately separate from
@@ -100,6 +106,7 @@ struct PDFTextLine: Identifiable, Equatable, Sendable {
         text: String,
         runs: [PDFTextRun] = [],
         bounds: CGRect,
+        inkTopY: CGFloat? = nil,
         sourceMaskBounds: CGRect,
         sourceMaskIsSafe: Bool = false,
         fontName: String,
@@ -115,6 +122,7 @@ struct PDFTextLine: Identifiable, Equatable, Sendable {
         self.text = text
         self.runs = runs
         self.bounds = bounds
+        self.inkTopY = inkTopY
         self.sourceMaskBounds = sourceMaskBounds
         self.sourceMaskIsSafe = sourceMaskIsSafe
         self.fontName = fontName

@@ -133,7 +133,8 @@ enum PDFOfficeTextAppearance {
         for lines: [PDFTextLine],
         sourceBounds: CGRect,
         alignment: PDFTextAlignment,
-        cropBox: CGRect
+        cropBox: CGRect,
+        layoutTarget: PDFOfficeLayoutTarget = .presentation
     ) -> CGRect {
         guard !lines.isEmpty,
               !sourceBounds.isNull,
@@ -188,12 +189,38 @@ enum PDFOfficeTextAppearance {
             )
         }
 
-        // Keep the top edge fixed so the first baseline stays anchored.  A
-        // bottom-only allowance accommodates Office's descent and paragraph
-        // metrics without moving the visible text vertically.
+        // Reserve room for Office's descenders without moving the source
+        // paint/mask reference rectangle itself.
         let descentAllowance = max(1, largestFontSize * 0.18)
         result.origin.y -= descentAllowance
         result.size.height += descentAllowance
+
+        // A PDF selection's top edge is a hit-test rectangle, not a text
+        // frame baseline. In mixed-font list items it is often determined by
+        // the marker font, while the visible body starts noticeably lower.
+        // DrawingML, in contrast, positions a logical Office line cell inside
+        // the text frame. Calibrate the *PowerPoint frame* top from the source
+        // ink top and the resolved Office run metrics so all paragraphs in one
+        // box move together without disturbing their measured line advances.
+        // Word floating text boxes follow the source selection geometry more
+        // closely, so they deliberately keep the uncalibrated source top;
+        // applying the DrawingML correction there moves Word body text upward.
+        //
+        // Changing only `size.height` moves `maxY` in PDF coordinates; the
+        // writers map that edge to the target text-frame top coordinate. The
+        // bottom/descent allowance remains intact, so no editable glyph is
+        // clipped by the correction.
+        if layoutTarget == .presentation {
+            let topAnchorAdjustment = officeTopAnchorAdjustment(
+                for: lines,
+                sourceBounds: sourceBounds,
+                fallbackFontSize: largestFontSize
+            )
+            if abs(topAnchorAdjustment) > 0.01,
+               result.height + topAnchorAdjustment > 1 {
+                result.size.height += topAnchorAdjustment
+            }
+        }
 
         let clipped = result.intersection(cropBox)
         return clipped.isNull || clipped.width <= 0 || clipped.height <= 0
@@ -230,15 +257,21 @@ enum PDFOfficeTextAppearance {
     }
 
     /// Replaces only the whitespace immediately after a recognized list
-    /// marker with a tab. All remaining text and formatting runs remain in
-    /// their original order, so ordinary intra-line whitespace is untouched.
+    /// marker with a measured, editable typographic spacer. A literal Drawing
+    /// ML tab is not stable inside a multi-paragraph text box across Office
+    /// renderers: some renderers collapse it after a paragraph margin is
+    /// applied. The spacer is chosen from standard Unicode space glyphs in
+    /// the source run's resolved Office font, so the following text still
+    /// lands at the source-derived list anchor without adding another text
+    /// shape.
     static func runsReplacingListWhitespace(
-        _ runs: [PDFTextRun]
+        _ runs: [PDFTextRun],
+        targetTextOffset: CGFloat
     ) -> [PDFTextRun] {
         guard let markerLength = listMarkerLength(in: runs) else { return runs }
 
         var markerCharactersRemaining = markerLength
-        var insertedTab = false
+        var insertedSpacer = false
         var result: [PDFTextRun] = []
 
         for run in runs {
@@ -255,14 +288,25 @@ enum PDFOfficeTextAppearance {
                 index = markerCount
             }
 
-            if markerCharactersRemaining == 0 && !insertedTab {
+            if markerCharactersRemaining == 0 && !insertedSpacer {
                 let whitespaceStart = index
                 while index < characters.count, characters[index].isWhitespace {
                     index += 1
                 }
                 if index > whitespaceStart {
-                    appendRun(copy(run, text: "\t"), to: &result)
-                    insertedTab = true
+                    let markerWidth = typographicWidth(for: result)
+                    let spacerWidth = max(0.5, targetTextOffset - markerWidth)
+                    appendRun(
+                        copy(
+                            run,
+                            text: editableWhitespaceSpacer(
+                                width: spacerWidth,
+                                matching: run
+                            )
+                        ),
+                        to: &result
+                    )
+                    insertedSpacer = true
                 }
             }
 
@@ -274,11 +318,103 @@ enum PDFOfficeTextAppearance {
             }
         }
 
-        return insertedTab ? result : runs
+        return insertedSpacer ? result : runs
     }
 }
 
 private extension PDFOfficeTextAppearance {
+    /// The logical DrawingML line cell has a small top reserve beyond the
+    /// actual Core Text ink bound. It scales with the font em square rather
+    /// than with a particular document's geometry. Keeping the value here
+    /// lets the source-side ink measurement and the target-side metrics remain
+    /// explicit, testable parts of one anchor model instead of applying a
+    /// document-specific y-offset in either writer.
+    static let officeTextFrameTopReserveRatio: CGFloat = 0.105
+
+    static func officeTopAnchorAdjustment(
+        for lines: [PDFTextLine],
+        sourceBounds: CGRect,
+        fallbackFontSize: CGFloat
+    ) -> CGFloat {
+        guard let firstLine = lines.first,
+              firstLine.extractionSource == .native,
+              let sourceInkTopY = firstLine.inkTopY,
+              firstLine.runs.isEmpty == false,
+              firstLine.runs.allSatisfy(\.isOfficeCompatible)
+        else {
+            return 0
+        }
+
+        let sourceInkInset = max(0, sourceBounds.maxY - sourceInkTopY)
+        guard sourceInkInset.isFinite,
+              let targetInkInset = officeVisibleTopInset(
+                for: firstLine.runs,
+                fallbackFontSize: fallbackFontSize
+              )
+        else {
+            return 0
+        }
+
+        // The source selection box can contain a malformed or invisible
+        // glyph. Cap the correction to a fraction of the line cell so such a
+        // case cannot pull a whole paragraph across neighbouring content.
+        let limit = max(1, fallbackFontSize * 0.45)
+        return max(
+            -limit,
+            min(limit, targetInkInset - sourceInkInset)
+        )
+    }
+
+    static func officeVisibleTopInset(
+        for runs: [PDFTextRun],
+        fallbackFontSize: CGFloat
+    ) -> CGFloat? {
+        let attributed = NSMutableAttributedString()
+        for run in runs where !run.text.isEmpty {
+            attributed.append(
+                NSAttributedString(
+                    string: run.text,
+                    attributes: [.font: officeLayoutFont(for: run)]
+                )
+            )
+        }
+        guard attributed.length > 0 else { return nil }
+
+        let line = CTLineCreateWithAttributedString(attributed)
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var leading: CGFloat = 0
+        _ = CTLineGetTypographicBounds(line, &ascent, &descent, &leading)
+        let inkBounds = CTLineGetImageBounds(line, nil)
+        guard ascent.isFinite,
+              ascent > 0,
+              !inkBounds.isNull,
+              !inkBounds.isInfinite,
+              inkBounds.maxY.isFinite
+        else {
+            return nil
+        }
+
+        let largestRunSize = runs.map(\.fontSize).max() ?? fallbackFontSize
+        let topBearing = max(0, ascent - inkBounds.maxY)
+        let officeFrameReserve = max(
+            0.35,
+            min(1.2, largestRunSize * officeTextFrameTopReserveRatio)
+        )
+        return topBearing + officeFrameReserve
+    }
+
+    static func officeLayoutFont(for run: PDFTextRun) -> NSFont {
+        let size = max(5, run.fontSize)
+        let base = NSFont(name: run.fontName, size: size)
+            ?? NSFont.systemFont(ofSize: size)
+        var traits: NSFontTraitMask = []
+        if run.isBold { traits.insert(.boldFontMask) }
+        if run.isItalic { traits.insert(.italicFontMask) }
+        guard !traits.isEmpty else { return base }
+        return NSFontManager.shared.convert(base, toHaveTrait: traits)
+    }
+
     static func listMarkerLength(in runs: [PDFTextRun]) -> Int? {
         let text = runs.map(\.text).joined()
         let characters = Array(text)
@@ -396,6 +532,83 @@ private extension PDFOfficeTextAppearance {
         } else {
             runs.append(run)
         }
+    }
+
+    /// Returns a short sequence of standard Unicode whitespace characters
+    /// whose measured width most closely matches the requested source gap.
+    /// Keeping the spacer in the same run font avoids a hidden fallback font
+    /// changing the list body's horizontal anchor.
+    static func editableWhitespaceSpacer(
+        width targetWidth: CGFloat,
+        matching run: PDFTextRun
+    ) -> String {
+        let candidates = [
+            "\u{200A}", // hair space
+            "\u{2006}", // six-per-em space
+            "\u{2009}", // thin space
+            " ",
+            "\u{2005}", // four-per-em space
+            "\u{2002}", // en space
+            "\u{2003}"  // em space
+        ].compactMap { character -> (text: String, width: CGFloat)? in
+            let measured = typographicWidth(for: [copy(run, text: character)])
+            guard measured.isFinite, measured > 0.05 else { return nil }
+            return (character, measured)
+        }
+        guard !candidates.isEmpty else { return " " }
+
+        // Space advances are additive for this character set. Quantise to a
+        // tenth of a point for a small deterministic dynamic-programming
+        // search; that is finer than the visual precision of a PDF glyph box.
+        let step: CGFloat = 0.1
+        let largestAdvance = candidates.map(\.width).max() ?? targetWidth
+        let limit = max(
+            1,
+            Int(((targetWidth + largestAdvance) / step).rounded(.up))
+        )
+        var best: [(text: String, count: Int)?] = Array(
+            repeating: nil,
+            count: limit + 1
+        )
+        best[0] = ("", 0)
+
+        for unit in 0...limit {
+            guard let current = best[unit] else { continue }
+            for candidate in candidates {
+                let candidateUnits = max(
+                    1,
+                    Int((candidate.width / step).rounded())
+                )
+                let nextUnit = unit + candidateUnits
+                guard nextUnit <= limit else { continue }
+                let proposed = (
+                    text: current.text + candidate.text,
+                    count: current.count + 1
+                )
+                if let existing = best[nextUnit] {
+                    if proposed.count < existing.count {
+                        best[nextUnit] = proposed
+                    }
+                } else {
+                    best[nextUnit] = proposed
+                }
+            }
+        }
+
+        let targetUnit = Int((targetWidth / step).rounded())
+        let winner = best.enumerated().compactMap {
+            offset, candidate -> (distance: Int, count: Int, text: String)? in
+            guard let candidate else { return nil }
+            return (
+                distance: abs(offset - targetUnit),
+                count: candidate.count,
+                text: candidate.text
+            )
+        }.min {
+            if $0.distance != $1.distance { return $0.distance < $1.distance }
+            return $0.count < $1.count
+        }
+        return winner?.text ?? " "
     }
 
     private static func resolveFont(

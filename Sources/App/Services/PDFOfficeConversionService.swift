@@ -17,7 +17,10 @@ struct PDFOfficeConversionService {
         destinationURL: URL
     ) throws -> DocumentConversionReport {
         try Task.checkCancellation()
-        let scene = try extractor.extract(sourceURL: sourceURL)
+        let scene = try extractor.extract(
+            sourceURL: sourceURL,
+            layoutTarget: format.officeLayoutTarget
+        )
         try Task.checkCancellation()
 
         let parts: [OOXMLPart]
