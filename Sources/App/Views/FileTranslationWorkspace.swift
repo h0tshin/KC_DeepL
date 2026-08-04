@@ -179,6 +179,11 @@ struct FileTranslationWorkspace: View {
                 Divider()
             }
 
+            if !isConversionMode {
+                languageToolbar
+                Divider()
+            }
+
             HSplitView {
                 previewPane
                     .frame(minWidth: 570, maxWidth: .infinity, maxHeight: .infinity)
@@ -224,6 +229,49 @@ struct FileTranslationWorkspace: View {
         .onAppear {
             normalizeEngineAvailability()
         }
+    }
+
+    private var languageToolbar: some View {
+        HStack(spacing: 12) {
+            Menu {
+                ForEach(LanguageOption.sourceLanguages) { language in
+                    Button(language.displayName) {
+                        sourceLanguage = language
+                    }
+                }
+            } label: {
+                LanguageSelectionLabel(language: sourceLanguage)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 160)
+
+            Button(action: swapLanguages) {
+                Image(systemName: "arrow.left.arrow.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 6))
+            .help("언어 바꾸기")
+
+            Menu {
+                ForEach(LanguageOption.targetLanguages) { language in
+                    Button(language.displayName) {
+                        targetLanguage = language
+                    }
+                }
+            } label: {
+                LanguageSelectionLabel(language: targetLanguage)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 160)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 18)
+        .frame(height: 54)
+        .background(AppTheme.toolbarBackground)
+        .disabled(isAnyFileOperationBusy)
     }
 
     @ViewBuilder
