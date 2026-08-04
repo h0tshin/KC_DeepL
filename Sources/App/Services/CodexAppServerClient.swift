@@ -9,6 +9,17 @@ struct CodexAppServerModel: Identifiable, Hashable, Sendable {
     let isDefault: Bool
 }
 
+/// Controls whether a translation thread is persisted in Codex history.
+///
+/// File translation uses `.ephemeral` because a PDF can generate one turn per
+/// page and those implementation details should not become user-facing Codex
+/// conversations. The normal text workflow keeps `.persistent` for backwards
+/// compatibility.
+enum CodexThreadRetentionPolicy: Equatable, Sendable {
+    case persistent
+    case ephemeral
+}
+
 protocol CodexAppServerModelProviding: Sendable {
     func availableModels() async throws -> [CodexAppServerModel]
 }
@@ -77,6 +88,7 @@ actor CodexAppServerClient: TranslationClient, CodexAppServerModelProviding {
     private let requestTimeout: TimeInterval
     private let turnTimeout: TimeInterval
     private let interruptGracePeriod: TimeInterval
+    private let threadRetentionPolicy: CodexThreadRetentionPolicy
 
     private var transport: (any CodexAppServerTransporting)?
     private var connectionToken: UUID?
@@ -89,6 +101,7 @@ actor CodexAppServerClient: TranslationClient, CodexAppServerModelProviding {
     private var turnSlotIsOccupied = false
     private var turnSlotWaiters: [TurnSlotWaiter] = []
     private var activeTurn: ActiveTurn?
+    private var activeEphemeralThreadID: String?
 
     init(
         launcher: any CodexAppServerLaunching = CodexAppServerProcessLauncher(),
@@ -96,7 +109,8 @@ actor CodexAppServerClient: TranslationClient, CodexAppServerModelProviding {
         workingDirectory: URL? = nil,
         requestTimeout: TimeInterval = 15,
         turnTimeout: TimeInterval = 120,
-        interruptGracePeriod: TimeInterval = 5
+        interruptGracePeriod: TimeInterval = 5,
+        threadRetentionPolicy: CodexThreadRetentionPolicy = .persistent
     ) {
         self.launcher = launcher
         self.threadIDStore = threadIDStore
@@ -104,6 +118,7 @@ actor CodexAppServerClient: TranslationClient, CodexAppServerModelProviding {
         self.requestTimeout = max(1, requestTimeout)
         self.turnTimeout = max(1, turnTimeout)
         self.interruptGracePeriod = max(0.1, interruptGracePeriod)
+        self.threadRetentionPolicy = threadRetentionPolicy
     }
 
     func availableModels() async throws -> [CodexAppServerModel] {
@@ -178,13 +193,24 @@ actor CodexAppServerClient: TranslationClient, CodexAppServerModelProviding {
         defer { releaseTurnSlot() }
 
         let operationID = UUID()
-        return try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            return try await performTranslation(request, operationID: operationID)
-        } onCancel: {
-            Task {
-                await self.cancelActiveTurn(operationID: operationID)
+        do {
+            let result = try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await performTranslation(request, operationID: operationID)
+            } onCancel: {
+                Task {
+                    await self.cancelActiveTurn(operationID: operationID)
+                }
             }
+
+            await cleanupEphemeralThreadIfNeeded()
+            return result
+        } catch {
+            // A cancelled turn can still have a live ephemeral subscription.
+            // Run cleanup in a cancellation-independent actor task so an
+            // interrupted PDF does not leave an in-memory thread subscribed.
+            await cleanupEphemeralThreadIfNeeded()
+            throw error
         }
     }
 
@@ -223,6 +249,9 @@ actor CodexAppServerClient: TranslationClient, CodexAppServerModelProviding {
             model: model,
             developerInstructions: developerInstructions
         )
+        if threadRetentionPolicy == .ephemeral {
+            activeEphemeralThreadID = threadID
+        }
         try Task.checkCancellation()
 
         let inputText = try encodedTranslationInput(for: request)
@@ -277,6 +306,28 @@ actor CodexAppServerClient: TranslationClient, CodexAppServerModelProviding {
         model: String,
         developerInstructions: String
     ) async throws -> String {
+        if threadRetentionPolicy == .ephemeral {
+            var configuration = threadConfiguration(
+                model: model,
+                developerInstructions: developerInstructions
+            ).objectValue ?? [:]
+            configuration["ephemeral"] = .bool(true)
+
+            let result = try await request(
+                method: "thread/start",
+                params: .object(configuration),
+                isCancellable: false
+            )
+            guard let threadID = result.objectValue?[
+                "thread"
+            ]?.objectValue?["id"]?.stringValue else {
+                throw CodexAppServerClientError.invalidResponse(
+                    "ephemeral thread/start 결과에 thread.id가 없습니다."
+                )
+            }
+            return threadID
+        }
+
         if let storedThreadID = threadIDStore.loadThreadID(),
            !storedThreadID.isEmpty {
             let resumedThreadID: String
@@ -449,6 +500,36 @@ actor CodexAppServerClient: TranslationClient, CodexAppServerModelProviding {
             ]),
             isCancellable: isCancellable
         )
+    }
+
+    private func cleanupEphemeralThreadIfNeeded() async {
+        guard threadRetentionPolicy == .ephemeral,
+              let threadID = activeEphemeralThreadID
+        else {
+            return
+        }
+        activeEphemeralThreadID = nil
+
+        // Ephemeral roots are not persisted and cannot be deleted. Unsubscribe
+        // explicitly so the app server can unload the in-memory thread as soon
+        // as the page turn finishes instead of waiting for its grace period.
+        guard isInitialized, transport != nil else {
+            return
+        }
+        let cleanupTask = Task.detached { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.request(
+                    method: "thread/unsubscribe",
+                    params: .object(["threadId": .string(threadID)]),
+                    isCancellable: false
+                )
+            } catch {
+                // Cleanup must never turn a completed translation into a
+                // failure. The ephemeral thread is still non-persistent.
+            }
+        }
+        await cleanupTask.value
     }
 
     private func appServerInstructions(for request: TranslationRequest) -> String {

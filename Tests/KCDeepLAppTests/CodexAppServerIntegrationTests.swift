@@ -24,7 +24,8 @@ final class CodexAppServerIntegrationTests: XCTestCase {
             threadIDStore: UserDefaultsCodexThreadIDStore(defaults: defaults),
             workingDirectory: workingDirectory,
             requestTimeout: 30,
-            turnTimeout: 120
+            turnTimeout: 120,
+            threadRetentionPolicy: .ephemeral
         )
 
         do {
@@ -96,7 +97,8 @@ final class CodexAppServerIntegrationTests: XCTestCase {
             threadIDStore: UserDefaultsCodexThreadIDStore(defaults: defaults),
             workingDirectory: workingDirectory,
             requestTimeout: 30,
-            turnTimeout: 240
+            turnTimeout: 240,
+            threadRetentionPolicy: .ephemeral
         )
         defer { Task { await client.shutdown() } }
 

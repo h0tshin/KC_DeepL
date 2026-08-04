@@ -325,6 +325,72 @@ final class CodexAppServerClientTests: XCTestCase {
         )
     }
 
+    func testEphemeralTranslationDoesNotPersistOrSearchAndUnsubscribes() async throws {
+        let threadID = "ephemeral-translation-thread"
+        let turnID = "ephemeral-turn"
+        let transport = ScriptedCodexTransport { message, transport in
+            let request = try ScriptedCodexRequest(message)
+
+            switch request.method {
+            case "thread/start":
+                try transport.respond(
+                    to: request,
+                    result: Self.threadResult(id: threadID)
+                )
+
+            case "turn/start":
+                try Self.completeTurn(
+                    transport: transport,
+                    request: request,
+                    threadID: threadID,
+                    turnID: turnID,
+                    items: [
+                        Self.agentMessage(
+                            #"{"translation":"임시 번역"}"#,
+                            phase: "final_answer"
+                        )
+                    ]
+                )
+
+            case "thread/unsubscribe":
+                try transport.respond(to: request, result: .object([:]))
+
+            default:
+                throw ScriptedCodexError.unexpectedMethod(request.method)
+            }
+        }
+        let store = InMemoryCodexThreadIDStore(threadID: "old-persistent-thread")
+        let client = makeClient(
+            transport: transport,
+            store: store,
+            threadRetentionPolicy: .ephemeral
+        )
+        addTeardownBlock {
+            await client.shutdown()
+        }
+
+        let result = try await client.translate(Self.translationRequest())
+
+        XCTAssertEqual(result, "임시 번역")
+        XCTAssertEqual(store.threadID, "old-persistent-thread")
+        XCTAssertTrue(transport.requests(method: "thread/list").isEmpty)
+        XCTAssertTrue(transport.requests(method: "thread/resume").isEmpty)
+        XCTAssertTrue(transport.requests(method: "thread/name/set").isEmpty)
+
+        let startRequest = try XCTUnwrap(
+            transport.requests(method: "thread/start").first
+        )
+        XCTAssertEqual(
+            startRequest.params.objectValue?["ephemeral"],
+            .bool(true)
+        )
+        XCTAssertEqual(
+            transport.requests(method: "thread/unsubscribe").first?
+                .params.objectValue?["threadId"],
+            .string(threadID)
+        )
+    }
+
     func testCompletedTurnPrefersFinalAnswerAndIgnoresCommentary() async throws {
         let threadID = "message-selection-thread"
         let turnID = "turn-message-selection"
@@ -470,7 +536,8 @@ final class CodexAppServerClientTests: XCTestCase {
     private func makeClient(
         transport: ScriptedCodexTransport,
         store: InMemoryCodexThreadIDStore,
-        workingDirectory: URL? = nil
+        workingDirectory: URL? = nil,
+        threadRetentionPolicy: CodexThreadRetentionPolicy = .persistent
     ) -> CodexAppServerClient {
         CodexAppServerClient(
             launcher: SingleCodexTransportLauncher(transport: transport),
@@ -483,7 +550,8 @@ final class CodexAppServerClientTests: XCTestCase {
                     ),
             requestTimeout: 1,
             turnTimeout: 1,
-            interruptGracePeriod: 0.1
+            interruptGracePeriod: 0.1,
+            threadRetentionPolicy: threadRetentionPolicy
         )
     }
 

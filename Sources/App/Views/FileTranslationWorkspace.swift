@@ -712,7 +712,7 @@ struct FileTranslationWorkspace: View {
                 .foregroundStyle(.orange)
         }
 
-        Text("번역한 페이지 내용과 결과는 KC DeepL의 Codex 번역 작업 기록에 남을 수 있습니다.")
+        Text("파일 번역은 저장되지 않는 임시 Codex 작업으로 처리합니다. 번역이 끝나거나 취소되면 페이지 작업 구독을 해제해 최근 Codex 이력에 쌓이지 않도록 합니다.")
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)

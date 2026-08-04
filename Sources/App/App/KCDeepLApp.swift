@@ -10,6 +10,7 @@ struct KCDeepLApp: App {
     @StateObject private var fileTranslationViewModel: FileTranslationViewModel
     @StateObject private var documentConversionViewModel: DocumentConversionViewModel
     private let codexAppServerClient: CodexAppServerClient
+    private let fileCodexAppServerClient: CodexAppServerClient
 
     init() {
         // Process-scoped registration keeps the bundled typography available
@@ -18,6 +19,10 @@ struct KCDeepLApp: App {
         UserDefaults.standard.registerKCDeepLDefaults()
         let codexAppServerClient = CodexAppServerClient()
         self.codexAppServerClient = codexAppServerClient
+        let fileCodexAppServerClient = CodexAppServerClient(
+            threadRetentionPolicy: .ephemeral
+        )
+        self.fileCodexAppServerClient = fileCodexAppServerClient
         let workspaceOperationGate = FileWorkspaceOperationGate()
         _translationViewModel = StateObject(
             wrappedValue: TranslationViewModel(
@@ -33,8 +38,8 @@ struct KCDeepLApp: App {
         _liveTranslationViewModel = StateObject(wrappedValue: LiveTranslationViewModel())
         _fileTranslationViewModel = StateObject(
             wrappedValue: FileTranslationViewModel(
-                appServerClient: codexAppServerClient,
-                codexModelProvider: codexAppServerClient,
+                appServerClient: fileCodexAppServerClient,
+                codexModelProvider: fileCodexAppServerClient,
                 operationGate: workspaceOperationGate
             )
         )
@@ -52,6 +57,9 @@ struct KCDeepLApp: App {
         }
         PendingPersistenceRegistry.shared.register {
             await codexAppServerClient.shutdown()
+        }
+        PendingPersistenceRegistry.shared.register {
+            await fileCodexAppServerClient.shutdown()
         }
     }
 
