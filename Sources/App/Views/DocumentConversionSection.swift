@@ -30,6 +30,10 @@ struct DocumentConversionSection: View {
         )
     }
 
+    private var optionsDisabled: Bool {
+        isBlockedByTranslation || conversionViewModel.isBusy
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             Label("문서 변환", systemImage: "arrow.triangle.2.circlepath.doc.on.clipboard")
@@ -44,14 +48,24 @@ struct DocumentConversionSection: View {
                 .foregroundStyle(.secondary)
             }
 
+            Text("변환 형식")
+                .font(.headline)
+
             Picker("변환 형식", selection: formatBinding) {
                 ForEach(DocumentConversionFormat.allCases) { format in
                     Text(format.displayName).tag(format)
                 }
             }
+            .pickerStyle(.segmented)
             .accessibilityLabel("변환 형식")
             .accessibilityValue(conversionViewModel.selectedFormat.displayName)
-            .disabled(!isPDF || isBlockedByTranslation || conversionViewModel.isBusy)
+            .disabled(optionsDisabled)
+
+            if conversionViewModel.selectedFormat == .pptx {
+                presentationOptions
+            } else {
+                wordOptions
+            }
 
             Text("저장 위치")
                 .font(.headline)
@@ -155,6 +169,193 @@ struct DocumentConversionSection: View {
             format: conversionViewModel.selectedFormat,
             downloadLocation: downloadLocation,
             explicitlySelectedDestination: explicitDestination
+        )
+    }
+
+    private var presentationOptions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("PPT 변환 옵션", systemImage: "rectangle.on.rectangle.angled")
+                .font(.headline)
+
+            Text("템플릿화 우선")
+                .font(.subheadline.weight(.medium))
+            Picker(
+                "템플릿화 우선",
+                selection: presentationBinding(\.templatePriority)
+            ) {
+                ForEach(DocumentTemplatePriority.allCases) { priority in
+                    Text(priority.displayName).tag(priority)
+                }
+            }
+            .labelsHidden()
+
+            Text(conversionViewModel.options.presentation.templatePriority.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("글상자 병합 범위")
+                .font(.subheadline.weight(.medium))
+            Picker(
+                "글상자 병합 범위",
+                selection: presentationBinding(\.textBoxMergeLevel)
+            ) {
+                ForEach(PresentationTextBoxMergeLevel.allCases) { level in
+                    Text(level.displayName).tag(level)
+                }
+            }
+            .labelsHidden()
+
+            Text(conversionViewModel.options.presentation.textBoxMergeLevel.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("이미지 통합/분할 단계")
+                .font(.subheadline.weight(.medium))
+            Picker(
+                "이미지 통합/분할",
+                selection: presentationBinding(\.imageGroupingLevel)
+            ) {
+                ForEach(DocumentImageGroupingLevel.allCases) { level in
+                    Text(level.displayName).tag(level)
+                }
+            }
+            .labelsHidden()
+
+            Text(conversionViewModel.options.presentation.imageGroupingLevel.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle(
+                "선·도형을 편집 가능한 PPT 도형으로 복원",
+                isOn: presentationBinding(\.preserveNativeVectors)
+            )
+            .toggleStyle(.checkbox)
+
+            Toggle(
+                "투명도·마스크 이미지도 네이티브 그림으로 보존",
+                isOn: presentationBinding(\.preserveAlphaMasks)
+            )
+            .toggleStyle(.checkbox)
+        }
+        .disabled(optionsDisabled)
+    }
+
+    private var wordOptions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("DOC 변환 옵션", systemImage: "doc.text")
+                .font(.headline)
+
+            Text("템플릿화 우선")
+                .font(.subheadline.weight(.medium))
+            Picker(
+                "템플릿화 우선",
+                selection: wordBinding(\.templatePriority)
+            ) {
+                ForEach(DocumentTemplatePriority.allCases) { priority in
+                    Text(priority.displayName).tag(priority)
+                }
+            }
+            .labelsHidden()
+
+            Text(conversionViewModel.options.word.templatePriority.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("글상자 사용 여부")
+                .font(.subheadline.weight(.medium))
+            Picker(
+                "글상자 사용 여부",
+                selection: wordBinding(\.textRepresentation)
+            ) {
+                ForEach(WordTextRepresentation.allCases) { representation in
+                    Text(representation.displayName).tag(representation)
+                }
+            }
+            .labelsHidden()
+
+            Text(conversionViewModel.options.word.textRepresentation.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if conversionViewModel.options.word.textRepresentation == .documentText {
+                Text("글상자 허용 범위")
+                    .font(.subheadline.weight(.medium))
+                Picker(
+                    "글상자 허용 범위",
+                    selection: wordBinding(\.textBoxAllowance)
+                ) {
+                    ForEach(WordTextBoxAllowance.allCases) { allowance in
+                        Text(allowance.displayName).tag(allowance)
+                    }
+                }
+                .labelsHidden()
+
+                Text(conversionViewModel.options.word.textBoxAllowance.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("이미지 통합/분할 단계")
+                .font(.subheadline.weight(.medium))
+            Picker(
+                "이미지 통합/분할",
+                selection: wordBinding(\.imageGroupingLevel)
+            ) {
+                ForEach(DocumentImageGroupingLevel.allCases) { level in
+                    Text(level.displayName).tag(level)
+                }
+            }
+            .labelsHidden()
+
+            Text(conversionViewModel.options.word.imageGroupingLevel.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle(
+                "선·도형을 편집 가능한 Word 도형으로 복원",
+                isOn: wordBinding(\.preserveNativeVectors)
+            )
+            .toggleStyle(.checkbox)
+
+            Toggle(
+                "투명도·마스크 이미지도 네이티브 그림으로 보존",
+                isOn: wordBinding(\.preserveAlphaMasks)
+            )
+            .toggleStyle(.checkbox)
+        }
+        .disabled(optionsDisabled)
+    }
+
+    private func presentationBinding<Value>(
+        _ keyPath: WritableKeyPath<PresentationConversionOptions, Value>
+    ) -> Binding<Value> {
+        Binding(
+            get: { conversionViewModel.options.presentation[keyPath: keyPath] },
+            set: { newValue in
+                var options = conversionViewModel.options.presentation
+                options[keyPath: keyPath] = newValue
+                conversionViewModel.updatePresentationOptions(options)
+            }
+        )
+    }
+
+    private func wordBinding<Value>(
+        _ keyPath: WritableKeyPath<WordConversionOptions, Value>
+    ) -> Binding<Value> {
+        Binding(
+            get: { conversionViewModel.options.word[keyPath: keyPath] },
+            set: { newValue in
+                var options = conversionViewModel.options.word
+                options[keyPath: keyPath] = newValue
+                conversionViewModel.updateWordOptions(options)
+            }
         )
     }
 }

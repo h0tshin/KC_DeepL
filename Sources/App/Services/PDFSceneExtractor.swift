@@ -23,7 +23,8 @@ struct PDFSceneExtractor {
 
     func extract(
         sourceURL: URL,
-        layoutTarget: PDFOfficeLayoutTarget = .presentation
+        layoutTarget: PDFOfficeLayoutTarget = .presentation,
+        options: DocumentConversionPipelineOptions = .default
     ) throws -> PDFSceneDocument {
         guard sourceURL.isFileURL,
               sourceURL.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame
@@ -69,7 +70,8 @@ struct PDFSceneExtractor {
             let pageAnalysis = analysis?.pages[safe: pageIndex]
             let textBoxes = Self.textBoxes(
                 from: pageAnalysis,
-                layoutTarget: layoutTarget
+                layoutTarget: layoutTarget,
+                options: options
             )
             // First render is the immutable reference used for source-image
             // inspection. The second render becomes the background/template
@@ -105,7 +107,8 @@ struct PDFSceneExtractor {
                 background: layeredBackground,
                 textBoxes: textBoxes,
                 images: resolvedImages,
-                vectors: graphics.vectors
+                vectors: graphics.vectors,
+                options: options
             )
             let imageData: Data
             if usesLayeredTemplate,
@@ -115,7 +118,10 @@ struct PDFSceneExtractor {
                 let masks = Self.rasterRepairMasks(
                     pageAnalysis: pageAnalysis,
                     textBoxes: textBoxes,
-                    images: resolvedImages
+                    images: resolvedImages.filter { image in
+                        options.preserveAlphaMasks
+                            || (!image.hasAlpha && !image.maskApplied)
+                    }
                 )
                 imageData = try renderPage(
                     page,
@@ -534,7 +540,8 @@ private extension PDFSceneExtractor {
         background: PDFSceneImage?,
         textBoxes: [PDFSceneTextBox],
         images: [PDFSceneImage],
-        vectors: [PDFSceneVector]
+        vectors: [PDFSceneVector],
+        options: DocumentConversionPipelineOptions = .default
     ) -> Bool {
         guard let background,
               textBoxes
@@ -546,13 +553,18 @@ private extension PDFSceneExtractor {
         let foregroundImages = images.filter {
             $0.id != background.id && $0.hasVisibleReferenceContribution
         }
-        return foregroundImages.allSatisfy(\.canRecreateOnLayeredTemplate)
-            && vectors.allSatisfy(\.canRecreateOnLayeredTemplate)
+        return foregroundImages.allSatisfy {
+            $0.canRecreate(onPageSafetyNet: false, options: options)
+        }
+            && vectors.allSatisfy {
+                $0.canRecreate(onPageSafetyNet: false, options: options)
+            }
     }
 
     static func textBoxes(
         from page: PDFPageAnalysis?,
-        layoutTarget: PDFOfficeLayoutTarget
+        layoutTarget: PDFOfficeLayoutTarget,
+        options: DocumentConversionPipelineOptions = .default
     ) -> [PDFSceneTextBox] {
         guard let page else { return [] }
         let contentBoxes = page.blocks.compactMap { block -> PDFSceneTextBox? in
@@ -631,7 +643,11 @@ private extension PDFSceneExtractor {
                 visualPolicy: PDFOfficeTextAppearance.visualPolicy(for: lines)
             )
         }
-        let foregroundTextBounds = contentBoxes.flatMap { $0.lines.map(\.bounds) }
+        let mergedContentBoxes = mergeContentTextBoxes(
+            contentBoxes,
+            level: options.textBoxMergeLevel
+        )
+        let foregroundTextBounds = mergedContentBoxes.flatMap { $0.lines.map(\.bounds) }
         let templateBoxes = page.templateChromeLines.compactMap { line -> PDFSceneTextBox? in
             guard !line.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return nil
@@ -693,7 +709,133 @@ private extension PDFSceneExtractor {
                 isOccludedByForeground: isOccludedByForeground
             )
         }
-        return templateBoxes + contentBoxes
+        return templateBoxes + mergedContentBoxes
+    }
+
+    /// PDF analysis blocks are intentionally conservative. This second pass
+    /// lets PPT users merge adjacent blocks only when their visual geometry
+    /// proves that they belong to the same column/paragraph region.
+    static func mergeContentTextBoxes(
+        _ boxes: [PDFSceneTextBox],
+        level: PresentationTextBoxMergeLevel
+    ) -> [PDFSceneTextBox] {
+        guard level != .separate, boxes.count > 1 else {
+            return boxes
+        }
+
+        let ordered = boxes.sorted { lhs, rhs in
+            if abs(lhs.bounds.maxY - rhs.bounds.maxY) > 0.5 {
+                return lhs.bounds.maxY > rhs.bounds.maxY
+            }
+            return lhs.bounds.minX < rhs.bounds.minX
+        }
+        var merged: [PDFSceneTextBox] = []
+        merged.reserveCapacity(ordered.count)
+
+        for box in ordered {
+            guard let previous = merged.last,
+                  canMergeTextBoxes(previous, box, level: level)
+            else {
+                merged.append(box)
+                continue
+            }
+            merged[merged.count - 1] = mergeTextBoxes(previous, box)
+        }
+        return merged
+    }
+
+    static func canMergeTextBoxes(
+        _ first: PDFSceneTextBox,
+        _ second: PDFSceneTextBox,
+        level: PresentationTextBoxMergeLevel
+    ) -> Bool {
+        guard first.role == .editableContent,
+              second.role == .editableContent,
+              first.alignment == second.alignment
+        else {
+            return false
+        }
+
+        let referenceSize = max(5, max(first.fontSize, second.fontSize))
+        let fontTolerance = level == .broad ? 0.35 : 0.18
+        guard abs(first.fontSize - second.fontSize) <= referenceSize * fontTolerance else {
+            return false
+        }
+
+        let verticalGap = max(0, first.bounds.minY - second.bounds.maxY)
+        let maximumGap = level == .broad
+            ? max(36, referenceSize * 2.5)
+            : max(18, referenceSize * 1.25)
+        guard verticalGap <= maximumGap else {
+            return false
+        }
+
+        let intersection = first.bounds.intersection(second.bounds)
+        let horizontalOverlap = intersection.isNull ? 0 : intersection.width
+        let minimumWidth = max(1, min(first.bounds.width, second.bounds.width))
+        let startTolerance = level == .broad
+            ? max(24, referenceSize * 2.5)
+            : max(10, referenceSize * 1.25)
+        let sameColumn = horizontalOverlap / minimumWidth >= 0.22
+            || abs(first.bounds.minX - second.bounds.minX) <= startTolerance
+        guard sameColumn else { return false }
+
+        let firstTabStops = first.lines.compactMap(\.listTabStop)
+        let secondTabStops = second.lines.compactMap(\.listTabStop)
+        if !firstTabStops.isEmpty || !secondTabStops.isEmpty {
+            guard firstTabStops.count == secondTabStops.count,
+                  zip(firstTabStops, secondTabStops).allSatisfy({
+                      abs($0 - $1) <= startTolerance
+                  })
+            else {
+                return false
+            }
+        }
+        return true
+    }
+
+    static func mergeTextBoxes(
+        _ first: PDFSceneTextBox,
+        _ second: PDFSceneTextBox
+    ) -> PDFSceneTextBox {
+        let lines = first.lines + second.lines
+        let visualPolicy: PDFSceneTextVisualPolicy
+        if first.visualPolicy == .preserveSourcePaint
+            || second.visualPolicy == .preserveSourcePaint {
+            visualPolicy = .preserveSourcePaint
+        } else if first.visualPolicy == .repairSourcePaint
+                    || second.visualPolicy == .repairSourcePaint {
+            visualPolicy = .repairSourcePaint
+        } else {
+            visualPolicy = .replaceSourcePaint
+        }
+        let layoutBounds: CGRect?
+        if let firstLayout = first.layoutBounds,
+           let secondLayout = second.layoutBounds {
+            layoutBounds = firstLayout.union(secondLayout)
+        } else {
+            layoutBounds = nil
+        }
+        return PDFSceneTextBox(
+            id: "merged-\(first.id)-\(second.id)",
+            text: lines.map(\.text).joined(separator: "\n"),
+            bounds: first.bounds.union(second.bounds),
+            layoutBounds: layoutBounds,
+            fontName: first.fontName,
+            fontSize: max(first.fontSize, second.fontSize),
+            color: first.color,
+            alignment: first.alignment,
+            lineCount: lines.count,
+            sourceLineIDs: first.sourceLineIDs + second.sourceLineIDs,
+            extractionSource: first.extractionSource == .visionOCR
+                || second.extractionSource == .visionOCR
+                ? .visionOCR
+                : .native,
+            lines: lines,
+            visualPolicy: visualPolicy,
+            role: .editableContent,
+            isOccludedByForeground: false
+        )
     }
 
     static func rasterRepairMasks(
@@ -1609,41 +1751,48 @@ private extension PDFSceneExtractor {
     static func classifyRepeatedTemplates(
         in pages: [PDFScenePage]
     ) -> [PDFScenePage] {
-        let grouped = Dictionary(grouping: pages.indices) { index in
-            pages[index].templateObjects.first?.sourceFingerprint
-        }
-        var classified = pages
-        for indices in grouped.values where indices.count > 1 {
-            for index in indices {
-                let page = pages[index]
-                let templates = page.templateObjects.map { object in
-                    PDFSceneTemplateObject(
-                        id: object.id,
-                        role: .sharedTemplate,
-                        bounds: object.bounds,
-                        confidence: min(0.99, object.confidence + 0.08),
-                        sourceFingerprint: object.sourceFingerprint
-                    )
-                }
-                classified[index] = PDFScenePage(
-                    id: page.id,
-                    pageIndex: page.pageIndex,
-                    cropBox: page.cropBox,
-                    rotation: page.rotation,
-                    pageImagePNG: page.pageImagePNG,
-                    textBoxes: page.textBoxes,
-                    images: page.images,
-                    vectors: page.vectors,
-                    templateObjects: templates,
-                    imageOccurrenceCount: page.imageOccurrenceCount,
-                    extractedImageCount: page.extractedImageCount,
-                    nativeVectorCount: page.nativeVectorCount,
-                    warnings: page.warnings,
-                    usesPageRasterFallback: page.usesPageRasterFallback
-                )
+        // A page's full-background fingerprint is not a reliable proxy for
+        // repeated chrome. Two slides can have different body artwork while
+        // retaining the exact same header/logo/footer. Count each object
+        // fingerprint independently so those elements can still be promoted
+        // to a master/header layer.
+        var pageCountByFingerprint: [String: Int] = [:]
+        for page in pages {
+            for fingerprint in Set(page.templateObjects.map(\.sourceFingerprint)) {
+                pageCountByFingerprint[fingerprint, default: 0] += 1
             }
         }
-        return classified
+
+        return pages.map { page in
+            let templates = page.templateObjects.map { object in
+                let isRepeated = pageCountByFingerprint[object.sourceFingerprint, default: 0] > 1
+                return PDFSceneTemplateObject(
+                    id: object.id,
+                    role: isRepeated ? .sharedTemplate : object.role,
+                    bounds: object.bounds,
+                    confidence: isRepeated
+                        ? min(0.99, object.confidence + 0.08)
+                        : object.confidence,
+                    sourceFingerprint: object.sourceFingerprint
+                )
+            }
+            return PDFScenePage(
+                id: page.id,
+                pageIndex: page.pageIndex,
+                cropBox: page.cropBox,
+                rotation: page.rotation,
+                pageImagePNG: page.pageImagePNG,
+                textBoxes: page.textBoxes,
+                images: page.images,
+                vectors: page.vectors,
+                templateObjects: templates,
+                imageOccurrenceCount: page.imageOccurrenceCount,
+                extractedImageCount: page.extractedImageCount,
+                nativeVectorCount: page.nativeVectorCount,
+                warnings: page.warnings,
+                usesPageRasterFallback: page.usesPageRasterFallback
+            )
+        }
     }
 
     static func sha256(_ data: Data) -> String {

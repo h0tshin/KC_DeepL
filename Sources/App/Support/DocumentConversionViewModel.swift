@@ -4,6 +4,7 @@ import KCDeepLCore
 @MainActor
 final class DocumentConversionViewModel: ObservableObject {
     @Published private(set) var selectedFormat: DocumentConversionFormat = .pptx
+    @Published private(set) var options: DocumentConversionOptions
     @Published private(set) var stage: DocumentConversionStage = .idle
     @Published private(set) var progress: Double = 0
     @Published private(set) var statusMessage = "PDF를 선택하면 파워포인트 또는 워드로 변환할 수 있습니다."
@@ -20,15 +21,29 @@ final class DocumentConversionViewModel: ObservableObject {
     private var lease: FileWorkspaceOperationGate.Lease?
     private var operationGeneration: UInt = 0
     private var isPreparingToTerminate = false
+    private let defaults: UserDefaults
+
+    private static let optionsKey = "kcdeepl.documentConversion.options.v1"
 
     init(
         operationGate: FileWorkspaceOperationGate? = nil,
         outputResolver: DocumentConversionOutputURLResolver = DocumentConversionOutputURLResolver(),
-        reportStore: DocumentConversionReportStore = DocumentConversionReportStore()
+        reportStore: DocumentConversionReportStore = DocumentConversionReportStore(),
+        defaults: UserDefaults = .standard
     ) {
         self.operationGate = operationGate ?? .shared
         self.outputResolver = outputResolver
         self.reportStore = reportStore
+        self.defaults = defaults
+        if let data = defaults.data(forKey: Self.optionsKey),
+           let decoded = try? JSONDecoder().decode(
+               DocumentConversionOptions.self,
+               from: data
+           ) {
+            self.options = decoded
+        } else {
+            self.options = .default
+        }
     }
 
     var isBusy: Bool { stage.isBusy }
@@ -38,12 +53,25 @@ final class DocumentConversionViewModel: ObservableObject {
         selectedFormat = format
     }
 
+    func updatePresentationOptions(_ options: PresentationConversionOptions) {
+        guard !isBusy else { return }
+        self.options.presentation = options
+        persistOptions()
+    }
+
+    func updateWordOptions(_ options: WordConversionOptions) {
+        guard !isBusy else { return }
+        self.options.word = options
+        persistOptions()
+    }
+
     func start(
         sourceURL: URL?,
         sourceGeneration: UInt,
         format: DocumentConversionFormat,
         downloadLocation: String,
-        explicitlySelectedDestination: URL? = nil
+        explicitlySelectedDestination: URL? = nil,
+        conversionOptions: DocumentConversionOptions? = nil
     ) {
         guard !isPreparingToTerminate else {
             fail(with: FileWorkspaceOperationGateError.shuttingDown)
@@ -71,6 +99,7 @@ final class DocumentConversionViewModel: ObservableObject {
         }
         self.lease = lease
         selectedFormat = format
+        let selectedOptions = conversionOptions ?? options
         operationGeneration &+= 1
         let generation = operationGeneration
         errorMessage = nil
@@ -117,7 +146,8 @@ final class DocumentConversionViewModel: ObservableObject {
                     try service.convert(
                         sourceURL: sourceURL,
                         format: format,
-                        destinationURL: temporaryURL
+                        destinationURL: temporaryURL,
+                        options: selectedOptions
                     )
                 }
                 let conversionReport = try await withTaskCancellationHandler {
@@ -240,5 +270,12 @@ final class DocumentConversionViewModel: ObservableObject {
         stage = .failed
         progress = 0
         statusMessage = "문서 변환을 시작하지 못했습니다."
+    }
+
+    private func persistOptions() {
+        guard let data = try? JSONEncoder().encode(options) else {
+            return
+        }
+        defaults.set(data, forKey: Self.optionsKey)
     }
 }

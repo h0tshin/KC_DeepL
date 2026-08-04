@@ -1349,6 +1349,98 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertTrue(slideXML.contains("<a:spcPts val=\"2000\"/>"))
     }
 
+    func testConversionOptionsRoundTripAndTargetMapping() throws {
+        var options = DocumentConversionOptions.default
+        options.presentation.templatePriority = .repeatedToTemplate
+        options.presentation.textBoxMergeLevel = .broad
+        options.presentation.imageGroupingLevel = .integrated
+        options.word.textRepresentation = .documentText
+        options.word.textBoxAllowance = .permissive
+        options.word.templatePriority = .repeatedToTemplate
+        options.word.imageGroupingLevel = .balanced
+        options.word.preserveNativeVectors = false
+
+        let data = try JSONEncoder().encode(options)
+        let decoded = try JSONDecoder().decode(
+            DocumentConversionOptions.self,
+            from: data
+        )
+        XCTAssertEqual(decoded, options)
+        XCTAssertEqual(
+            decoded.pipeline(for: .pptx).textBoxMergeLevel,
+            .broad
+        )
+        XCTAssertEqual(
+            decoded.pipeline(for: .docx).wordTextRepresentation,
+            .documentText
+        )
+        XCTAssertFalse(decoded.pipeline(for: .docx).preserveNativeVectors)
+    }
+
+    func testTemplatePriorityUsesPPTMasterAndDOCXHeaderLayer() throws {
+        let scene = makeTemplateScene()
+        var options = DocumentConversionPipelineOptions.default
+        options.templatePriority = .repeatedToTemplate
+        options.imageGroupingLevel = .integrated
+
+        let presentationParts = try PresentationMLWriter().makeParts(
+            scene: scene,
+            options: options
+        )
+        XCTAssertNoThrow(
+            try OOXMLPackageValidator.validate(
+                parts: presentationParts,
+                format: .pptx
+            )
+        )
+        let masterPart = try XCTUnwrap(
+            presentationParts.first(where: {
+                $0.name == "ppt/slideMasters/slideMaster1.xml"
+            })
+        )
+        let masterXML = try XCTUnwrap(String(data: masterPart.data, encoding: .utf8))
+        XCTAssertTrue(masterXML.contains("Shared chrome"))
+        let masterRelationships = try XCTUnwrap(
+            presentationParts.first(where: {
+                $0.name == "ppt/slideMasters/_rels/slideMaster1.xml.rels"
+            })
+        )
+        let masterRelationshipsXML = try XCTUnwrap(
+            String(data: masterRelationships.data, encoding: .utf8)
+        )
+        XCTAssertTrue(masterRelationshipsXML.contains("master-object-1.png"))
+        let slidePart = try XCTUnwrap(
+            presentationParts.first(where: { $0.name == "ppt/slides/slide1.xml" })
+        )
+        let slideXML = try XCTUnwrap(String(data: slidePart.data, encoding: .utf8))
+        XCTAssertFalse(slideXML.contains("Shared chrome"))
+
+        let wordParts = try WordprocessingMLWriter().makeParts(
+            scene: scene,
+            options: options
+        )
+        XCTAssertNoThrow(
+            try OOXMLPackageValidator.validate(
+                parts: wordParts,
+                format: .docx
+            )
+        )
+        let headerPart = try XCTUnwrap(
+            wordParts.first(where: { $0.name == "word/header1.xml" })
+        )
+        let headerXML = try XCTUnwrap(String(data: headerPart.data, encoding: .utf8))
+        XCTAssertTrue(headerXML.contains("Shared chrome"))
+        XCTAssertTrue(
+            wordParts.contains(where: { $0.name == "word/_rels/header1.xml.rels" })
+        )
+        let documentPart = try XCTUnwrap(
+            wordParts.first(where: { $0.name == "word/document.xml" })
+        )
+        let documentXML = try XCTUnwrap(String(data: documentPart.data, encoding: .utf8))
+        XCTAssertTrue(documentXML.contains("<w:headerReference"))
+        XCTAssertFalse(documentXML.contains("Shared chrome"))
+    }
+
     @MainActor
     func testWorkspaceGateRejectsTheSecondKindUntilTheFirstReleases() throws {
         let gate = FileWorkspaceOperationGate()
@@ -1373,6 +1465,92 @@ final class DocumentConversionTests: XCTestCase {
 }
 
 private extension DocumentConversionTests {
+    func makeTemplateScene() -> PDFSceneDocument {
+        let bounds = CGRect(x: 72, y: 720, width: 160, height: 18)
+        let run = PDFSceneTextRun(
+            PDFTextRun(
+                text: "Shared chrome",
+                fontName: "Arial",
+                fontSize: 12,
+                textColor: .black,
+                isOfficeCompatible: true
+            )
+        )
+        let line = PDFSceneTextLine(
+            id: "template-line",
+            text: "Shared chrome",
+            bounds: bounds,
+            runs: [run],
+            sourceMaskBounds: bounds,
+            sourceMaskIsSafe: true,
+            hasVisibleInk: true,
+            extractionSource: .native
+        )
+        let textBox = PDFSceneTextBox(
+            id: "template-template-line",
+            text: "Shared chrome",
+            bounds: bounds,
+            layoutBounds: bounds,
+            fontName: "Arial",
+            fontSize: 12,
+            color: .black,
+            alignment: .left,
+            lineCount: 1,
+            sourceLineIDs: [line.id],
+            extractionSource: .native,
+            lines: [line],
+            visualPolicy: .replaceSourcePaint,
+            role: .templateChrome
+        )
+        let image = PDFSceneImage(
+            id: "shared-logo",
+            sourceName: "logo.png",
+            bounds: CGRect(x: 24, y: 724, width: 36, height: 24),
+            pngData: Data([1, 2, 3, 4]),
+            paintOrder: 1,
+            hasAlpha: false,
+            maskApplied: false,
+            backdropColor: .white,
+            isBackdropIndependent: true,
+            isSafetyNetVerifiedOpaque: true,
+            hasRepresentableGeometry: true,
+            isNativeObjectEligible: true,
+            isLayeredTemplateEligible: true,
+            hasVisibleReferenceContribution: true
+        )
+        return PDFSceneDocument(
+            sourceURL: URL(fileURLWithPath: "/tmp/template.pdf"),
+            sourceSHA256: "template",
+            pages: (0..<2).map { index in
+                PDFScenePage(
+                    id: "page-\(index)",
+                    pageIndex: index,
+                    cropBox: CGRect(x: 0, y: 0, width: 612, height: 792),
+                    rotation: 0,
+                    pageImagePNG: Data([8, UInt8(index)]),
+                    textBoxes: [textBox],
+                    images: [image],
+                    vectors: [],
+                    templateObjects: [
+                        PDFSceneTemplateObject(
+                            id: "template-chrome-\(textBox.id)",
+                            role: .sharedTemplate,
+                            bounds: bounds,
+                            confidence: 0.99,
+                            sourceFingerprint: "chrome-fp"
+                        )
+                    ],
+                    imageOccurrenceCount: 1,
+                    extractedImageCount: 1,
+                    nativeVectorCount: 0,
+                    warnings: [],
+                    usesPageRasterFallback: false
+                )
+            },
+            warnings: []
+        )
+    }
+
     func temporaryDirectory(prefix: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)

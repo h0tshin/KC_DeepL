@@ -1,9 +1,29 @@
+import CryptoKit
 import Foundation
 
 struct PresentationMLWriter {
     private let emuPerPoint = 12_700.0
 
-    func makeParts(scene: PDFSceneDocument) throws -> [OOXMLPart] {
+    private struct MasterPlan {
+        let backgroundPage: PDFScenePage?
+        let textBoxes: [PDFSceneTextBox]
+        let textBoxKeys: Set<String>
+        let images: [PDFSceneImage]
+        let imageKeys: Set<String>
+
+        static let empty = MasterPlan(
+            backgroundPage: nil,
+            textBoxes: [],
+            textBoxKeys: [],
+            images: [],
+            imageKeys: []
+        )
+    }
+
+    func makeParts(
+        scene: PDFSceneDocument,
+        options: DocumentConversionPipelineOptions = .default
+    ) throws -> [OOXMLPart] {
         guard let first = scene.pages.first else {
             throw DocumentConversionError.emptyPDF
         }
@@ -23,48 +43,71 @@ struct PresentationMLWriter {
         let embeddedFonts = OfficeEmbeddedFontCatalog.presentationFonts(
             usedTypefaceNames: usedTypefaceNames
         )
+        let masterPlan = makeMasterPlan(scene: scene, options: options)
         var parts: [OOXMLPart] = []
+        var imageAssetNames: [String: String] = [:]
         for page in scene.pages {
             try Task.checkCancellation()
             let slideNumber = page.pageIndex + 1
-            let mediaName = "ppt/media/image\(slideNumber).png"
-            parts.append(try OOXMLPart(name: mediaName, data: page.pageImagePNG))
+            if masterPlan.backgroundPage == nil {
+                let mediaName = "ppt/media/image\(slideNumber).png"
+                parts.append(try OOXMLPart(name: mediaName, data: page.pageImagePNG))
+            }
 
             var relationships: [(id: String, type: String, target: String)] = [
                 (
                     "rId1",
                     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout",
                     "../slideLayouts/slideLayout1.xml"
-                ),
-                (
-                    "rId2",
-                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
-                    "../media/image\(slideNumber).png"
                 )
             ]
-            let nativeImages = page.images.filter {
-                page.usesPageRasterFallback
-                    ? $0.canRecreateOnRepairedPage
-                    : $0.canRecreateOnLayeredTemplate
+            if masterPlan.backgroundPage == nil {
+                relationships.append(
+                    (
+                        "rId2",
+                        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+                        "../media/image\(slideNumber).png"
+                    )
+                )
             }
-            let imageRelationships: [(image: PDFSceneImage, id: String)] = nativeImages.enumerated().map { offset, image in
+            let nativeImages = page.images.filter {
+                $0.canRecreate(
+                    onPageSafetyNet: page.usesPageRasterFallback,
+                    options: options
+                ) && !masterPlan.imageKeys.contains(templateImageKey($0))
+            }
+            var imageRelationships: [(image: PDFSceneImage, id: String)] = []
+            for (offset, image) in nativeImages.enumerated() {
                 let relationshipID = "rId\(offset + 3)"
+                let assetKey = OfficeImageAssetGrouping.key(
+                    image: image,
+                    pageIndex: page.pageIndex,
+                    occurrenceIndex: offset,
+                    level: options.imageGroupingLevel
+                )
+                let assetName: String
+                if let existing = imageAssetNames[assetKey] {
+                    assetName = existing
+                } else {
+                    assetName = options.imageGroupingLevel == .split
+                        ? "object-\(slideNumber)-\(offset + 1).png"
+                        : OfficeImageAssetGrouping.sharedFilename(for: assetKey)
+                    imageAssetNames[assetKey] = assetName
+                    parts.append(
+                        try OOXMLPart(
+                            name: "ppt/media/\(assetName)",
+                            data: image.pngData
+                        )
+                    )
+                }
                 relationships.append(
                     (
                         relationshipID,
                         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
-                        "../media/object-\(slideNumber)-\(offset + 1).png"
+                        "../media/\(assetName)"
                     )
                 )
-                return (image, relationshipID)
-            }
-            for (offset, image) in nativeImages.enumerated() {
-                parts.append(
-                    try OOXMLPart(
-                        name: "ppt/media/object-\(slideNumber)-\(offset + 1).png",
-                        data: image.pngData
-                    )
-                )
+                imageRelationships.append((image, relationshipID))
             }
             let slideXML = makeSlideXML(
                 page: page,
@@ -72,7 +115,11 @@ struct PresentationMLWriter {
                 canvasHeight: canvasHeight,
                 slideWidth: slideWidth,
                 slideHeight: slideHeight,
-                imageRelationships: imageRelationships
+                imageRelationships: imageRelationships,
+                options: options,
+                includePageRaster: masterPlan.backgroundPage == nil,
+                masterTextBoxKeys: masterPlan.textBoxKeys,
+                masterImageKeys: masterPlan.imageKeys
             )
             parts.append(try OOXMLPart(name: "ppt/slides/slide\(slideNumber).xml", xml: slideXML))
             parts.append(
@@ -163,26 +210,101 @@ struct PresentationMLWriter {
         parts.append(try OOXMLPart(name: "ppt/presentation.xml", xml: presentationXML))
         parts.append(try OOXMLPart(name: "ppt/_rels/presentation.xml.rels", xml: relationshipsXML(presentationRels)))
 
+        var masterRelationships: [(id: String, type: String, target: String)] = [
+            (
+                "rId1",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout",
+                "../slideLayouts/slideLayout1.xml"
+            ),
+            (
+                "rId2",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme",
+                "../theme/theme1.xml"
+            )
+        ]
+        var masterShapes = ""
+        var nextMasterShapeID = 3
+        var nextMasterRelationshipID = 3
+        if let backgroundPage = masterPlan.backgroundPage {
+            let relationshipID = "rId\(nextMasterRelationshipID)"
+            nextMasterRelationshipID += 1
+            masterRelationships.append(
+                (
+                    relationshipID,
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+                    "../media/master-background.png"
+                )
+            )
+            parts.append(
+                try OOXMLPart(
+                    name: "ppt/media/master-background.png",
+                    data: backgroundPage.pageImagePNG
+                )
+            )
+            masterShapes += pageRasterShape(
+                relationshipID: relationshipID,
+                id: nextMasterShapeID,
+                width: slideWidth,
+                height: slideHeight,
+                name: "Shared PDF template background"
+            )
+            nextMasterShapeID += 1
+        }
+        for (offset, image) in masterPlan.images.enumerated() {
+            let relationshipID = "rId\(nextMasterRelationshipID)"
+            nextMasterRelationshipID += 1
+            let assetName = "master-object-\(offset + 1).png"
+            masterRelationships.append(
+                (
+                    relationshipID,
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+                    "../media/\(assetName)"
+                )
+            )
+            parts.append(
+                try OOXMLPart(
+                    name: "ppt/media/\(assetName)",
+                    data: image.pngData
+                )
+            )
+            let bounds = image.officeBounds
+            let x = emu(bounds.minX - first.cropBox.minX)
+            let y = emu(canvasHeight - (bounds.maxY - first.cropBox.minY))
+            masterShapes += imageShape(
+                image: image,
+                id: nextMasterShapeID,
+                relationshipID: relationshipID,
+                x: x,
+                y: y,
+                width: max(1, emu(bounds.width)),
+                height: max(1, emu(bounds.height))
+            )
+            nextMasterShapeID += 1
+        }
+        for textBox in masterPlan.textBoxes {
+            let bounds = textBox.officeBounds
+            let x = emu(bounds.minX - first.cropBox.minX)
+            let y = emu(canvasHeight - (bounds.maxY - first.cropBox.minY))
+            masterShapes += textShape(
+                textBox: textBox,
+                id: nextMasterShapeID,
+                x: x,
+                y: y,
+                width: max(1, emu(bounds.width)),
+                height: max(1, emu(bounds.height)),
+                locked: true
+            )
+            nextMasterShapeID += 1
+        }
         let masterXML = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="KC DeepL Master"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(slideWidth)" cy="\(slideHeight)"/><a:chOff x="0" y="0"/><a:chExt cx="\(slideWidth)" cy="\(slideHeight)"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst><p:sldLayoutId id="1" r:id="rId1"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>
+        <p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="KC DeepL Master"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(slideWidth)" cy="\(slideHeight)"/><a:chOff x="0" y="0"/><a:chExt cx="\(slideWidth)" cy="\(slideHeight)"/></a:xfrm></p:grpSpPr>\(masterShapes)</p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst><p:sldLayoutId id="1" r:id="rId1"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>
         """
         parts.append(try OOXMLPart(name: "ppt/slideMasters/slideMaster1.xml", xml: masterXML))
         parts.append(
             try OOXMLPart(
                 name: "ppt/slideMasters/_rels/slideMaster1.xml.rels",
-                xml: relationshipsXML([
-                    (
-                        "rId1",
-                        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout",
-                        "../slideLayouts/slideLayout1.xml"
-                    ),
-                    (
-                        "rId2",
-                        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme",
-                        "../theme/theme1.xml"
-                    )
-                ])
+                xml: relationshipsXML(masterRelationships)
             )
         )
 
@@ -225,34 +347,184 @@ struct PresentationMLWriter {
 }
 
 private extension PresentationMLWriter {
+    private func makeMasterPlan(
+        scene: PDFSceneDocument,
+        options: DocumentConversionPipelineOptions
+    ) -> MasterPlan {
+        guard options.templatePriority == .repeatedToTemplate,
+              scene.pages.count > 1,
+              let first = scene.pages.first
+        else {
+            return .empty
+        }
+
+        let sameCanvas = scene.pages.allSatisfy {
+            abs($0.width - first.width) <= 0.01
+                && abs($0.height - first.height) <= 0.01
+        }
+        let identicalBackground = sameCanvas
+            && scene.pages.allSatisfy { !$0.usesPageRasterFallback }
+            && scene.pages.dropFirst().allSatisfy {
+                $0.pageImagePNG == first.pageImagePNG
+            }
+        let backgroundPage = identicalBackground ? first : nil
+
+        let sharedTextFingerprints = scene.pages
+            .map { page in
+                Set(
+                    page.templateObjects
+                        .filter {
+                            $0.role == .sharedTemplate
+                                && $0.id.hasPrefix("template-chrome-")
+                        }
+                        .map(\.sourceFingerprint)
+                )
+            }
+            .dropFirst()
+            .reduce(
+                Set(
+                    first.templateObjects
+                        .filter {
+                            $0.role == .sharedTemplate
+                                && $0.id.hasPrefix("template-chrome-")
+                        }
+                        .map(\.sourceFingerprint)
+                )
+            ) { partial, next in
+                partial.intersection(next)
+            }
+        let firstTextFingerprintByKey = Dictionary(
+            uniqueKeysWithValues: first.templateObjects
+                .filter {
+                    $0.role == .sharedTemplate
+                        && $0.id.hasPrefix("template-chrome-")
+                }
+                .map { (String($0.id.dropFirst("template-chrome-".count)), $0.sourceFingerprint) }
+        )
+        let textBoxes = first.textBoxes.filter { textBox in
+            guard textBox.role == .templateChrome,
+                  let fingerprint = firstTextFingerprintByKey[textBox.id]
+            else {
+                return false
+            }
+            return sharedTextFingerprints.contains(fingerprint)
+        }
+
+        let commonImageKeys = scene.pages
+            .map { page in
+                Set(
+                    page.images
+                        .filter {
+                            !$0.hasAlpha || options.preserveAlphaMasks
+                        }
+                        .filter {
+                            $0.canRecreate(
+                                onPageSafetyNet: page.usesPageRasterFallback,
+                                options: options
+                            )
+                        }
+                        .map(templateImageKey)
+                )
+            }
+            .dropFirst()
+            .reduce(
+                Set(
+                    first.images
+                        .filter {
+                            $0.canRecreate(
+                                onPageSafetyNet: first.usesPageRasterFallback,
+                                options: options
+                            )
+                        }
+                        .map(templateImageKey)
+                )
+            ) { partial, next in
+                partial.intersection(next)
+            }
+        let backgroundImageKey = first.images.first { image in
+            commonImageKeys.contains(templateImageKey(image))
+                && image.bounds.minX <= first.cropBox.minX + 0.5
+                && image.bounds.minY <= first.cropBox.minY + 0.5
+                && image.bounds.maxX >= first.cropBox.maxX - 0.5
+                && image.bounds.maxY >= first.cropBox.maxY - 0.5
+                && !image.hasAlpha
+                && !image.maskApplied
+        }.map(templateImageKey)
+        let images = first.images.filter {
+            let key = templateImageKey($0)
+            return commonImageKeys.contains(key) && key != backgroundImageKey
+        }
+        return MasterPlan(
+            backgroundPage: backgroundPage,
+            textBoxes: textBoxes,
+            textBoxKeys: Set(textBoxes.map(templateTextKey)),
+            images: images,
+            imageKeys: commonImageKeys
+        )
+    }
+
+    func templateTextKey(_ textBox: PDFSceneTextBox) -> String {
+        "\(textBox.text)|\(textBox.bounds.debugDescription)|\(textBox.alignment.rawValue)"
+    }
+
+    func templateImageKey(_ image: PDFSceneImage) -> String {
+        let digest = SHA256.hash(data: image.pngData)
+            .prefix(16)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let clipDescription = image.clip?.bounds.debugDescription ?? ""
+        return "\(digest)|\(image.bounds.debugDescription)|\(clipDescription)"
+    }
+
+    func pageRasterShape(
+        relationshipID: String,
+        id: Int,
+        width: Int,
+        height: Int,
+        name: String
+    ) -> String {
+        "<p:pic><p:nvPicPr><p:cNvPr id=\"\(id)\" name=\"\(XMLValue.attribute(name))\"/><p:cNvPicPr preferRelativeResize=\"0\"><a:picLocks noSelect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"\(XMLValue.attribute(relationshipID))\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"\(width)\" cy=\"\(height)\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>"
+    }
+
     func makeSlideXML(
         page: PDFScenePage,
         canvasWidth: CGFloat,
         canvasHeight: CGFloat,
         slideWidth: Int,
         slideHeight: Int,
-        imageRelationships: [(image: PDFSceneImage, id: String)]
+        imageRelationships: [(image: PDFSceneImage, id: String)],
+        options: DocumentConversionPipelineOptions,
+        includePageRaster: Bool,
+        masterTextBoxKeys: Set<String>,
+        masterImageKeys: Set<String>
     ) -> String {
         let pageOffsetX: CGFloat = 0
         let pageOffsetY: CGFloat = canvasHeight - page.height
         let nativeVectors = page.vectors.filter {
-            page.usesPageRasterFallback
-                ? $0.canOverlayOnPageSafetyNet
-                : $0.canRecreateOnLayeredTemplate
+            $0.canRecreate(
+                onPageSafetyNet: page.usesPageRasterFallback,
+                options: options
+            )
         }
             .sorted { $0.paintOrder < $1.paintOrder }
         var shapeID = 3
-        let imageX = emu(pageOffsetX)
-        let imageY = emu(pageOffsetY)
         let imageWidth = emu(page.width)
         let imageHeight = emu(page.height)
-        var shapes = """
-        <p:pic><p:nvPicPr><p:cNvPr id="2" name="PDF page \(page.pageIndex + 1)"/><p:cNvPicPr preferRelativeResize="0"><a:picLocks noSelect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="\(imageX)" y="\(imageY)"/><a:ext cx="\(imageWidth)" cy="\(imageHeight)"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>
-        """
+        var shapes = includePageRaster
+            ? pageRasterShape(
+                relationshipID: "rId2",
+                id: 2,
+                width: imageWidth,
+                height: imageHeight,
+                name: "PDF page \(page.pageIndex + 1)"
+            )
+            : ""
         let templateTextBoxes = page.usesPageRasterFallback
             ? []
             : page.textBoxes.filter {
-                $0.role == .templateChrome && $0.canRecreateOnLayeredTemplate
+                $0.role == .templateChrome
+                    && $0.canRecreateOnLayeredTemplate
+                    && !masterTextBoxKeys.contains(templateTextKey($0))
             }
         let contentTextBoxes = page.textBoxes.filter {
             $0.role == .editableContent && $0.canRecreateOnLayeredTemplate
@@ -262,9 +534,10 @@ private extension PresentationMLWriter {
             case vector(PDFSceneVector)
         }
         let nativeImages = page.images.filter {
-            page.usesPageRasterFallback
-                ? $0.canRecreateOnRepairedPage
-                : $0.canRecreateOnLayeredTemplate
+            $0.canRecreate(
+                onPageSafetyNet: page.usesPageRasterFallback,
+                options: options
+            ) && !masterImageKeys.contains(templateImageKey($0))
         }
         let imageOverlays = nativeImages.map { image in
             Overlay.image(

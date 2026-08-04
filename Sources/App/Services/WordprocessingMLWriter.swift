@@ -1,13 +1,18 @@
+import CryptoKit
 import Foundation
 
 struct WordprocessingMLWriter {
     private let emuPerPoint = 12_700.0
     private let twipsPerPoint = 20.0
 
-    func makeParts(scene: PDFSceneDocument) throws -> [OOXMLPart] {
+    func makeParts(
+        scene: PDFSceneDocument,
+        options: DocumentConversionPipelineOptions = .default
+    ) throws -> [OOXMLPart] {
         guard !scene.pages.isEmpty else {
             throw DocumentConversionError.emptyPDF
         }
+        let templatePlan = makeTemplatePlan(scene: scene, options: options)
         var parts: [OOXMLPart] = []
         var relationships: [(id: String, type: String, target: String)] = [
             (
@@ -31,43 +36,105 @@ struct WordprocessingMLWriter {
                 "fontTable.xml"
             )
         ]
-        var pageXML = ""
         var nextRelationshipID = 5
         var nextDocPrID = 1
-
-        for page in scene.pages {
-            try Task.checkCancellation()
-            let imageName = "word/media/image\(page.pageIndex + 1).png"
+        var imageAssetNames: [String: String] = [:]
+        let headerRelationshipID: String?
+        if templatePlan.hasHeader {
             let relationshipID = "rId\(nextRelationshipID)"
             nextRelationshipID += 1
-            parts.append(try OOXMLPart(name: imageName, data: page.pageImagePNG))
+            headerRelationshipID = relationshipID
             relationships.append(
                 (
                     relationshipID,
-                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
-                    "media/image\(page.pageIndex + 1).png"
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
+                    "header1.xml"
                 )
             )
+        } else {
+            headerRelationshipID = nil
+        }
+
+        var headerImageRelationships: [(image: PDFSceneImage, id: String)] = []
+        var nextHeaderRelationshipID = 1
+        var seenHeaderImageKeys = Set<String>()
+        let headerImages = (templatePlan.backgroundImage.map { [$0] } ?? [])
+            + templatePlan.images
+        for image in headerImages {
+            let key = templateImageKey(image)
+            guard seenHeaderImageKeys.insert(key).inserted else { continue }
+            let relationshipID = "rId\(nextHeaderRelationshipID)"
+            nextHeaderRelationshipID += 1
+            let assetName = options.imageGroupingLevel == .split
+                ? "template-object-\(headerImageRelationships.count + 1).png"
+                : OfficeImageAssetGrouping.sharedFilename(for: key)
+            imageAssetNames[key] = assetName
+            parts.append(
+                try OOXMLPart(
+                    name: "word/media/\(assetName)",
+                    data: image.pngData
+                )
+            )
+            headerImageRelationships.append((image, relationshipID))
+        }
+
+        var pageXML = ""
+
+        for page in scene.pages {
+            try Task.checkCancellation()
+            let pageRasterRelationshipID: String?
+            if templatePlan.backgroundImage == nil {
+                let imageName = "word/media/image\(page.pageIndex + 1).png"
+                let relationshipID = "rId\(nextRelationshipID)"
+                nextRelationshipID += 1
+                pageRasterRelationshipID = relationshipID
+                parts.append(try OOXMLPart(name: imageName, data: page.pageImagePNG))
+                relationships.append(
+                    (
+                        relationshipID,
+                        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+                        "media/image\(page.pageIndex + 1).png"
+                    )
+                )
+            } else {
+                pageRasterRelationshipID = nil
+            }
             var imageRelationships: [(image: PDFSceneImage, id: String)] = []
             let nativeImages = page.images.filter {
-                page.usesPageRasterFallback
-                    ? $0.canRecreateOnRepairedPage
-                    : $0.canRecreateOnLayeredTemplate
+                $0.canRecreate(
+                    onPageSafetyNet: page.usesPageRasterFallback,
+                    options: options
+                ) && !templatePlan.imageKeys.contains(templateImageKey($0))
             }
             for (offset, image) in nativeImages.enumerated() {
                 let imageRelationshipID = "rId\(nextRelationshipID)"
                 nextRelationshipID += 1
+                let assetKey = OfficeImageAssetGrouping.key(
+                    image: image,
+                    pageIndex: page.pageIndex,
+                    occurrenceIndex: offset,
+                    level: options.imageGroupingLevel
+                )
+                let assetName: String
+                if let existing = imageAssetNames[assetKey] {
+                    assetName = existing
+                } else {
+                    assetName = options.imageGroupingLevel == .split
+                        ? "object-\(page.pageIndex + 1)-\(offset + 1).png"
+                        : OfficeImageAssetGrouping.sharedFilename(for: assetKey)
+                    imageAssetNames[assetKey] = assetName
+                    parts.append(
+                        try OOXMLPart(
+                            name: "word/media/\(assetName)",
+                            data: image.pngData
+                        )
+                    )
+                }
                 relationships.append(
                     (
                         imageRelationshipID,
                         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
-                        "media/object-\(page.pageIndex + 1)-\(offset + 1).png"
-                    )
-                )
-                parts.append(
-                    try OOXMLPart(
-                        name: "word/media/object-\(page.pageIndex + 1)-\(offset + 1).png",
-                        data: image.pngData
+                        "media/\(assetName)"
                     )
                 )
                 imageRelationships.append((image, imageRelationshipID))
@@ -77,23 +144,57 @@ struct WordprocessingMLWriter {
             let drawings = makePageDrawings(
                 page: page,
                 geometry: pageGeometry,
-                imageRelationshipID: relationshipID,
+                imageRelationshipID: pageRasterRelationshipID,
                 imageRelationships: imageRelationships,
-                nextDocPrID: &nextDocPrID
+                nextDocPrID: &nextDocPrID,
+                options: options,
+                templateTextBoxKeys: templatePlan.textBoxKeys,
+                templateImageKeys: templatePlan.imageKeys
             )
-            let section = page.pageIndex == scene.pages.count - 1
-                ? ""
-                : "<w:sectPr>\(sectionProperties(for: pageGeometry))</w:sectPr>"
-            pageXML += "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"1\" w:lineRule=\"exact\"/>\(section)</w:pPr>\(drawings)</w:p>"
+            let documentText = makeDocumentTextParagraphs(
+                page: page,
+                options: options,
+                templateTextBoxKeys: templatePlan.textBoxKeys
+            )
+            pageXML += "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"1\" w:lineRule=\"exact\"/></w:pPr>\(drawings)</w:p>\(documentText)"
+            if page.pageIndex < scene.pages.count - 1 {
+                pageXML += "<w:p><w:pPr><w:sectPr>\(sectionProperties(for: pageGeometry, headerRelationshipID: headerRelationshipID))</w:sectPr></w:pPr></w:p>"
+            }
         }
 
         let finalGeometry = WordPageGeometry(page: scene.pages.last!)
         let documentXML = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" mc:Ignorable="w14 wp14"><w:body>\(pageXML)<w:sectPr>\(sectionProperties(for: finalGeometry))</w:sectPr></w:body></w:document>
+        <w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" mc:Ignorable="w14 wp14"><w:body>\(pageXML)<w:sectPr>\(sectionProperties(for: finalGeometry, headerRelationshipID: headerRelationshipID))</w:sectPr></w:body></w:document>
         """
         parts.append(try OOXMLPart(name: "word/document.xml", xml: documentXML))
         parts.append(try OOXMLPart(name: "word/_rels/document.xml.rels", xml: relationshipsXML(relationships)))
+        if templatePlan.hasHeader,
+           let firstPage = scene.pages.first {
+            let headerXML = makeHeaderXML(
+                firstPage: firstPage,
+                plan: templatePlan,
+                geometry: WordPageGeometry(page: firstPage),
+                imageRelationships: headerImageRelationships
+            )
+            parts.append(try OOXMLPart(name: "word/header1.xml", xml: headerXML))
+            let headerRelationships: [(id: String, type: String, target: String)] = headerImageRelationships.compactMap { entry in
+                guard let assetName = imageAssetNames[templateImageKey(entry.image)] else {
+                    return nil
+                }
+                return (
+                    id: entry.id,
+                    type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+                    target: "media/\(assetName)"
+                )
+            }
+            parts.append(
+                try OOXMLPart(
+                    name: "word/_rels/header1.xml.rels",
+                    xml: relationshipsXML(headerRelationships)
+                )
+            )
+        }
         parts.append(try OOXMLPart(name: "word/styles.xml", xml: Self.stylesXML))
         parts.append(try OOXMLPart(name: "word/settings.xml", xml: Self.settingsXML))
         parts.append(try OOXMLPart(name: "word/theme/theme1.xml", xml: Self.themeXML))
@@ -106,9 +207,29 @@ struct WordprocessingMLWriter {
         parts.append(try OOXMLPart(name: "docProps/core.xml", xml: Self.coreProperties))
         parts.append(try OOXMLPart(name: "docProps/app.xml", xml: Self.appProperties))
         parts.append(try OOXMLPart(name: "_rels/.rels", xml: Self.rootRelationships))
-        parts.append(try OOXMLPart(name: "[Content_Types].xml", xml: Self.contentTypes(pageCount: scene.pages.count)))
+        parts.append(try OOXMLPart(name: "[Content_Types].xml", xml: Self.contentTypes(pageCount: scene.pages.count, hasHeader: templatePlan.hasHeader)))
         return parts
     }
+}
+
+private struct WordTemplatePlan {
+    let backgroundImage: PDFSceneImage?
+    let textBoxes: [PDFSceneTextBox]
+    let textBoxKeys: Set<String>
+    let images: [PDFSceneImage]
+    let imageKeys: Set<String>
+
+    var hasHeader: Bool {
+        backgroundImage != nil || !textBoxes.isEmpty || !images.isEmpty
+    }
+
+    static let empty = WordTemplatePlan(
+        backgroundImage: nil,
+        textBoxes: [],
+        textBoxKeys: [],
+        images: [],
+        imageKeys: []
+    )
 }
 
 private struct WordPageGeometry {
@@ -133,27 +254,224 @@ private struct WordPageGeometry {
 }
 
 private extension WordprocessingMLWriter {
+    func makeTemplatePlan(
+        scene: PDFSceneDocument,
+        options: DocumentConversionPipelineOptions
+    ) -> WordTemplatePlan {
+        guard options.templatePriority == .repeatedToTemplate,
+              scene.pages.count > 1,
+              let first = scene.pages.first
+        else {
+            return .empty
+        }
+
+        let sameCanvas = scene.pages.allSatisfy {
+            abs($0.width - first.width) <= 0.01
+                && abs($0.height - first.height) <= 0.01
+                && abs($0.cropBox.minX - first.cropBox.minX) <= 0.01
+                && abs($0.cropBox.minY - first.cropBox.minY) <= 0.01
+        }
+
+        let sharedTextFingerprints = scene.pages
+            .map { page in
+                Set(
+                    page.templateObjects
+                        .filter {
+                            $0.role == .sharedTemplate
+                                && $0.id.hasPrefix("template-chrome-")
+                        }
+                        .map(\.sourceFingerprint)
+                )
+            }
+            .dropFirst()
+            .reduce(
+                Set(
+                    first.templateObjects
+                        .filter {
+                            $0.role == .sharedTemplate
+                                && $0.id.hasPrefix("template-chrome-")
+                        }
+                        .map(\.sourceFingerprint)
+                )
+            ) { partial, next in
+                partial.intersection(next)
+            }
+        let firstTextFingerprintByKey = Dictionary(
+            uniqueKeysWithValues: first.templateObjects
+                .filter {
+                    $0.role == .sharedTemplate
+                        && $0.id.hasPrefix("template-chrome-")
+                }
+                .map {
+                    (String($0.id.dropFirst("template-chrome-".count)), $0.sourceFingerprint)
+                }
+        )
+        let textBoxes = first.textBoxes.filter { textBox in
+            guard textBox.role == .templateChrome,
+                  let fingerprint = firstTextFingerprintByKey[textBox.id]
+            else {
+                return false
+            }
+            return sharedTextFingerprints.contains(fingerprint)
+                && textBox.canRecreateOnLayeredTemplate
+        }
+
+        let canPromoteImages = sameCanvas
+            && scene.pages.allSatisfy { !$0.usesPageRasterFallback }
+        let commonImageKeys: Set<String>
+        if canPromoteImages {
+            commonImageKeys = scene.pages
+                .map { page in
+                    Set(
+                        page.images
+                            .filter {
+                                $0.hasVisibleReferenceContribution
+                                    && $0.canRecreate(
+                                        onPageSafetyNet: false,
+                                        options: options
+                                    )
+                            }
+                            .map(templateImageKey)
+                    )
+                }
+                .dropFirst()
+                .reduce(
+                    Set(
+                        first.images
+                            .filter {
+                                $0.hasVisibleReferenceContribution
+                                    && $0.canRecreate(
+                                        onPageSafetyNet: false,
+                                        options: options
+                                    )
+                            }
+                            .map(templateImageKey)
+                    )
+                ) { partial, next in
+                    partial.intersection(next)
+                }
+        } else {
+            commonImageKeys = []
+        }
+
+        let backgroundKey = commonImageKeys.first { key in
+            first.images.contains { image in
+                templateImageKey(image) == key
+                    && image.bounds.minX <= first.cropBox.minX + 0.5
+                    && image.bounds.minY <= first.cropBox.minY + 0.5
+                    && image.bounds.maxX >= first.cropBox.maxX - 0.5
+                    && image.bounds.maxY >= first.cropBox.maxY - 0.5
+                    && !image.hasAlpha
+                    && !image.maskApplied
+            }
+        }
+        let backgroundImage = backgroundKey.flatMap { key in
+            first.images.first { templateImageKey($0) == key }
+        }
+        let images = first.images.filter {
+            let key = templateImageKey($0)
+            return commonImageKeys.contains(key) && key != backgroundKey
+        }
+        let imageKeys = Set(images.map(templateImageKey))
+            .union(backgroundImage.map { [templateImageKey($0)] } ?? [])
+        return WordTemplatePlan(
+            backgroundImage: backgroundImage,
+            textBoxes: textBoxes,
+            textBoxKeys: Set(textBoxes.map(templateTextKey)),
+            images: images,
+            imageKeys: imageKeys
+        )
+    }
+
+    func templateTextKey(_ textBox: PDFSceneTextBox) -> String {
+        "\(textBox.text)|\(textBox.bounds.debugDescription)|\(textBox.alignment.rawValue)"
+    }
+
+    func templateImageKey(_ image: PDFSceneImage) -> String {
+        let digest = SHA256.hash(data: image.pngData)
+            .prefix(16)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let clipDescription = image.clip?.bounds.debugDescription ?? ""
+        return "\(digest)|\(image.bounds.debugDescription)|\(clipDescription)"
+    }
+
+    func makeHeaderXML(
+        firstPage: PDFScenePage,
+        plan: WordTemplatePlan,
+        geometry: WordPageGeometry,
+        imageRelationships: [(image: PDFSceneImage, id: String)]
+    ) -> String {
+        var drawings = ""
+        var nextDocPrID = 1
+        let imageExtent = (
+            cx: emu(geometry.widthPoints),
+            cy: emu(geometry.heightPoints)
+        )
+        if let backgroundImage = plan.backgroundImage,
+           let relationshipID = imageRelationships.first(where: {
+               templateImageKey($0.image) == templateImageKey(backgroundImage)
+           })?.id {
+            drawings += "<w:r><w:drawing>\(imageAnchor(page: firstPage, geometry: geometry, relationshipID: relationshipID, docPrID: nextDocPrID, extent: imageExtent))</w:drawing></w:r>"
+            nextDocPrID += 1
+        }
+        for image in plan.images {
+            guard let relationshipID = imageRelationships.first(where: {
+                templateImageKey($0.image) == templateImageKey(image)
+            })?.id else {
+                continue
+            }
+            let bounds = image.officeBounds
+            let x = emu((bounds.minX - firstPage.cropBox.minX) * geometry.scale)
+            let y = emu((firstPage.height - (bounds.maxY - firstPage.cropBox.minY)) * geometry.scale)
+            let width = emu(max(1, bounds.width * geometry.scale))
+            let height = emu(max(1, bounds.height * geometry.scale))
+            drawings += "<w:r><w:drawing>\(imageAnchor(image: image, x: x, y: y, width: width, height: height, relationshipID: relationshipID, docPrID: nextDocPrID))</w:drawing></w:r>"
+            nextDocPrID += 1
+        }
+        for textBox in plan.textBoxes {
+            let bounds = textBox.officeBounds
+            let x = emu((bounds.minX - firstPage.cropBox.minX) * geometry.scale)
+            let y = emu((firstPage.height - (bounds.maxY - firstPage.cropBox.minY)) * geometry.scale)
+            let width = emu(max(1, bounds.width * geometry.scale))
+            let height = emu(max(1, bounds.height * geometry.scale))
+            drawings += "<w:r><w:drawing>\(textAnchor(textBox: textBox, x: x, y: y, width: width, height: height, docPrID: nextDocPrID, locked: true))</w:drawing></w:r>"
+            nextDocPrID += 1
+        }
+        return """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" mc:Ignorable="w14 wp14"><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr>\(drawings)</w:p></w:hdr>
+        """
+    }
+
     func makePageDrawings(
         page: PDFScenePage,
         geometry: WordPageGeometry,
-        imageRelationshipID: String,
+        imageRelationshipID: String?,
         imageRelationships: [(image: PDFSceneImage, id: String)],
-        nextDocPrID: inout Int
+        nextDocPrID: inout Int,
+        options: DocumentConversionPipelineOptions,
+        templateTextBoxKeys: Set<String>,
+        templateImageKeys: Set<String>
     ) -> String {
         let imageExtent = (
             cx: emu(geometry.widthPoints),
             cy: emu(geometry.heightPoints)
         )
-        var result = "<w:r><w:drawing>\(imageAnchor(page: page, geometry: geometry, relationshipID: imageRelationshipID, docPrID: nextDocPrID, extent: imageExtent))</w:drawing></w:r>"
-        nextDocPrID += 1
+        var result = ""
+        if let imageRelationshipID {
+            result = "<w:r><w:drawing>\(imageAnchor(page: page, geometry: geometry, relationshipID: imageRelationshipID, docPrID: nextDocPrID, extent: imageExtent))</w:drawing></w:r>"
+            nextDocPrID += 1
+        }
         enum Overlay {
             case image(PDFSceneImage, String)
             case vector(PDFSceneVector)
         }
         let nativeImages = page.images.filter {
-            page.usesPageRasterFallback
-                ? $0.canRecreateOnRepairedPage
-                : $0.canRecreateOnLayeredTemplate
+                $0.canRecreate(
+                    onPageSafetyNet: page.usesPageRasterFallback,
+                    options: options
+                ) && !templateImageKeys.contains(templateImageKey($0))
         }
         let imageOverlays = nativeImages.map { image in
             Overlay.image(
@@ -162,9 +480,10 @@ private extension WordprocessingMLWriter {
             )
         }
         let nativeVectors = page.vectors.filter {
-            page.usesPageRasterFallback
-                ? $0.canOverlayOnPageSafetyNet
-                : $0.canRecreateOnLayeredTemplate
+            $0.canRecreate(
+                onPageSafetyNet: page.usesPageRasterFallback,
+                options: options
+            )
         }
         let overlays: [Overlay]
         if page.usesPageRasterFallback {
@@ -216,9 +535,12 @@ private extension WordprocessingMLWriter {
             ? []
             : page.textBoxes.filter {
                 $0.role == .templateChrome && $0.canRecreateOnLayeredTemplate
+                    && !templateTextBoxKeys.contains(templateTextKey($0))
             }
         let contentTextBoxes = page.textBoxes.filter {
-            $0.role == .editableContent && $0.canRecreateOnLayeredTemplate
+            $0.role == .editableContent
+                && $0.canRecreateOnLayeredTemplate
+                && shouldUseFloatingTextBox($0, options: options)
         }
         for textBox in templateTextBoxes {
             let bounds = textBox.officeBounds
@@ -239,6 +561,65 @@ private extension WordprocessingMLWriter {
             nextDocPrID += 1
         }
         return result
+    }
+
+    func makeDocumentTextParagraphs(
+        page: PDFScenePage,
+        options: DocumentConversionPipelineOptions,
+        templateTextBoxKeys: Set<String>
+    ) -> String {
+        guard options.wordTextRepresentation == .documentText else {
+            return ""
+        }
+        return page.textBoxes
+            .filter {
+                $0.role == .editableContent
+                    && $0.canRecreateOnLayeredTemplate
+                    && !templateTextBoxKeys.contains(templateTextKey($0))
+                    && !shouldUseFloatingTextBox($0, options: options)
+            }
+            .map(textBoxContent)
+            .joined()
+    }
+
+    func shouldUseFloatingTextBox(
+        _ textBox: PDFSceneTextBox,
+        options: DocumentConversionPipelineOptions
+    ) -> Bool {
+        guard options.wordTextRepresentation == .documentText else {
+            return true
+        }
+        switch options.wordTextBoxAllowance {
+        case .never:
+            return false
+        case .conservative, .balanced, .permissive:
+            break
+        }
+
+        let fontNames = Set(textBox.lines.flatMap { $0.runs.map(\.fontName) })
+        let hasMixedFonts = fontNames.count > 1
+        let hasTabs = textBox.lines.contains {
+            $0.listTabStop != nil || $0.runs.contains { $0.text.contains("\t") }
+        }
+        let offsets = textBox.lines.map { $0.bounds.minX - textBox.bounds.minX }
+        let indentRange = (offsets.max() ?? 0) - (offsets.min() ?? 0)
+        let referenceSize = max(5, textBox.fontSize)
+        let hasLargeIndentDrift = indentRange > max(6, referenceSize * 0.5)
+        let hasNonLeftMultiLineLayout = textBox.lines.count > 1
+            && textBox.alignment != .left
+
+        switch options.wordTextBoxAllowance {
+        case .never:
+            return false
+        case .conservative:
+            return hasMixedFonts || hasTabs || indentRange > max(12, referenceSize)
+        case .balanced:
+            return hasMixedFonts || hasTabs || hasLargeIndentDrift
+                || hasNonLeftMultiLineLayout
+        case .permissive:
+            return hasMixedFonts || hasTabs || hasLargeIndentDrift
+                || hasNonLeftMultiLineLayout || textBox.lines.count > 1
+        }
     }
 
     func imageAnchor(
@@ -543,9 +924,15 @@ private extension WordprocessingMLWriter {
         return "swiss"
     }
 
-    func sectionProperties(for geometry: WordPageGeometry) -> String {
+    func sectionProperties(
+        for geometry: WordPageGeometry,
+        headerRelationshipID: String? = nil
+    ) -> String {
         let orientation = geometry.widthPoints > geometry.heightPoints ? " w:orient=\"landscape\"" : ""
-        return "<w:pgSz w:w=\"\(geometry.widthTwips)\" w:h=\"\(geometry.heightTwips)\"\(orientation)/><w:pgMar w:top=\"0\" w:right=\"0\" w:bottom=\"0\" w:left=\"0\" w:header=\"0\" w:footer=\"0\" w:gutter=\"0\"/><w:cols w:space=\"0\"/><w:docGrid w:linePitch=\"1\"/>"
+        let header = headerRelationshipID.map {
+            "<w:headerReference w:type=\"default\" r:id=\"\(XMLValue.attribute($0))\"/>"
+        } ?? ""
+        return "\(header)<w:pgSz w:w=\"\(geometry.widthTwips)\" w:h=\"\(geometry.heightTwips)\"\(orientation)/><w:pgMar w:top=\"0\" w:right=\"0\" w:bottom=\"0\" w:left=\"0\" w:header=\"0\" w:footer=\"0\" w:gutter=\"0\"/><w:cols w:space=\"0\"/><w:docGrid w:linePitch=\"1\"/>"
     }
 
     func emu(_ points: CGFloat) -> Int {
@@ -584,14 +971,16 @@ private extension WordprocessingMLWriter {
     static let coreProperties = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><dc:title>KC DeepL PDF 변환</dc:title><dc:creator>KC DeepL</dc:creator><cp:lastModifiedBy>KC DeepL</cp:lastModifiedBy><dcterms:created xsi:type=\"dcterms:W3CDTF\">2000-01-01T00:00:00Z</dcterms:created></cp:coreProperties>"
     static let appProperties = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\"><Application>KC DeepL</Application><AppVersion>1.0</AppVersion></Properties>"
 
-    static func contentTypes(pageCount: Int) -> String {
+    static func contentTypes(pageCount: Int, hasHeader: Bool = false) -> String {
         let overrides = [
             "/word/document.xml|application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
             "/word/styles.xml|application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
             "/word/settings.xml|application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",
             "/word/theme/theme1.xml|application/vnd.openxmlformats-officedocument.theme+xml",
             "/word/fontTable.xml|application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"
-        ]
+        ] + (hasHeader
+            ? ["/word/header1.xml|application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"]
+            : [])
         let images = (1...pageCount).map { _ in "" }.joined()
         _ = images
         let overrideXML = overrides.map { item in

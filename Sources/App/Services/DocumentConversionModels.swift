@@ -57,6 +57,236 @@ enum DocumentConversionFormat: String, CaseIterable, Codable, Identifiable, Send
     }
 }
 
+/// Controls whether repeated page chrome is kept on each page or promoted to
+/// the target document's reusable template layer.  PPTX uses a slide master;
+/// DOCX uses a shared header/footer drawing layer when the geometry is safe.
+enum DocumentTemplatePriority: String, CaseIterable, Codable, Identifiable, Sendable {
+    case perPage = "per-page"
+    case repeatedToTemplate = "repeated-to-template"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .perPage:
+            "페이지별 오브젝트"
+        case .repeatedToTemplate:
+            "템플릿화 우선"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .perPage:
+            "머릿말·꼬리말·배경을 각 페이지에 보존합니다. 원본과 가장 보수적으로 일치합니다."
+        case .repeatedToTemplate:
+            "반복되는 안전한 요소를 PPTX 슬라이드 마스터 또는 DOCX 공통 헤더 레이어로 이동합니다."
+        }
+    }
+}
+
+/// Controls how decoded PDF image assets are represented in the Office
+/// package.  Integration deduplicates identical PNG assets while preserving
+/// each placement as an independently movable Office object.
+enum DocumentImageGroupingLevel: Int, CaseIterable, Codable, Identifiable, Sendable {
+    case split = 0
+    case balanced = 1
+    case integrated = 2
+
+    var id: Int { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .split:
+            "분할 우선"
+        case .balanced:
+            "균형"
+        case .integrated:
+            "통합 우선"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .split:
+            "PDF 이미지 occurrence마다 별도 PNG 자산과 관계를 만듭니다. 개별 편집성이 가장 높습니다."
+        case .balanced:
+            "같은 페이지의 동일 이미지 데이터만 공유하고, 배치된 그림은 각각 유지합니다."
+        case .integrated:
+            "문서 전체의 동일 이미지 데이터를 하나의 미디어 자산으로 공유해 패키지 크기를 줄입니다."
+        }
+    }
+}
+
+/// Presentation-specific text grouping.  The merge operation is geometry
+/// aware: alignment, column position, font scale, and vertical gap must all
+/// satisfy the selected tolerance before separate PDF blocks become one text
+/// box.
+enum PresentationTextBoxMergeLevel: Int, CaseIterable, Codable, Identifiable, Sendable {
+    case separate = 0
+    case balanced = 1
+    case broad = 2
+
+    var id: Int { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .separate:
+            "개별 글상자"
+        case .balanced:
+            "정렬·간격 일치"
+        case .broad:
+            "넓게 병합"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .separate:
+            "PDF가 분리한 블록을 그대로 유지합니다."
+        case .balanced:
+            "같은 정렬·열 위치와 일정한 줄 간격을 가진 인접 블록만 통합합니다."
+        case .broad:
+            "같은 열 안의 가까운 블록까지 통합해 글상자 수를 줄입니다."
+        }
+    }
+}
+
+/// DOCX can either preserve the exact floating text-box geometry or emit
+/// ordinary Word text paragraphs for easier document editing and reflow.
+enum WordTextRepresentation: String, CaseIterable, Codable, Identifiable, Sendable {
+    case textBoxes = "text-boxes"
+    case documentText = "document-text"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .textBoxes:
+            "모든 글상자"
+        case .documentText:
+            "문서 Text"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .textBoxes:
+            "PPT처럼 원본 위치와 크기를 우선해 모든 내용을 편집 가능한 글상자로 배치합니다."
+        case .documentText:
+            "일반 Word 문단으로 출력해 문서 흐름·검색·재배치를 우선합니다."
+        }
+    }
+}
+
+/// When DOCX is in ordinary-document-text mode, this tolerance decides when
+/// a structurally difficult block may fall back to a floating text box.
+enum WordTextBoxAllowance: Int, CaseIterable, Codable, Identifiable, Sendable {
+    case never = 0
+    case conservative = 1
+    case balanced = 2
+    case permissive = 3
+
+    var id: Int { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .never:
+            "허용 안 함"
+        case .conservative:
+            "보수적"
+        case .balanced:
+            "균형"
+        case .permissive:
+            "허용 범위 넓게"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .never:
+            "구조가 복잡해도 일반 문단으로 유지합니다. 위치가 달라질 수 있습니다."
+        case .conservative:
+            "혼합 글꼴·탭·큰 들여쓰기처럼 문단으로 손실될 가능성이 높은 경우만 허용합니다."
+        case .balanced:
+            "정렬·들여쓰기·줄 간격을 재현하기 어려운 블록에 글상자를 허용합니다."
+        case .permissive:
+            "원본 위치 보존을 위해 대부분의 비정형 블록을 글상자로 보존합니다."
+        }
+    }
+}
+
+/// Options consumed by extraction and both OOXML writers.  Keeping this
+/// target-neutral avoids a PPT-only decision leaking into the Word path.
+struct DocumentConversionPipelineOptions: Equatable, Sendable {
+    var templatePriority: DocumentTemplatePriority = .perPage
+    var imageGroupingLevel: DocumentImageGroupingLevel = .split
+    var textBoxMergeLevel: PresentationTextBoxMergeLevel = .separate
+    var wordTextRepresentation: WordTextRepresentation = .textBoxes
+    var wordTextBoxAllowance: WordTextBoxAllowance = .balanced
+    var preserveNativeVectors = true
+    var preserveAlphaMasks = true
+
+    static let `default` = DocumentConversionPipelineOptions()
+}
+
+struct PresentationConversionOptions: Codable, Equatable, Sendable {
+    var templatePriority: DocumentTemplatePriority = .perPage
+    var textBoxMergeLevel: PresentationTextBoxMergeLevel = .separate
+    var imageGroupingLevel: DocumentImageGroupingLevel = .split
+    var preserveNativeVectors = true
+    var preserveAlphaMasks = true
+
+    var pipeline: DocumentConversionPipelineOptions {
+        DocumentConversionPipelineOptions(
+            templatePriority: templatePriority,
+            imageGroupingLevel: imageGroupingLevel,
+            textBoxMergeLevel: textBoxMergeLevel,
+            wordTextRepresentation: .textBoxes,
+            wordTextBoxAllowance: .balanced,
+            preserveNativeVectors: preserveNativeVectors,
+            preserveAlphaMasks: preserveAlphaMasks
+        )
+    }
+}
+
+struct WordConversionOptions: Codable, Equatable, Sendable {
+    var templatePriority: DocumentTemplatePriority = .perPage
+    var textRepresentation: WordTextRepresentation = .textBoxes
+    var textBoxAllowance: WordTextBoxAllowance = .balanced
+    var imageGroupingLevel: DocumentImageGroupingLevel = .split
+    var preserveNativeVectors = true
+    var preserveAlphaMasks = true
+
+    var pipeline: DocumentConversionPipelineOptions {
+        DocumentConversionPipelineOptions(
+            templatePriority: templatePriority,
+            imageGroupingLevel: imageGroupingLevel,
+            textBoxMergeLevel: .separate,
+            wordTextRepresentation: textRepresentation,
+            wordTextBoxAllowance: textBoxAllowance,
+            preserveNativeVectors: preserveNativeVectors,
+            preserveAlphaMasks: preserveAlphaMasks
+        )
+    }
+}
+
+struct DocumentConversionOptions: Codable, Equatable, Sendable {
+    var presentation = PresentationConversionOptions()
+    var word = WordConversionOptions()
+
+    static let `default` = DocumentConversionOptions()
+
+    func pipeline(for format: DocumentConversionFormat) -> DocumentConversionPipelineOptions {
+        switch format {
+        case .pptx:
+            presentation.pipeline
+        case .docx:
+            word.pipeline
+        }
+    }
+}
+
 enum DocumentConversionStage: Equatable {
     case idle
     case preparing
@@ -283,6 +513,18 @@ struct PDFSceneImage {
         return clipped.isNull || clipped.width <= 0 || clipped.height <= 0
             ? bounds
             : clipped
+    }
+
+    func canRecreate(
+        onPageSafetyNet: Bool,
+        options: DocumentConversionPipelineOptions
+    ) -> Bool {
+        guard options.preserveAlphaMasks || (!hasAlpha && !maskApplied) else {
+            return false
+        }
+        return onPageSafetyNet
+            ? canRecreateOnRepairedPage
+            : canRecreateOnLayeredTemplate
     }
 }
 
@@ -580,6 +822,16 @@ struct PDFSceneVector {
     /// template and is composited exactly once by Office.
     var canRecreateOnLayeredTemplate: Bool {
         nativeEligible
+    }
+
+    func canRecreate(
+        onPageSafetyNet: Bool,
+        options: DocumentConversionPipelineOptions
+    ) -> Bool {
+        guard options.preserveNativeVectors else { return false }
+        return onPageSafetyNet
+            ? canOverlayOnPageSafetyNet
+            : canRecreateOnLayeredTemplate
     }
 }
 

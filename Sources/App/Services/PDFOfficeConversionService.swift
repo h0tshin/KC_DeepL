@@ -18,21 +18,30 @@ struct PDFOfficeConversionService {
     func convert(
         sourceURL: URL,
         format: DocumentConversionFormat,
-        destinationURL: URL
+        destinationURL: URL,
+        options: DocumentConversionOptions = .default
     ) throws -> DocumentConversionReport {
         try Task.checkCancellation()
+        let pipelineOptions = options.pipeline(for: format)
         let scene = try extractor.extract(
             sourceURL: sourceURL,
-            layoutTarget: format.officeLayoutTarget
+            layoutTarget: format.officeLayoutTarget,
+            options: pipelineOptions
         )
         try Task.checkCancellation()
 
         let parts: [OOXMLPart]
         switch format {
         case .pptx:
-            parts = try PresentationMLWriter().makeParts(scene: scene)
+            parts = try PresentationMLWriter().makeParts(
+                scene: scene,
+                options: pipelineOptions
+            )
         case .docx:
-            parts = try WordprocessingMLWriter().makeParts(scene: scene)
+            parts = try WordprocessingMLWriter().makeParts(
+                scene: scene,
+                options: pipelineOptions
+            )
         }
         try Task.checkCancellation()
         do {
