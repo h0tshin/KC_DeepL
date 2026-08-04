@@ -53,6 +53,21 @@ struct DocumentConversionSection: View {
             .accessibilityValue(conversionViewModel.selectedFormat.displayName)
             .disabled(!isPDF || isBlockedByTranslation || conversionViewModel.isBusy)
 
+            Text("저장 위치")
+                .font(.headline)
+
+            Picker("위치", selection: $downloadLocation) {
+                Text("데스크탑").tag(FileTranslationOutputLocation.desktop.rawValue)
+                Text("다운로드").tag(FileTranslationOutputLocation.downloads.rawValue)
+                Text("매번 묻기").tag(FileTranslationOutputLocation.ask.rawValue)
+            }
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+
+            Text("원본 PDF는 절대 덮어쓰지 않습니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Text("편집 가능한 텍스트·도형을 복원하고, PDF의 투명도·마스크가 복합적인 영역은 페이지 RGBA 이미지로 보존합니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

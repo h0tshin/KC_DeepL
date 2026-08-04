@@ -118,6 +118,14 @@ struct ContentView: View {
                             sourceLanguage: sourceLanguageBinding,
                             targetLanguage: targetLanguageBinding
                         )
+                    } else if selectedMode == .conversion {
+                        FileTranslationWorkspace(
+                            viewModel: fileTranslationViewModel,
+                            conversionViewModel: documentConversionViewModel,
+                            sourceLanguage: sourceLanguageBinding,
+                            targetLanguage: targetLanguageBinding,
+                            mode: .conversion
+                        )
                     } else {
                         LanguageBar(
                             sourceLanguage: sourceLanguageBinding,
@@ -253,7 +261,7 @@ struct ContentView: View {
             }
             if newMode == .comparison {
                 viewModel.cancelPendingTranslation()
-            } else if newMode == .files {
+            } else if newMode == .files || newMode == .conversion {
                 viewModel.cancelPendingTranslation()
                 showTools = false
             } else if newMode == .text {
@@ -450,6 +458,7 @@ private enum TranslationMode: String, CaseIterable, Identifiable {
     case comparison = "번역비교"
     case write = "Live 번역"
     case files = "파일 번역"
+    case conversion = "문서변환"
     case history = "기록"
 
     var id: String { rawValue }
@@ -464,6 +473,8 @@ private enum TranslationMode: String, CaseIterable, Identifiable {
             "speaker.wave.2"
         case .files:
             "doc.text"
+        case .conversion:
+            "arrow.triangle.2.circlepath.doc.on.clipboard"
         case .history:
             "clock.arrow.circlepath"
         }

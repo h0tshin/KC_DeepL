@@ -5,11 +5,17 @@ import Translation
 import UniformTypeIdentifiers
 import KCDeepLCore
 
+enum FileWorkspaceMode: Equatable {
+    case translation
+    case conversion
+}
+
 struct FileTranslationWorkspace: View {
     @ObservedObject var viewModel: FileTranslationViewModel
     @ObservedObject var conversionViewModel: DocumentConversionViewModel
     @Binding var sourceLanguage: LanguageOption
     @Binding var targetLanguage: LanguageOption
+    var mode: FileWorkspaceMode = .translation
 
     @AppStorage(PreferenceKeys.fileTranslationEngine)
     private var engineRawValue = AppDefaults.defaultFileTranslationEngine.rawValue
@@ -86,6 +92,27 @@ struct FileTranslationWorkspace: View {
         viewModel.documentKind ?? .pdf
     }
 
+    private var isConversionMode: Bool {
+        mode == .conversion
+    }
+
+    private var workspaceTitle: String {
+        isConversionMode
+            ? "PDF -> PPT / DOC 변환"
+            : "PDF 문서의 기존형식을 유지하고 번역합니다"
+    }
+
+    private var importContentTypes: [UTType] {
+        if isConversionMode {
+            return [.pdf]
+        }
+        return [
+            .pdf,
+            .plainText,
+            UTType(filenameExtension: "md") ?? .plainText
+        ]
+    }
+
     private var isAnyFileOperationBusy: Bool {
         viewModel.isBusy || conversionViewModel.isBusy
     }
@@ -144,6 +171,16 @@ struct FileTranslationWorkspace: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            HStack {
+                Text(workspaceTitle)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Spacer()
+            }
+            .padding(.horizontal, 18)
+            .frame(height: 42)
+            .background(AppTheme.panelBackground)
+
             fileToolbar
             Divider()
 
@@ -161,11 +198,7 @@ struct FileTranslationWorkspace: View {
         .background(AppTheme.panelBackground)
         .fileImporter(
             isPresented: $isShowingImporter,
-            allowedContentTypes: [
-                .pdf,
-                .plainText,
-                UTType(filenameExtension: "md") ?? .plainText
-            ],
+            allowedContentTypes: importContentTypes,
             allowsMultipleSelection: false
         ) { result in
             switch result {
@@ -178,7 +211,7 @@ struct FileTranslationWorkspace: View {
             }
         }
         .task(id: engine) {
-            guard engine == .codexAppServer else {
+            guard !isConversionMode, engine == .codexAppServer else {
                 return
             }
             await viewModel.refreshCodexModels()
@@ -200,50 +233,70 @@ struct FileTranslationWorkspace: View {
 
     private var fileToolbar: some View {
         HStack(spacing: 12) {
-            Menu {
-                ForEach(LanguageOption.sourceLanguages) { language in
-                    Button(language.displayName) {
-                        sourceLanguage = language
-                    }
-                }
-            } label: {
-                LanguageSelectionLabel(language: sourceLanguage)
-            }
-            .menuStyle(.borderlessButton)
-            .frame(width: 160)
-
-            Button(action: swapLanguages) {
-                Image(systemName: "arrow.left.arrow.right")
+            if isConversionMode {
+                Label("PDF 문서", systemImage: "doc.richtext")
                     .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 28, height: 28)
-            }
-            .buttonStyle(.plain)
-            .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 6))
-            .help("언어 바꾸기")
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(
+                        AppTheme.controlBackground,
+                        in: RoundedRectangle(cornerRadius: 7)
+                    )
 
-            Menu {
-                ForEach(LanguageOption.targetLanguages) { language in
-                    Button(language.displayName) {
-                        targetLanguage = language
+                Text("편집 가능한 PPTX 또는 DOCX로 저장")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Menu {
+                    ForEach(LanguageOption.sourceLanguages) { language in
+                        Button(language.displayName) {
+                            sourceLanguage = language
+                        }
+                    }
+                } label: {
+                    LanguageSelectionLabel(language: sourceLanguage)
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 160)
+
+                Button(action: swapLanguages) {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 6))
+                .help("언어 바꾸기")
+
+                Menu {
+                    ForEach(LanguageOption.targetLanguages) { language in
+                        Button(language.displayName) {
+                            targetLanguage = language
+                        }
+                    }
+                } label: {
+                    LanguageSelectionLabel(language: targetLanguage)
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 160)
+
+                Spacer()
+
+                Picker("번역 엔진", selection: engineBinding) {
+                    ForEach(FileTranslationEngine.allCases) { candidate in
+                        Text(engineTitle(candidate)).tag(candidate)
                     }
                 }
-            } label: {
-                LanguageSelectionLabel(language: targetLanguage)
+                .labelsHidden()
+                .frame(width: 210)
             }
-            .menuStyle(.borderlessButton)
-            .frame(width: 160)
 
-            Spacer()
-
-            Picker("번역 엔진", selection: engineBinding) {
-                ForEach(FileTranslationEngine.allCases) { candidate in
-                    Text(engineTitle(candidate)).tag(candidate)
-                }
+            if !isConversionMode {
+                Spacer(minLength: 0)
             }
-            .labelsHidden()
-            .frame(width: 210)
 
-            Button("파일 선택", systemImage: "doc.badge.plus") {
+            Button(isConversionMode ? "PDF 파일 선택" : "파일 선택", systemImage: "doc.badge.plus") {
                 isShowingImporter = true
             }
             .keyboardShortcut("o", modifiers: [.command])
@@ -344,6 +397,7 @@ struct FileTranslationWorkspace: View {
             FileDropZone(
                 isTargeted: isDropTargeted,
                 isAnalyzing: viewModel.stage == .analyzing,
+                isConversionMode: isConversionMode,
                 onChoose: { isShowingImporter = true }
             )
             .dropDestination(for: URL.self) { urls, _ in
@@ -519,33 +573,35 @@ struct FileTranslationWorkspace: View {
                     documentSummary(filename: filename)
                 }
 
-                if viewModel.preflightBlockingMessage != nil
-                    || viewModel.requiresIncompleteOCRAcknowledgement {
-                    readinessSection
-                }
+                if isConversionMode {
+                    DocumentConversionSection(
+                        conversionViewModel: conversionViewModel,
+                        fileTranslationViewModel: viewModel,
+                        downloadLocation: $downloadLocation
+                    )
+                } else {
+                    if viewModel.preflightBlockingMessage != nil
+                        || viewModel.requiresIncompleteOCRAcknowledgement {
+                        readinessSection
+                    }
 
-                DocumentConversionSection(
-                    conversionViewModel: conversionViewModel,
-                    fileTranslationViewModel: viewModel,
-                    downloadLocation: $downloadLocation
-                )
+                    engineSettings
+                        .disabled(isAnyFileOperationBusy)
+                    outputSettings
+                        .disabled(isAnyFileOperationBusy)
 
-                engineSettings
-                    .disabled(isAnyFileOperationBusy)
-                outputSettings
-                    .disabled(isAnyFileOperationBusy)
+                    if let errorMessage = viewModel.errorMessage {
+                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
-                if let errorMessage = viewModel.errorMessage {
-                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                    actionSection
 
-                actionSection
-
-                if !viewModel.warnings.isEmpty {
-                    warningSection
+                    if !viewModel.warnings.isEmpty {
+                        warningSection
+                    }
                 }
             }
             .padding(20)
@@ -558,11 +614,15 @@ struct FileTranslationWorkspace: View {
             Label(filename, systemImage: "doc.richtext")
                 .font(.headline)
                 .lineLimit(2)
-            Text(renderModeSummary)
+            Text(isConversionMode ? conversionSummary : renderModeSummary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private var conversionSummary: String {
+        "PDF의 텍스트·이미지·도형을 편집 가능한 파워포인트 또는 워드 문서로 변환합니다."
     }
 
     private var renderModeSummary: String {
@@ -998,16 +1058,23 @@ struct FileTranslationWorkspace: View {
         HStack(spacing: 8) {
             Image(systemName: statusIcon)
                 .foregroundStyle(statusColor)
-            Text(viewModel.statusMessage)
+            Text(isConversionMode ? conversionViewModel.statusMessage : viewModel.statusMessage)
                 .lineLimit(1)
             Spacer()
-            if viewModel.translatedPageCount > 0 || viewModel.skippedPageCount > 0 {
-                Text("완료 \(viewModel.translatedPageCount) · 건너뜀 \(viewModel.skippedPageCount)")
-                    .foregroundStyle(.secondary)
-            }
-            if viewModel.stage == .completed {
-                Text(viewModel.isTextDocument ? "출력 텍스트 구조 보존 완료" : "출력 PDF 구조 재검증 완료")
-                    .foregroundStyle(AppTheme.success)
+            if isConversionMode {
+                if conversionViewModel.stage == .completed {
+                    Text("Office 문서 저장 완료")
+                        .foregroundStyle(AppTheme.success)
+                }
+            } else {
+                if viewModel.translatedPageCount > 0 || viewModel.skippedPageCount > 0 {
+                    Text("완료 \(viewModel.translatedPageCount) · 건너뜀 \(viewModel.skippedPageCount)")
+                        .foregroundStyle(.secondary)
+                }
+                if viewModel.stage == .completed {
+                    Text(viewModel.isTextDocument ? "출력 텍스트 구조 보존 완료" : "출력 PDF 구조 재검증 완료")
+                        .foregroundStyle(AppTheme.success)
+                }
             }
         }
         .font(.system(size: 12, weight: .medium))
@@ -1017,28 +1084,52 @@ struct FileTranslationWorkspace: View {
     }
 
     private var statusIcon: String {
+        if isConversionMode {
+            switch conversionViewModel.stage {
+            case .completed:
+                return "checkmark.circle.fill"
+            case .failed:
+                return "exclamationmark.triangle.fill"
+            case .cancelled:
+                return "xmark.circle"
+            case .preparing, .converting, .validating:
+                return "arrow.triangle.2.circlepath"
+            case .idle:
+                return "circle.fill"
+            }
+        }
         switch viewModel.stage {
         case .completed:
-            "checkmark.circle.fill"
+            return "checkmark.circle.fill"
         case .failed:
-            "exclamationmark.triangle.fill"
+            return "exclamationmark.triangle.fill"
         case .cancelled:
-            "xmark.circle"
+            return "xmark.circle"
         case .analyzing, .waitingForApple, .translating, .composing:
-            "arrow.triangle.2.circlepath"
+            return "arrow.triangle.2.circlepath"
         case .idle, .ready:
-            "circle.fill"
+            return "circle.fill"
         }
     }
 
     private var statusColor: Color {
+        if isConversionMode {
+            switch conversionViewModel.stage {
+            case .completed:
+                return AppTheme.success
+            case .failed:
+                return .orange
+            default:
+                return .secondary
+            }
+        }
         switch viewModel.stage {
         case .completed:
-            AppTheme.success
+            return AppTheme.success
         case .failed:
-            .orange
+            return .orange
         default:
-            .secondary
+            return .secondary
         }
     }
 
@@ -1112,6 +1203,9 @@ struct FileTranslationWorkspace: View {
     }
 
     private func isSupportedDocument(_ url: URL) -> Bool {
+        if isConversionMode {
+            return url.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame
+        }
         if url.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame {
             return true
         }
@@ -1181,6 +1275,7 @@ private struct LanguageSelectionLabel: View {
 private struct FileDropZone: View {
     let isTargeted: Bool
     let isAnalyzing: Bool
+    let isConversionMode: Bool
     let onChoose: () -> Void
 
     var body: some View {
@@ -1195,9 +1290,15 @@ private struct FileDropZone: View {
             }
 
             VStack(spacing: 7) {
-                Text(isAnalyzing ? "파일을 분석하는 중입니다" : "PDF·TXT·Markdown 파일을 여기에 놓으세요")
+                Text(isAnalyzing
+                    ? "파일을 분석하는 중입니다"
+                    : isConversionMode
+                        ? "PDF 파일을 여기에 놓으세요"
+                        : "PDF·TXT·Markdown 파일을 여기에 놓으세요")
                     .font(.title2.bold())
-                Text("PDF는 페이지 위치를, 텍스트 파일은 구조와 줄 순서를 보존해 번역합니다.")
+                Text(isConversionMode
+                    ? "페이지 배치를 유지한 편집 가능한 Office 문서로 변환합니다."
+                    : "PDF는 페이지 위치를, 텍스트 파일은 구조와 줄 순서를 보존해 번역합니다.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -1207,7 +1308,10 @@ private struct FileDropZone: View {
                 .controlSize(.large)
                 .disabled(isAnalyzing)
 
-            Label("지원 형식: PDF · TXT · MD", systemImage: "checkmark.seal")
+            Label(
+                isConversionMode ? "지원 형식: PDF" : "지원 형식: PDF · TXT · MD",
+                systemImage: "checkmark.seal"
+            )
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
