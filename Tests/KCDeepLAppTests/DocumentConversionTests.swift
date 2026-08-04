@@ -1330,6 +1330,23 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertTrue(documentXML.contains("lIns=\"25400\""))
         XCTAssertTrue(fontXML.contains("<w:font w:name=\"Arial\""))
 
+        var documentTextOptions = DocumentConversionPipelineOptions.default
+        documentTextOptions.wordTextRepresentation = .documentText
+        documentTextOptions.wordTextBoxAllowance = .never
+        let documentTextParts = try WordprocessingMLWriter().makeParts(
+            scene: scene,
+            options: documentTextOptions
+        )
+        let documentTextPart = try XCTUnwrap(
+            documentTextParts.first(where: { $0.name == "word/document.xml" })
+        )
+        let documentTextXML = try XCTUnwrap(
+            String(data: documentTextPart.data, encoding: .utf8)
+        )
+        XCTAssertFalse(documentTextXML.contains("<w:txbx"))
+        XCTAssertTrue(documentTextXML.contains("<w:br/>"))
+        XCTAssertTrue(documentTextXML.contains("w:lineRule=\"exact\""))
+
         XCTAssertEqual(
             textBox.paragraphInsets(for: secondLine),
             PDFSceneTextParagraphInsets(leading: 18, trailing: 0)
@@ -1400,6 +1417,8 @@ final class DocumentConversionTests: XCTestCase {
         )
         let masterXML = try XCTUnwrap(String(data: masterPart.data, encoding: .utf8))
         XCTAssertTrue(masterXML.contains("Shared chrome"))
+        XCTAssertTrue(masterXML.contains("<p:bg>"))
+        XCTAssertTrue(masterXML.contains("p:sldLayoutId id=\"2147483649\""))
         let masterRelationships = try XCTUnwrap(
             presentationParts.first(where: {
                 $0.name == "ppt/slideMasters/_rels/slideMaster1.xml.rels"
@@ -1414,6 +1433,7 @@ final class DocumentConversionTests: XCTestCase {
         )
         let slideXML = try XCTUnwrap(String(data: slidePart.data, encoding: .utf8))
         XCTAssertFalse(slideXML.contains("Shared chrome"))
+        XCTAssertTrue(slideXML.contains("showMasterSp=\"1\""))
 
         let wordParts = try WordprocessingMLWriter().makeParts(
             scene: scene,

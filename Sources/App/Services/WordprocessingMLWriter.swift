@@ -153,6 +153,7 @@ struct WordprocessingMLWriter {
             )
             let documentText = makeDocumentTextParagraphs(
                 page: page,
+                geometry: pageGeometry,
                 options: options,
                 templateTextBoxKeys: templatePlan.textBoxKeys
             )
@@ -565,21 +566,157 @@ private extension WordprocessingMLWriter {
 
     func makeDocumentTextParagraphs(
         page: PDFScenePage,
+        geometry: WordPageGeometry,
         options: DocumentConversionPipelineOptions,
         templateTextBoxKeys: Set<String>
     ) -> String {
         guard options.wordTextRepresentation == .documentText else {
             return ""
         }
-        return page.textBoxes
+        let boxes = page.textBoxes
             .filter {
                 $0.role == .editableContent
                     && $0.canRecreateOnLayeredTemplate
                     && !templateTextBoxKeys.contains(templateTextKey($0))
                     && !shouldUseFloatingTextBox($0, options: options)
             }
-            .map(textBoxContent)
-            .joined()
+            // PDF content streams are not required to be emitted in visual
+            // order. Word's normal text flow is, so restore the page's
+            // top-to-bottom reading order before building paragraphs.
+            .sorted {
+                if abs($0.bounds.maxY - $1.bounds.maxY) > 0.01 {
+                    return $0.bounds.maxY > $1.bounds.maxY
+                }
+                return $0.bounds.minX < $1.bounds.minX
+            }
+
+        struct DocumentBlock {
+            let box: PDFSceneTextBox
+            let lines: [PDFSceneTextLine]
+            let top: CGFloat
+            let bottom: CGFloat
+        }
+
+        let blocks: [DocumentBlock] = boxes.map { box in
+            let sourceLines = box.lines.isEmpty
+                ? [
+                    PDFSceneTextLine(
+                        id: box.id,
+                        text: box.text,
+                        bounds: box.bounds,
+                        runs: [
+                            PDFSceneTextRun(
+                                PDFTextRun(
+                                    text: box.text,
+                                    fontName: box.fontName,
+                                    fontSize: box.fontSize,
+                                    textColor: box.color,
+                                    isOfficeCompatible: true
+                                )
+                            )
+                        ],
+                        sourceMaskBounds: box.bounds,
+                        sourceMaskIsSafe: true,
+                        hasVisibleInk: true,
+                        extractionSource: box.extractionSource
+                    )
+                ]
+                : box.lines
+            let top = max(0, page.cropBox.maxY - sourceLines[0].bounds.maxY)
+                * geometry.scale
+            let last = sourceLines[sourceLines.count - 1]
+            let bottom = min(
+                geometry.heightPoints,
+                page.cropBox.maxY - last.bounds.minY
+            ) * geometry.scale
+            return DocumentBlock(
+                box: box,
+                lines: sourceLines,
+                top: top,
+                bottom: max(top + 0.5, bottom)
+            )
+        }
+
+        guard !blocks.isEmpty else { return "" }
+
+        var result = ""
+        var cursorBottom: CGFloat = 0
+        for block in blocks {
+            let box = block.box
+            let lines = block.lines
+            let fontSize = lines.flatMap(\.runs).map(\.fontSize).max()
+                ?? box.fontSize
+            let advances = zip(lines, lines.dropFirst()).map { previous, next in
+                max(0, previous.bounds.maxY - next.bounds.maxY)
+                    * geometry.scale
+            }.filter { $0 > 0 }
+            let sortedAdvances = advances.sorted()
+            let sourceLineAdvance = sortedAdvances.isEmpty
+                ? 0
+                : sortedAdvances[sortedAdvances.count / 2]
+            let lineHeight = max(
+                fontSize * geometry.scale * 1.02,
+                sourceLineAdvance
+            )
+            let before = max(0, block.top - cursorBottom)
+
+            // A single Word paragraph with explicit line breaks preserves a
+            // PDF text block as normal document text while avoiding the
+            // extra paragraph-height that Word inserts for every visual PDF
+            // line.  A hanging indent represents the common bullet/tab shape
+            // without manufacturing a floating textbox.
+            let firstX = lines[0].bounds.minX
+            let continuationXs = lines.dropFirst().map(\.bounds.minX).sorted()
+            let continuationX = continuationXs.isEmpty
+                ? firstX
+                : continuationXs[continuationXs.count / 2]
+            let left = max(
+                0,
+                (continuationX - page.cropBox.minX) * geometry.scale
+            )
+            let firstLine = (firstX - continuationX) * geometry.scale
+
+            // Use the complete source text block as the Word line width, not
+            // the tight ink width of the last PDF line. A small metric reserve
+            // prevents Word's font metrics from wrapping the final word.
+            let metricReserve = max(8, fontSize * geometry.scale * 1.25)
+            let blockRight = min(
+                page.cropBox.maxX,
+                box.officeBounds.maxX + metricReserve
+            )
+            let right = max(
+                0,
+                (page.cropBox.maxX - blockRight) * geometry.scale
+            )
+            let indentation = "<w:ind w:left=\"\(twips(left))\" w:right=\"\(twips(right))\" w:firstLine=\"\(signedTwips(firstLine))\"/>"
+            let alignment: String
+            switch box.alignment {
+            case .left: alignment = "left"
+            case .center: alignment = "center"
+            case .right: alignment = "right"
+            }
+            let tabs = wordTabStops(for: lines[0], in: box)
+            let content = lines.enumerated().map { index, line in
+                let lineBreak = index == 0 ? "" : "<w:br/>"
+                let runs = line.runs.isEmpty
+                    ? wordRun(
+                        PDFSceneTextRun(
+                            PDFTextRun(
+                                text: line.text,
+                                fontName: box.fontName,
+                                fontSize: box.fontSize,
+                                textColor: box.color,
+                                isOfficeCompatible: true
+                            )
+                        )
+                    )
+                    : line.runs.map(wordRun).joined()
+                return lineBreak + runs
+            }.joined()
+            result += "<w:p><w:pPr>\(tabs)<w:spacing w:before=\"\(twips(before))\" w:after=\"0\" w:line=\"\(twips(lineHeight))\" w:lineRule=\"exact\"/>\(indentation)<w:jc w:val=\"\(alignment)\"/></w:pPr>\(content)</w:p>"
+            cursorBottom = block.top + lineHeight * CGFloat(lines.count)
+        }
+        return result
     }
 
     func shouldUseFloatingTextBox(
@@ -945,6 +1082,10 @@ private extension WordprocessingMLWriter {
 
     func twips(_ points: CGFloat) -> Int {
         max(0, Int((Double(points) * twipsPerPoint).rounded()))
+    }
+
+    func signedTwips(_ points: CGFloat) -> Int {
+        Int((Double(points) * twipsPerPoint).rounded())
     }
 
     func rgbHex(_ color: PDFTextColor) -> String {

@@ -6,15 +6,30 @@ struct PresentationMLWriter {
 
     private struct MasterPlan {
         let backgroundPage: PDFScenePage?
+        /// Fingerprint of the repeated page-level background represented by
+        /// `backgroundPage`.  A deck can contain title/divider slides with a
+        /// different background, so only slides carrying this fingerprint may
+        /// omit their local raster and reveal the master layer.
+        let backgroundTemplateFingerprint: String?
+        /// A decoded, repeated full-page PDF image that can be used as a
+        /// true master background. Unlike a page screenshot this leaves the
+        /// slide-local text/images above it editable.
+        let backgroundImage: PDFSceneImage?
         let textBoxes: [PDFSceneTextBox]
         let textBoxKeys: Set<String>
+        let vectors: [PDFSceneVector]
+        let vectorKeys: Set<String>
         let images: [PDFSceneImage]
         let imageKeys: Set<String>
 
         static let empty = MasterPlan(
             backgroundPage: nil,
+            backgroundTemplateFingerprint: nil,
+            backgroundImage: nil,
             textBoxes: [],
             textBoxKeys: [],
+            vectors: [],
+            vectorKeys: [],
             images: [],
             imageKeys: []
         )
@@ -49,7 +64,12 @@ struct PresentationMLWriter {
         for page in scene.pages {
             try Task.checkCancellation()
             let slideNumber = page.pageIndex + 1
-            if masterPlan.backgroundPage == nil {
+            let omitPageRaster = shouldOmitPageRaster(
+                page: page,
+                masterPlan: masterPlan
+            )
+            let includePageRaster = !omitPageRaster
+            if includePageRaster {
                 let mediaName = "ppt/media/image\(slideNumber).png"
                 parts.append(try OOXMLPart(name: mediaName, data: page.pageImagePNG))
             }
@@ -61,7 +81,7 @@ struct PresentationMLWriter {
                     "../slideLayouts/slideLayout1.xml"
                 )
             ]
-            if masterPlan.backgroundPage == nil {
+            if includePageRaster {
                 relationships.append(
                     (
                         "rId2",
@@ -117,8 +137,9 @@ struct PresentationMLWriter {
                 slideHeight: slideHeight,
                 imageRelationships: imageRelationships,
                 options: options,
-                includePageRaster: masterPlan.backgroundPage == nil,
+                includePageRaster: includePageRaster,
                 masterTextBoxKeys: masterPlan.textBoxKeys,
+                masterVectorKeys: masterPlan.vectorKeys,
                 masterImageKeys: masterPlan.imageKeys
             )
             parts.append(try OOXMLPart(name: "ppt/slides/slide\(slideNumber).xml", xml: slideXML))
@@ -205,7 +226,7 @@ struct PresentationMLWriter {
 
         let presentationXML = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"\(embeddingAttributes)><p:sldMasterIdLst><p:sldMasterId id="1" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst>\(slideIDs)</p:sldIdLst><p:sldSz cx="\(slideWidth)" cy="\(slideHeight)" type="custom"/><p:notesSz cx="\(slideWidth)" cy="\(slideHeight)"/>\(embeddedFontListXML)<p:defaultTextStyle><a:defPPr><a:defRPr lang="en-US"/></a:defPPr></p:defaultTextStyle></p:presentation>
+        <p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"\(embeddingAttributes)><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst>\(slideIDs)</p:sldIdLst><p:sldSz cx="\(slideWidth)" cy="\(slideHeight)"/><p:notesSz cx="\(slideWidth)" cy="\(slideHeight)"/>\(embeddedFontListXML)<p:defaultTextStyle><a:defPPr><a:defRPr lang="en-US"/></a:defPPr></p:defaultTextStyle></p:presentation>
         """
         parts.append(try OOXMLPart(name: "ppt/presentation.xml", xml: presentationXML))
         parts.append(try OOXMLPart(name: "ppt/_rels/presentation.xml.rels", xml: relationshipsXML(presentationRels)))
@@ -225,7 +246,36 @@ struct PresentationMLWriter {
         var masterShapes = ""
         var nextMasterShapeID = 3
         var nextMasterRelationshipID = 3
-        if let backgroundPage = masterPlan.backgroundPage {
+        if let backgroundImage = masterPlan.backgroundImage {
+            let relationshipID = "rId\(nextMasterRelationshipID)"
+            nextMasterRelationshipID += 1
+            masterRelationships.append(
+                (
+                    relationshipID,
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+                    "../media/master-background.png"
+                )
+            )
+            parts.append(
+                try OOXMLPart(
+                    name: "ppt/media/master-background.png",
+                    data: backgroundImage.pngData
+                )
+            )
+            let bounds = backgroundImage.officeBounds
+            let x = emu(bounds.minX - first.cropBox.minX)
+            let y = emu(canvasHeight - (bounds.maxY - first.cropBox.minY))
+            masterShapes += imageShape(
+                image: backgroundImage,
+                id: nextMasterShapeID,
+                relationshipID: relationshipID,
+                x: x,
+                y: y,
+                width: max(1, emu(bounds.width)),
+                height: max(1, emu(bounds.height))
+            )
+            nextMasterShapeID += 1
+        } else if let backgroundPage = masterPlan.backgroundPage {
             let relationshipID = "rId\(nextMasterRelationshipID)"
             nextMasterRelationshipID += 1
             masterRelationships.append(
@@ -247,6 +297,19 @@ struct PresentationMLWriter {
                 width: slideWidth,
                 height: slideHeight,
                 name: "Shared PDF template background"
+            )
+            nextMasterShapeID += 1
+        }
+        for vector in masterPlan.vectors.sorted(by: { $0.paintOrder < $1.paintOrder }) {
+            let x = emu(vector.bounds.minX - first.cropBox.minX)
+            let y = emu(canvasHeight - (vector.bounds.maxY - first.cropBox.minY))
+            masterShapes += vectorShape(
+                vector: vector,
+                id: nextMasterShapeID,
+                x: x,
+                y: y,
+                width: max(1, emu(vector.bounds.width)),
+                height: max(1, emu(vector.bounds.height))
             )
             nextMasterShapeID += 1
         }
@@ -298,7 +361,7 @@ struct PresentationMLWriter {
         }
         let masterXML = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="KC DeepL Master"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(slideWidth)" cy="\(slideHeight)"/><a:chOff x="0" y="0"/><a:chExt cx="\(slideWidth)" cy="\(slideHeight)"/></a:xfrm></p:grpSpPr>\(masterShapes)</p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst><p:sldLayoutId id="1" r:id="rId1"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>
+        <p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="KC DeepL Master"><p:bg><p:bgRef idx="1001"><a:schemeClr val="bg1"/></p:bgRef></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(slideWidth)" cy="\(slideHeight)"/><a:chOff x="0" y="0"/><a:chExt cx="\(slideWidth)" cy="\(slideHeight)"/></a:xfrm></p:grpSpPr>\(masterShapes)</p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>
         """
         parts.append(try OOXMLPart(name: "ppt/slideMasters/slideMaster1.xml", xml: masterXML))
         parts.append(
@@ -367,104 +430,175 @@ private extension PresentationMLWriter {
             && scene.pages.dropFirst().allSatisfy {
                 $0.pageImagePNG == first.pageImagePNG
             }
-        let backgroundPage = identicalBackground ? first : nil
 
-        let sharedTextFingerprints = scene.pages
-            .map { page in
-                Set(
-                    page.templateObjects
-                        .filter {
-                            $0.role == .sharedTemplate
-                                && $0.id.hasPrefix("template-chrome-")
-                        }
-                        .map(\.sourceFingerprint)
-                )
-            }
-            .dropFirst()
-            .reduce(
-                Set(
-                    first.templateObjects
-                        .filter {
-                            $0.role == .sharedTemplate
-                                && $0.id.hasPrefix("template-chrome-")
-                        }
-                        .map(\.sourceFingerprint)
-                )
-            ) { partial, next in
-                partial.intersection(next)
-            }
-        let firstTextFingerprintByKey = Dictionary(
-            uniqueKeysWithValues: first.templateObjects
-                .filter {
-                    $0.role == .sharedTemplate
-                        && $0.id.hasPrefix("template-chrome-")
-                }
-                .map { (String($0.id.dropFirst("template-chrome-".count)), $0.sourceFingerprint) }
+        // Requiring an object to occur on *every* page is too strict for
+        // normal decks: title/divider slides commonly use a different
+        // background while the body slides share the same master. Promote a
+        // native object when it is present on a stable majority of pages.
+        let minimumRepeatedPages = max(
+            2,
+            Int(ceil(Double(scene.pages.count) * 0.5))
         )
-        let textBoxes = first.textBoxes.filter { textBox in
-            guard textBox.role == .templateChrome,
-                  let fingerprint = firstTextFingerprintByKey[textBox.id]
-            else {
-                return false
+
+        let pageBackgroundFingerprint: (PDFScenePage) -> String? = { page in
+            page.templateObjects.first {
+                $0.id.hasPrefix("page-template-")
+            }?.sourceFingerprint
+        }
+        var backgroundPageCounts: [String: Int] = [:]
+        for page in scene.pages where !page.usesPageRasterFallback {
+            if let fingerprint = pageBackgroundFingerprint(page) {
+                backgroundPageCounts[fingerprint, default: 0] += 1
             }
-            return sharedTextFingerprints.contains(fingerprint)
+        }
+        let repeatedBackgroundFingerprint = backgroundPageCounts
+            .filter { $0.value >= minimumRepeatedPages }
+            .max { lhs, rhs in
+                if lhs.value != rhs.value { return lhs.value < rhs.value }
+                return lhs.key < rhs.key
+            }?.key
+        let backgroundPage = repeatedBackgroundFingerprint.flatMap { fingerprint in
+            scene.pages.first {
+                !($0.usesPageRasterFallback)
+                    && pageBackgroundFingerprint($0) == fingerprint
+            }
+        } ?? (identicalBackground ? first : nil)
+        let backgroundTemplateFingerprint = repeatedBackgroundFingerprint
+            ?? (identicalBackground ? pageBackgroundFingerprint(first) : nil)
+
+        var textPageCounts: [String: Int] = [:]
+        for page in scene.pages {
+            for fingerprint in Set(
+                page.templateObjects
+                    .filter {
+                        $0.role == .sharedTemplate
+                            && $0.id.hasPrefix("template-chrome-")
+                    }
+                    .map(\.sourceFingerprint)
+            ) {
+                textPageCounts[fingerprint, default: 0] += 1
+            }
+        }
+        let sharedTextFingerprints = Set(
+            textPageCounts.compactMap { fingerprint, count in
+                count >= minimumRepeatedPages ? fingerprint : nil
+            }
+        )
+        var textRepresentatives: [String: PDFSceneTextBox] = [:]
+        for page in scene.pages {
+            for textBox in page.textBoxes where textBox.role == .templateChrome {
+                guard let fingerprint = templateTextFingerprint(
+                    page: page,
+                    textBox: textBox
+                ), sharedTextFingerprints.contains(fingerprint),
+                textBox.canRecreateOnLayeredTemplate
+                else { continue }
+                textRepresentatives[fingerprint] = textBox
+            }
+        }
+        let textBoxes = sharedTextFingerprints.sorted().compactMap {
+            textRepresentatives[$0]
         }
 
-        let commonImageKeys = scene.pages
-            .map { page in
-                Set(
-                    page.images
-                        .filter {
-                            !$0.hasAlpha || options.preserveAlphaMasks
-                        }
-                        .filter {
-                            $0.canRecreate(
-                                onPageSafetyNet: page.usesPageRasterFallback,
-                                options: options
-                            )
-                        }
-                        .map(templateImageKey)
+        var vectorPageCounts: [String: Int] = [:]
+        var vectorRepresentatives: [String: PDFSceneVector] = [:]
+        for page in scene.pages {
+            let candidates = page.vectors.filter {
+                $0.canRecreate(
+                    onPageSafetyNet: false,
+                    options: options
                 )
             }
-            .dropFirst()
-            .reduce(
-                Set(
-                    first.images
-                        .filter {
-                            $0.canRecreate(
-                                onPageSafetyNet: first.usesPageRasterFallback,
-                                options: options
-                            )
-                        }
-                        .map(templateImageKey)
-                )
-            ) { partial, next in
-                partial.intersection(next)
+            for vector in candidates {
+                let key = templateVectorKey(vector)
+                vectorPageCounts[key, default: 0] += 1
+                vectorRepresentatives[key] = vector
             }
-        let backgroundImageKey = first.images.first { image in
-            commonImageKeys.contains(templateImageKey(image))
+        }
+        let commonVectorKeys = Set(
+            vectorPageCounts.compactMap { key, count in
+                count >= minimumRepeatedPages ? key : nil
+            }
+        )
+        let vectors = commonVectorKeys
+            .sorted()
+            .compactMap { vectorRepresentatives[$0] }
+
+        var imagePageCounts: [String: Int] = [:]
+        var imageRepresentatives: [String: PDFSceneImage] = [:]
+        for page in scene.pages {
+            let candidates = page.images.filter { image in
+                image.hasVisibleReferenceContribution
+                    && image.canRecreate(
+                        onPageSafetyNet: false,
+                        options: options
+                    )
+            }
+            for image in candidates {
+                let key = templateImageKey(image)
+                imagePageCounts[key, default: 0] += 1
+                imageRepresentatives[key] = image
+            }
+        }
+        let commonImageKeys = Set(
+            imagePageCounts.compactMap { key, count in
+                count >= minimumRepeatedPages ? key : nil
+            }
+        )
+        let backgroundImageKey = imageRepresentatives.first { key, image in
+            commonImageKeys.contains(key)
+                && sameCanvas
                 && image.bounds.minX <= first.cropBox.minX + 0.5
                 && image.bounds.minY <= first.cropBox.minY + 0.5
                 && image.bounds.maxX >= first.cropBox.maxX - 0.5
                 && image.bounds.maxY >= first.cropBox.maxY - 0.5
                 && !image.hasAlpha
                 && !image.maskApplied
-        }.map(templateImageKey)
-        let images = first.images.filter {
-            let key = templateImageKey($0)
-            return commonImageKeys.contains(key) && key != backgroundImageKey
+                && image.clip == nil
+        }?.key
+        let backgroundImage = backgroundImageKey.flatMap {
+            imageRepresentatives[$0]
         }
+        let images = commonImageKeys
+            .subtracting(backgroundImageKey.map { [$0] } ?? [])
+            .sorted()
+            .compactMap { imageRepresentatives[$0] }
         return MasterPlan(
             backgroundPage: backgroundPage,
+            backgroundTemplateFingerprint: backgroundTemplateFingerprint,
+            backgroundImage: backgroundImage,
             textBoxes: textBoxes,
-            textBoxKeys: Set(textBoxes.map(templateTextKey)),
+            textBoxKeys: sharedTextFingerprints,
+            vectors: vectors,
+            vectorKeys: commonVectorKeys,
             images: images,
             imageKeys: commonImageKeys
         )
     }
 
-    func templateTextKey(_ textBox: PDFSceneTextBox) -> String {
-        "\(textBox.text)|\(textBox.bounds.debugDescription)|\(textBox.alignment.rawValue)"
+    private func shouldOmitPageRaster(
+        page: PDFScenePage,
+        masterPlan: MasterPlan
+    ) -> Bool {
+        if let backgroundImage = masterPlan.backgroundImage {
+            let backgroundKey = templateImageKey(backgroundImage)
+            return !page.usesPageRasterFallback
+                && page.images.contains { templateImageKey($0) == backgroundKey }
+        }
+        return masterPlan.backgroundPage != nil
+            && !page.usesPageRasterFallback
+            && page.templateObjects.first(where: {
+                $0.id.hasPrefix("page-template-")
+            })?.sourceFingerprint == masterPlan.backgroundTemplateFingerprint
+    }
+
+    private func templateTextFingerprint(
+        page: PDFScenePage,
+        textBox: PDFSceneTextBox
+    ) -> String? {
+        page.templateObjects.first {
+            $0.id == "template-chrome-\(textBox.id)"
+        }?.sourceFingerprint
     }
 
     func templateImageKey(_ image: PDFSceneImage) -> String {
@@ -474,6 +608,24 @@ private extension PresentationMLWriter {
             .joined()
         let clipDescription = image.clip?.bounds.debugDescription ?? ""
         return "\(digest)|\(image.bounds.debugDescription)|\(clipDescription)"
+    }
+
+    func templateVectorKey(_ vector: PDFSceneVector) -> String {
+        var value = "\(vector.kind.rawValue)|\(vector.bounds.debugDescription)|\(vector.lineWidth)|\(vector.rotation)|"
+        value += vector.stroke.map { "stroke:\($0.red),\($0.green),\($0.blue),\($0.alpha)|" } ?? "stroke:none|"
+        value += vector.fill.map { "fill:\($0.red),\($0.green),\($0.blue),\($0.alpha)|" } ?? "fill:none|"
+        for command in vector.pathCommands {
+            switch command {
+            case let .move(point): value += "m:\(point.x),\(point.y);"
+            case let .line(point): value += "l:\(point.x),\(point.y);"
+            case let .cubic(control1, control2, end):
+                value += "c:\(control1.x),\(control1.y),\(control2.x),\(control2.y),\(end.x),\(end.y);"
+            case .close: value += "z;"
+            }
+        }
+        return SHA256.hash(data: Data(value.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     func pageRasterShape(
@@ -486,7 +638,7 @@ private extension PresentationMLWriter {
         "<p:pic><p:nvPicPr><p:cNvPr id=\"\(id)\" name=\"\(XMLValue.attribute(name))\"/><p:cNvPicPr preferRelativeResize=\"0\"><a:picLocks noSelect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"\(XMLValue.attribute(relationshipID))\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"\(width)\" cy=\"\(height)\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>"
     }
 
-    func makeSlideXML(
+    private func makeSlideXML(
         page: PDFScenePage,
         canvasWidth: CGFloat,
         canvasHeight: CGFloat,
@@ -496,6 +648,7 @@ private extension PresentationMLWriter {
         options: DocumentConversionPipelineOptions,
         includePageRaster: Bool,
         masterTextBoxKeys: Set<String>,
+        masterVectorKeys: Set<String>,
         masterImageKeys: Set<String>
     ) -> String {
         let pageOffsetX: CGFloat = 0
@@ -504,7 +657,7 @@ private extension PresentationMLWriter {
             $0.canRecreate(
                 onPageSafetyNet: page.usesPageRasterFallback,
                 options: options
-            )
+            ) && !masterVectorKeys.contains(templateVectorKey($0))
         }
             .sorted { $0.paintOrder < $1.paintOrder }
         var shapeID = 3
@@ -521,10 +674,17 @@ private extension PresentationMLWriter {
             : ""
         let templateTextBoxes = page.usesPageRasterFallback
             ? []
-            : page.textBoxes.filter {
-                $0.role == .templateChrome
-                    && $0.canRecreateOnLayeredTemplate
-                    && !masterTextBoxKeys.contains(templateTextKey($0))
+            : page.textBoxes.filter { textBox in
+                guard textBox.role == .templateChrome,
+                      textBox.canRecreateOnLayeredTemplate
+                else { return false }
+                guard let fingerprint = templateTextFingerprint(
+                    page: page,
+                    textBox: textBox
+                ) else {
+                    return true
+                }
+                return !masterTextBoxKeys.contains(fingerprint)
             }
         let contentTextBoxes = page.textBoxes.filter {
             $0.role == .editableContent && $0.canRecreateOnLayeredTemplate
@@ -642,7 +802,7 @@ private extension PresentationMLWriter {
 
         return """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="PDF page \(page.pageIndex + 1)"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(slideWidth)" cy="\(slideHeight)"/><a:chOff x="0" y="0"/><a:chExt cx="\(slideWidth)" cy="\(slideHeight)"/></a:xfrm></p:grpSpPr>\(shapes)</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>
+        <p:sld showMasterSp="1" showMasterPhAnim="1" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="PDF page \(page.pageIndex + 1)"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(slideWidth)" cy="\(slideHeight)"/><a:chOff x="0" y="0"/><a:chExt cx="\(slideWidth)" cy="\(slideHeight)"/></a:xfrm></p:grpSpPr>\(shapes)</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>
         """
     }
 

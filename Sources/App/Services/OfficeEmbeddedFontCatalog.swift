@@ -180,12 +180,15 @@ enum OfficeEmbeddedFontCatalog {
             result.appendEOTUInt32(0)
         }
         result.appendEOTUInt16(0)
-        result.appendEOTString("Barlow")
-        result.appendEOTUInt16(0)
-        result.appendEOTString(styleName)
-        result.appendEOTUInt16(0)
-        result.appendEOTString("Version 1.0")
-        result.appendEOTUInt16(0)
+        // Version 1 EOT stores a padding USHORT after each of the first
+        // three UTF-16 name arrays.  The padding is part of the fixed
+        // structure (it is not a terminator), and omitting it makes the
+        // subsequent fields shift by two bytes; PowerPoint then offers to
+        // repair the presentation on open.  The final FullName array is the
+        // last header field and is followed immediately by FontData.
+        result.appendEOTString("Barlow", followedByPadding: true)
+        result.appendEOTString(styleName, followedByPadding: true)
+        result.appendEOTString("Version 1.0", followedByPadding: true)
         result.appendEOTString(fullName)
         result.append(fontData)
 
@@ -307,12 +310,18 @@ private extension Data {
         append(eotLittleEndian(value))
     }
 
-    mutating func appendEOTString(_ value: String) {
+    mutating func appendEOTString(
+        _ value: String,
+        followedByPadding: Bool = false
+    ) {
         var encoded = Data()
         for codeUnit in value.utf16 {
             encoded.appendEOTUInt16(codeUnit)
         }
         appendEOTUInt16(UInt16(encoded.count))
         append(encoded)
+        if followedByPadding {
+            appendEOTUInt16(0)
+        }
     }
 }
