@@ -393,10 +393,97 @@ struct PDFScenePage {
     let nativeVectorCount: Int
     let warnings: [String]
     let usesPageRasterFallback: Bool
+    /// True when `pageImagePNG` contains only a verified uniform page canvas
+    /// synthesized by the extractor.  It is not a flattened copy of the PDF
+    /// content and can therefore be omitted from Office output when all
+    /// foreground PDF objects have native representations.
+    let isNativeCanvasBackground: Bool
+
+    init(
+        id: String,
+        pageIndex: Int,
+        cropBox: CGRect,
+        rotation: Int,
+        pageImagePNG: Data,
+        textBoxes: [PDFSceneTextBox],
+        images: [PDFSceneImage],
+        vectors: [PDFSceneVector],
+        templateObjects: [PDFSceneTemplateObject],
+        imageOccurrenceCount: Int,
+        extractedImageCount: Int,
+        nativeVectorCount: Int,
+        warnings: [String],
+        usesPageRasterFallback: Bool,
+        isNativeCanvasBackground: Bool = false
+    ) {
+        self.id = id
+        self.pageIndex = pageIndex
+        self.cropBox = cropBox
+        self.rotation = rotation
+        self.pageImagePNG = pageImagePNG
+        self.textBoxes = textBoxes
+        self.images = images
+        self.vectors = vectors
+        self.templateObjects = templateObjects
+        self.imageOccurrenceCount = imageOccurrenceCount
+        self.extractedImageCount = extractedImageCount
+        self.nativeVectorCount = nativeVectorCount
+        self.warnings = warnings
+        self.usesPageRasterFallback = usesPageRasterFallback
+        self.isNativeCanvasBackground = isNativeCanvasBackground
+    }
 
     var width: CGFloat { cropBox.width }
     var height: CGFloat { cropBox.height }
 }
+
+/// A monotonic progress event emitted by the PDF-to-Office pipeline.  The
+/// service reports page-level work during analysis/extraction and serialization
+/// rather than waiting for the final package, allowing the macOS UI to update
+/// continuously even for long PDFs.
+struct DocumentConversionProgress: Equatable, Sendable {
+    enum Phase: String, Sendable {
+        case preparing
+        case analyzing
+        case extracting
+        case writing
+        case validating
+        case saving
+
+        var displayName: String {
+            switch self {
+            case .preparing: "준비"
+            case .analyzing: "텍스트 분석"
+            case .extracting: "페이지·이미지 추출"
+            case .writing: "Office 문서 작성"
+            case .validating: "구조 검증"
+            case .saving: "저장"
+            }
+        }
+    }
+
+    let fraction: Double
+    let phase: Phase
+    let completedUnits: Int
+    let totalUnits: Int
+    let message: String
+
+    init(
+        fraction: Double,
+        phase: Phase,
+        completedUnits: Int = 0,
+        totalUnits: Int = 0,
+        message: String
+    ) {
+        self.fraction = min(1, max(0, fraction))
+        self.phase = phase
+        self.completedUnits = max(0, completedUnits)
+        self.totalUnits = max(0, totalUnits)
+        self.message = message
+    }
+}
+
+typealias DocumentConversionProgressHandler = @Sendable (DocumentConversionProgress) -> Void
 
 struct PDFSceneImage {
     let id: String

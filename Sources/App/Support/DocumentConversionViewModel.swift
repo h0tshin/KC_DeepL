@@ -142,12 +142,22 @@ final class DocumentConversionViewModel: ObservableObject {
 
             do {
                 let service = PDFOfficeConversionService()
+                let progressHandler: DocumentConversionProgressHandler = { [weak self] update in
+                    Task { @MainActor [weak self] in
+                        self?.applyProgress(
+                            update,
+                            generation: generation,
+                            leaseID: lease.id
+                        )
+                    }
+                }
                 let worker = Task.detached(priority: .userInitiated) {
                     try service.convert(
                         sourceURL: sourceURL,
                         format: format,
                         destinationURL: temporaryURL,
-                        options: selectedOptions
+                        options: selectedOptions,
+                        progress: progressHandler
                     )
                 }
                 let conversionReport = try await withTaskCancellationHandler {
@@ -162,7 +172,7 @@ final class DocumentConversionViewModel: ObservableObject {
                 else { return }
 
                 self.stage = .validating
-                self.progress = 0.92
+                self.progress = max(self.progress, 0.92)
                 self.statusMessage = "Office package 구조와 저장 결과를 검증하는 중입니다."
                 guard FileManager.default.fileExists(atPath: temporaryURL.path) else {
                     throw DocumentConversionError.packageWriteFailed("임시 결과가 사라졌습니다.")
@@ -270,6 +280,32 @@ final class DocumentConversionViewModel: ObservableObject {
         stage = .failed
         progress = 0
         statusMessage = "문서 변환을 시작하지 못했습니다."
+    }
+
+    private func applyProgress(
+        _ update: DocumentConversionProgress,
+        generation: UInt,
+        leaseID: UUID
+    ) {
+        guard operationGeneration == generation,
+              lease?.id == leaseID,
+              stage.isBusy
+        else {
+            return
+        }
+        progress = max(progress, update.fraction)
+        statusMessage = update.message
+        switch update.phase {
+        case .preparing:
+            stage = .preparing
+        case .analyzing, .extracting, .writing:
+            stage = .converting(
+                page: update.completedUnits,
+                total: max(1, update.totalUnits)
+            )
+        case .validating, .saving:
+            stage = .validating
+        }
     }
 
     private func persistOptions() {

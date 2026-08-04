@@ -19,31 +19,64 @@ struct PDFOfficeConversionService {
         sourceURL: URL,
         format: DocumentConversionFormat,
         destinationURL: URL,
-        options: DocumentConversionOptions = .default
+        options: DocumentConversionOptions = .default,
+        progress: DocumentConversionProgressHandler? = nil
     ) throws -> DocumentConversionReport {
         try Task.checkCancellation()
+        progress?(DocumentConversionProgress(
+            fraction: 0,
+            phase: .preparing,
+            message: "변환 작업을 준비하는 중입니다."
+        ))
         let pipelineOptions = options.pipeline(for: format)
         let scene = try extractor.extract(
             sourceURL: sourceURL,
             layoutTarget: format.officeLayoutTarget,
-            options: pipelineOptions
+            options: pipelineOptions,
+            progress: { fraction, phase, completedPage, totalPages, message in
+                // Extraction owns the first 78% of the work.  Its callback
+                // already includes analysis and page-level object extraction.
+                progress?(DocumentConversionProgress(
+                    fraction: fraction,
+                    phase: phase,
+                    completedUnits: completedPage,
+                    totalUnits: totalPages,
+                    message: message
+                ))
+            }
         )
         try Task.checkCancellation()
 
         let parts: [OOXMLPart]
+        let writingProgress: DocumentConversionProgressHandler = { update in
+            progress?(DocumentConversionProgress(
+                fraction: 0.78 + update.fraction * 0.14,
+                phase: .writing,
+                completedUnits: update.completedUnits,
+                totalUnits: update.totalUnits,
+                message: update.message
+            ))
+        }
         switch format {
         case .pptx:
             parts = try PresentationMLWriter().makeParts(
                 scene: scene,
-                options: pipelineOptions
+                options: pipelineOptions,
+                progress: writingProgress
             )
         case .docx:
             parts = try WordprocessingMLWriter().makeParts(
                 scene: scene,
-                options: pipelineOptions
+                options: pipelineOptions,
+                progress: writingProgress
             )
         }
         try Task.checkCancellation()
+        progress?(DocumentConversionProgress(
+            fraction: 0.93,
+            phase: .validating,
+            message: "생성된 Office 패키지의 XML 구조를 검증하는 중입니다."
+        ))
         do {
             try OOXMLPackageValidator.validate(parts: parts, format: format)
         } catch {
@@ -51,6 +84,11 @@ struct PDFOfficeConversionService {
                 error.localizedDescription
             )
         }
+        progress?(DocumentConversionProgress(
+            fraction: 0.97,
+            phase: .saving,
+            message: "변환 파일을 저장하는 중입니다."
+        ))
         do {
             try SimpleZIPWriter().write(parts: parts, to: destinationURL)
         } catch is CancellationError {
@@ -60,6 +98,11 @@ struct PDFOfficeConversionService {
                 error.localizedDescription
             )
         }
+        progress?(DocumentConversionProgress(
+            fraction: 1,
+            phase: .saving,
+            message: "변환 파일을 저장했습니다."
+        ))
         return DocumentConversionReport(scene: scene, format: format)
     }
 }

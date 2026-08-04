@@ -89,7 +89,13 @@ struct DocumentConversionSection: View {
 
             if conversionViewModel.isBusy {
                 ProgressView(value: conversionViewModel.progress) {
-                    Text(conversionViewModel.statusMessage)
+                    HStack(spacing: 6) {
+                        Text(conversionViewModel.statusMessage)
+                        Spacer(minLength: 4)
+                        Text("\(Int((conversionViewModel.progress * 100).rounded()))%")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .font(.caption)
                 .accessibilityLabel("문서 변환 진행률")

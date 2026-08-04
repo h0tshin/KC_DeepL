@@ -37,7 +37,8 @@ struct PresentationMLWriter {
 
     func makeParts(
         scene: PDFSceneDocument,
-        options: DocumentConversionPipelineOptions = .default
+        options: DocumentConversionPipelineOptions = .default,
+        progress: DocumentConversionProgressHandler? = nil
     ) throws -> [OOXMLPart] {
         guard let first = scene.pages.first else {
             throw DocumentConversionError.emptyPDF
@@ -61,6 +62,12 @@ struct PresentationMLWriter {
         let masterPlan = makeMasterPlan(scene: scene, options: options)
         var parts: [OOXMLPart] = []
         var imageAssetNames: [String: String] = [:]
+        progress?(DocumentConversionProgress(
+            fraction: 0,
+            phase: .writing,
+            totalUnits: scene.pages.count,
+            message: "PowerPoint 문서 구조를 작성하는 중입니다."
+        ))
         for page in scene.pages {
             try Task.checkCancellation()
             let slideNumber = page.pageIndex + 1
@@ -149,6 +156,13 @@ struct PresentationMLWriter {
                     xml: relationshipsXML(relationships)
                 )
             )
+            progress?(DocumentConversionProgress(
+                fraction: Double(page.pageIndex + 1) / Double(max(1, scene.pages.count)),
+                phase: .writing,
+                completedUnits: page.pageIndex + 1,
+                totalUnits: scene.pages.count,
+                message: "PowerPoint 슬라이드를 작성하는 중입니다. (\(page.pageIndex + 1)/\(scene.pages.count))"
+            ))
         }
 
         // rId1...rId4 are reserved by the presentation itself (master,
@@ -580,6 +594,9 @@ private extension PresentationMLWriter {
         page: PDFScenePage,
         masterPlan: MasterPlan
     ) -> Bool {
+        if page.isNativeCanvasBackground {
+            return true
+        }
         if let backgroundImage = masterPlan.backgroundImage {
             let backgroundKey = templateImageKey(backgroundImage)
             return !page.usesPageRasterFallback

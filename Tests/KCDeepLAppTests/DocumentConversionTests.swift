@@ -49,6 +49,34 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: output).prefix(2), Data([0x50, 0x4b]))
     }
 
+    func testConversionProgressIsMonotonicAndCoversPipelinePhases() throws {
+        let directory = try temporaryDirectory(prefix: "KCDeepL-ConversionProgressTests")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("source.pdf")
+        try makePDF(at: source)
+        let output = directory.appendingPathComponent("converted.docx")
+        let recorder = ProgressRecorder()
+
+        _ = try PDFOfficeConversionService().convert(
+            sourceURL: source,
+            format: .docx,
+            destinationURL: output,
+            progress: { recorder.append($0) }
+        )
+
+        let updates = recorder.values
+        XCTAssertGreaterThan(updates.count, 4)
+        XCTAssertEqual(try XCTUnwrap(updates.last).fraction, 1, accuracy: 0.0001)
+        XCTAssertEqual(updates.first?.phase, .preparing)
+        XCTAssertTrue(updates.contains { $0.phase == .extracting })
+        XCTAssertTrue(updates.contains { $0.phase == .writing })
+        XCTAssertTrue(updates.contains { $0.phase == .validating })
+        XCTAssertTrue(updates.contains { $0.phase == .saving })
+        XCTAssertTrue(zip(updates, updates.dropFirst()).allSatisfy { current, next in
+            next.fraction + 0.0001 >= current.fraction
+        })
+    }
+
     func testPresentationRelationshipIDsRemainUniqueForMultiplePages() throws {
         let directory = try temporaryDirectory(prefix: "KCDeepL-PresentationRelationshipTests")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -143,6 +171,29 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertTrue(
             slideXML.contains("r:embed=\"rId3\""),
             "The transparent image must be reinserted over its repaired template, not omitted or blended twice over original pixels."
+        )
+    }
+
+    func testSeparateSourceImageDoesNotCreateAFlattenedPageAsset() throws {
+        let directory = try temporaryDirectory(prefix: "KCDeepL-NativeCanvasImageTests")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("image-source.pdf")
+        try makePDFWithImage(at: source)
+
+        let scene = try PDFSceneExtractor().extract(sourceURL: source)
+        let page = try XCTUnwrap(scene.pages.first)
+        XCTAssertTrue(page.isNativeCanvasBackground)
+        XCTAssertFalse(page.usesPageRasterFallback)
+        XCTAssertGreaterThanOrEqual(page.images.count, 1)
+
+        let parts = try PresentationMLWriter().makeParts(scene: scene)
+        XCTAssertFalse(
+            parts.contains { $0.name == "ppt/media/image1.png" },
+            "A page made from a plain canvas and a source image must not be flattened back into one page screenshot."
+        )
+        XCTAssertTrue(
+            parts.contains { $0.name.hasPrefix("ppt/media/object-1-") },
+            "The source image must remain a separately editable Office picture."
         )
     }
 
@@ -1482,6 +1533,23 @@ final class DocumentConversionTests: XCTestCase {
         )
     }
 
+}
+
+private final class ProgressRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [DocumentConversionProgress] = []
+
+    var values: [DocumentConversionProgress] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ value: DocumentConversionProgress) {
+        lock.lock()
+        storage.append(value)
+        lock.unlock()
+    }
 }
 
 private extension DocumentConversionTests {

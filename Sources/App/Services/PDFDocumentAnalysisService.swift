@@ -43,7 +43,10 @@ struct PDFDocumentAnalysisService: Sendable {
         self.retainDocumentChromeForTemplate = retainDocumentChromeForTemplate
     }
 
-    func analyze(sourceURL: URL) throws -> PDFDocumentAnalysis {
+    func analyze(
+        sourceURL: URL,
+        progress: (@Sendable (_ completedPage: Int, _ totalPages: Int) -> Void)? = nil
+    ) throws -> PDFDocumentAnalysis {
         guard sourceURL.isFileURL,
               sourceURL.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame
         else {
@@ -265,6 +268,7 @@ struct PDFDocumentAnalysisService: Sendable {
             )
             pages.append(analysis)
             documentWarnings.append(contentsOf: pageWarnings)
+            progress?(pageIndex + 1, document.pageCount)
         }
 
         return PDFDocumentAnalysis(

@@ -7,7 +7,8 @@ struct WordprocessingMLWriter {
 
     func makeParts(
         scene: PDFSceneDocument,
-        options: DocumentConversionPipelineOptions = .default
+        options: DocumentConversionPipelineOptions = .default,
+        progress: DocumentConversionProgressHandler? = nil
     ) throws -> [OOXMLPart] {
         guard !scene.pages.isEmpty else {
             throw DocumentConversionError.emptyPDF
@@ -55,11 +56,27 @@ struct WordprocessingMLWriter {
             headerRelationshipID = nil
         }
 
+        let footerRelationshipID: String?
+        if templatePlan.hasFooter {
+            let relationshipID = "rId\(nextRelationshipID)"
+            nextRelationshipID += 1
+            footerRelationshipID = relationshipID
+            relationships.append(
+                (
+                    relationshipID,
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer",
+                    "footer1.xml"
+                )
+            )
+        } else {
+            footerRelationshipID = nil
+        }
+
         var headerImageRelationships: [(image: PDFSceneImage, id: String)] = []
         var nextHeaderRelationshipID = 1
         var seenHeaderImageKeys = Set<String>()
-        let headerImages = (templatePlan.backgroundImage.map { [$0] } ?? [])
-            + templatePlan.images
+        let headerImages = (templatePlan.header.backgroundImage.map { [$0] } ?? [])
+            + templatePlan.header.images
         for image in headerImages {
             let key = templateImageKey(image)
             guard seenHeaderImageKeys.insert(key).inserted else { continue }
@@ -78,12 +95,42 @@ struct WordprocessingMLWriter {
             headerImageRelationships.append((image, relationshipID))
         }
 
+        var footerImageRelationships: [(image: PDFSceneImage, id: String)] = []
+        var nextFooterRelationshipID = 1
+        var seenFooterImageKeys = Set<String>()
+        for image in templatePlan.footer.images {
+            let key = templateImageKey(image)
+            guard seenFooterImageKeys.insert(key).inserted else { continue }
+            let relationshipID = "rId\(nextFooterRelationshipID)"
+            nextFooterRelationshipID += 1
+            let assetName = options.imageGroupingLevel == .split
+                ? "template-footer-object-\(footerImageRelationships.count + 1).png"
+                : OfficeImageAssetGrouping.sharedFilename(for: key)
+            if imageAssetNames[key] == nil {
+                imageAssetNames[key] = assetName
+                parts.append(
+                    try OOXMLPart(
+                        name: "word/media/\(assetName)",
+                        data: image.pngData
+                    )
+                )
+            }
+            footerImageRelationships.append((image, relationshipID))
+        }
+
         var pageXML = ""
 
+        progress?(DocumentConversionProgress(
+            fraction: 0,
+            phase: .writing,
+            totalUnits: scene.pages.count,
+            message: "Word 문서 구조를 작성하는 중입니다."
+        ))
         for page in scene.pages {
             try Task.checkCancellation()
             let pageRasterRelationshipID: String?
-            if templatePlan.backgroundImage == nil {
+            if !page.isNativeCanvasBackground
+                && (page.usesPageRasterFallback || templatePlan.header.backgroundImage == nil) {
                 let imageName = "word/media/image\(page.pageIndex + 1).png"
                 let relationshipID = "rId\(nextRelationshipID)"
                 nextRelationshipID += 1
@@ -149,7 +196,8 @@ struct WordprocessingMLWriter {
                 nextDocPrID: &nextDocPrID,
                 options: options,
                 templateTextBoxKeys: templatePlan.textBoxKeys,
-                templateImageKeys: templatePlan.imageKeys
+                templateImageKeys: templatePlan.imageKeys,
+                templateVectorKeys: templatePlan.vectorKeys
             )
             let documentText = makeDocumentTextParagraphs(
                 page: page,
@@ -159,14 +207,21 @@ struct WordprocessingMLWriter {
             )
             pageXML += "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"1\" w:lineRule=\"exact\"/></w:pPr>\(drawings)</w:p>\(documentText)"
             if page.pageIndex < scene.pages.count - 1 {
-                pageXML += "<w:p><w:pPr><w:sectPr>\(sectionProperties(for: pageGeometry, headerRelationshipID: headerRelationshipID))</w:sectPr></w:pPr></w:p>"
+                pageXML += "<w:p><w:pPr><w:sectPr>\(sectionProperties(for: pageGeometry, headerRelationshipID: headerRelationshipID, footerRelationshipID: footerRelationshipID))</w:sectPr></w:pPr></w:p>"
             }
+            progress?(DocumentConversionProgress(
+                fraction: Double(page.pageIndex + 1) / Double(max(1, scene.pages.count)),
+                phase: .writing,
+                completedUnits: page.pageIndex + 1,
+                totalUnits: scene.pages.count,
+                message: "Word 페이지를 작성하는 중입니다. (\(page.pageIndex + 1)/\(scene.pages.count))"
+            ))
         }
 
         let finalGeometry = WordPageGeometry(page: scene.pages.last!)
         let documentXML = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" mc:Ignorable="w14 wp14"><w:body>\(pageXML)<w:sectPr>\(sectionProperties(for: finalGeometry, headerRelationshipID: headerRelationshipID))</w:sectPr></w:body></w:document>
+        <w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" mc:Ignorable="w14 wp14"><w:body>\(pageXML)<w:sectPr>\(sectionProperties(for: finalGeometry, headerRelationshipID: headerRelationshipID, footerRelationshipID: footerRelationshipID))</w:sectPr></w:body></w:document>
         """
         parts.append(try OOXMLPart(name: "word/document.xml", xml: documentXML))
         parts.append(try OOXMLPart(name: "word/_rels/document.xml.rels", xml: relationshipsXML(relationships)))
@@ -174,7 +229,7 @@ struct WordprocessingMLWriter {
            let firstPage = scene.pages.first {
             let headerXML = makeHeaderXML(
                 firstPage: firstPage,
-                plan: templatePlan,
+                layer: templatePlan.header,
                 geometry: WordPageGeometry(page: firstPage),
                 imageRelationships: headerImageRelationships
             )
@@ -196,6 +251,32 @@ struct WordprocessingMLWriter {
                 )
             )
         }
+        if templatePlan.hasFooter,
+           let firstPage = scene.pages.first {
+            let footerXML = makeFooterXML(
+                firstPage: firstPage,
+                layer: templatePlan.footer,
+                geometry: WordPageGeometry(page: firstPage),
+                imageRelationships: footerImageRelationships
+            )
+            parts.append(try OOXMLPart(name: "word/footer1.xml", xml: footerXML))
+            let footerRelationships: [(id: String, type: String, target: String)] = footerImageRelationships.compactMap { entry in
+                guard let assetName = imageAssetNames[templateImageKey(entry.image)] else {
+                    return nil
+                }
+                return (
+                    id: entry.id,
+                    type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+                    target: "media/\(assetName)"
+                )
+            }
+            parts.append(
+                try OOXMLPart(
+                    name: "word/_rels/footer1.xml.rels",
+                    xml: relationshipsXML(footerRelationships)
+                )
+            )
+        }
         parts.append(try OOXMLPart(name: "word/styles.xml", xml: Self.stylesXML))
         parts.append(try OOXMLPart(name: "word/settings.xml", xml: Self.settingsXML))
         parts.append(try OOXMLPart(name: "word/theme/theme1.xml", xml: Self.themeXML))
@@ -208,28 +289,125 @@ struct WordprocessingMLWriter {
         parts.append(try OOXMLPart(name: "docProps/core.xml", xml: Self.coreProperties))
         parts.append(try OOXMLPart(name: "docProps/app.xml", xml: Self.appProperties))
         parts.append(try OOXMLPart(name: "_rels/.rels", xml: Self.rootRelationships))
-        parts.append(try OOXMLPart(name: "[Content_Types].xml", xml: Self.contentTypes(pageCount: scene.pages.count, hasHeader: templatePlan.hasHeader)))
+        parts.append(try OOXMLPart(name: "[Content_Types].xml", xml: Self.contentTypes(pageCount: scene.pages.count, hasHeader: templatePlan.hasHeader, hasFooter: templatePlan.hasFooter)))
         return parts
     }
 }
 
-private struct WordTemplatePlan {
+private func wordTemplateImageKey(_ image: PDFSceneImage) -> String {
+    let digest = SHA256.hash(data: image.pngData)
+        .prefix(16)
+        .map { String(format: "%02x", $0) }
+        .joined()
+    func quantize(_ value: CGFloat, step: CGFloat) -> Int {
+        Int((value / step).rounded())
+    }
+    let bounds = image.bounds
+    let geometry = [
+        quantize(bounds.minX, step: 4),
+        quantize(bounds.minY, step: 4),
+        quantize(bounds.width, step: 4),
+        quantize(bounds.height, step: 4)
+    ].map(String.init).joined(separator: ",")
+    let clipGeometry = image.clip.map { clip in
+        let bounds = clip.bounds
+        return [
+            quantize(bounds.minX, step: 4),
+            quantize(bounds.minY, step: 4),
+            quantize(bounds.width, step: 4),
+            quantize(bounds.height, step: 4)
+        ].map(String.init).joined(separator: ",")
+    } ?? ""
+    return "\(digest)|\(geometry)|\(clipGeometry)"
+}
+
+private func wordTemplateVectorKey(_ vector: PDFSceneVector) -> String {
+    func quantize(_ value: CGFloat, step: CGFloat) -> Int {
+        Int((value / step).rounded())
+    }
+    let bounds = vector.bounds
+    var value = "\(vector.kind.rawValue)|\(quantize(bounds.width, step: 4))|\(quantize(bounds.height, step: 4))|\(quantize(vector.lineWidth, step: 0.25))|\(quantize(vector.rotation, step: 0.5))|"
+    value += vector.stroke.map { "stroke:\($0.red),\($0.green),\($0.blue),\($0.alpha)|" } ?? "stroke:none|"
+    value += vector.fill.map { "fill:\($0.red),\($0.green),\($0.blue),\($0.alpha)|" } ?? "fill:none|"
+    for command in vector.pathCommands {
+        switch command {
+        case let .move(point):
+            value += "m:\(quantize(point.x - bounds.minX, step: 1)),\(quantize(point.y - bounds.minY, step: 1));"
+        case let .line(point):
+            value += "l:\(quantize(point.x - bounds.minX, step: 1)),\(quantize(point.y - bounds.minY, step: 1));"
+        case let .cubic(control1, control2, end):
+            value += "c:\(quantize(control1.x - bounds.minX, step: 1)),\(quantize(control1.y - bounds.minY, step: 1)),\(quantize(control2.x - bounds.minX, step: 1)),\(quantize(control2.y - bounds.minY, step: 1)),\(quantize(end.x - bounds.minX, step: 1)),\(quantize(end.y - bounds.minY, step: 1));"
+        case .close: value += "z;"
+        }
+    }
+    return SHA256.hash(data: Data(value.utf8))
+        .map { String(format: "%02x", $0) }
+        .joined()
+}
+
+private func wordTemplateTextKey(_ textBox: PDFSceneTextBox) -> String {
+    let compactText = textBox.text
+        .split(whereSeparator: { $0.isWhitespace })
+        .joined(separator: " ")
+    // Page numbers are intentionally treated as one repeated footer role;
+    // the template writer emits a PAGE field so each section displays its
+    // own number instead of copying the first page's literal value.
+    let canonicalText = isDynamicPageNumber(textBox)
+        ? "__page_number__"
+        : compactText
+    func quantize(_ value: CGFloat, step: CGFloat) -> Int {
+        Int((value / step).rounded())
+    }
+    let bounds = textBox.bounds
+    let geometry = [
+        quantize(bounds.minX, step: 8),
+        quantize(bounds.minY, step: 8),
+        quantize(bounds.width, step: 4),
+        quantize(bounds.height, step: 4)
+    ].map(String.init).joined(separator: ",")
+    return "\(canonicalText)|\(geometry)|\(textBox.alignment.rawValue)"
+}
+
+private func isDynamicPageNumber(_ textBox: PDFSceneTextBox) -> Bool {
+    let compact = textBox.text.filter { !$0.isWhitespace }
+    return !compact.isEmpty && compact.allSatisfy(\.isNumber)
+}
+
+private struct WordTemplateLayer {
     let backgroundImage: PDFSceneImage?
     let textBoxes: [PDFSceneTextBox]
-    let textBoxKeys: Set<String>
     let images: [PDFSceneImage]
-    let imageKeys: Set<String>
+    let vectors: [PDFSceneVector]
 
-    var hasHeader: Bool {
-        backgroundImage != nil || !textBoxes.isEmpty || !images.isEmpty
+    var textBoxKeys: Set<String> { Set(textBoxes.map(wordTemplateTextKey)) }
+    var imageKeys: Set<String> { Set(images.map(wordTemplateImageKey)) }
+    var vectorKeys: Set<String> { Set(vectors.map(wordTemplateVectorKey)) }
+
+    var isEmpty: Bool {
+        backgroundImage == nil && textBoxes.isEmpty && images.isEmpty && vectors.isEmpty
     }
 
-    static let empty = WordTemplatePlan(
+    static let empty = WordTemplateLayer(
         backgroundImage: nil,
         textBoxes: [],
-        textBoxKeys: [],
         images: [],
-        imageKeys: []
+        vectors: []
+    )
+}
+
+private struct WordTemplatePlan {
+    let header: WordTemplateLayer
+    let footer: WordTemplateLayer
+
+    var hasHeader: Bool { !header.isEmpty }
+    var hasFooter: Bool { !footer.isEmpty }
+    var textBoxKeys: Set<String> { header.textBoxKeys.union(footer.textBoxKeys) }
+    var imageKeys: Set<String> { header.imageKeys.union(footer.imageKeys) }
+    var vectorKeys: Set<String> { header.vectorKeys.union(footer.vectorKeys) }
+
+    static let empty = WordTemplatePlan(
+        header: .empty,
+        footer: .empty
     )
 }
 
@@ -266,140 +444,185 @@ private extension WordprocessingMLWriter {
             return .empty
         }
 
-        let sameCanvas = scene.pages.allSatisfy {
-            abs($0.width - first.width) <= 0.01
-                && abs($0.height - first.height) <= 0.01
-                && abs($0.cropBox.minX - first.cropBox.minX) <= 0.01
-                && abs($0.cropBox.minY - first.cropBox.minY) <= 0.01
-        }
-
-        let sharedTextFingerprints = scene.pages
-            .map { page in
-                Set(
-                    page.templateObjects
-                        .filter {
-                            $0.role == .sharedTemplate
-                                && $0.id.hasPrefix("template-chrome-")
-                        }
-                        .map(\.sourceFingerprint)
-                )
-            }
-            .dropFirst()
-            .reduce(
-                Set(
-                    first.templateObjects
-                        .filter {
-                            $0.role == .sharedTemplate
-                                && $0.id.hasPrefix("template-chrome-")
-                        }
-                        .map(\.sourceFingerprint)
-                )
-            ) { partial, next in
-                partial.intersection(next)
-            }
-        let firstTextFingerprintByKey = Dictionary(
-            uniqueKeysWithValues: first.templateObjects
-                .filter {
-                    $0.role == .sharedTemplate
-                        && $0.id.hasPrefix("template-chrome-")
-                }
-                .map {
-                    (String($0.id.dropFirst("template-chrome-".count)), $0.sourceFingerprint)
-                }
+        // A majority threshold accommodates title/divider pages that do not
+        // carry the regular document chrome while still rejecting one-off
+        // body pictures as templates.
+        let minimumRepeatedPages = max(
+            2,
+            Int(ceil(Double(scene.pages.count) * 0.5))
         )
-        let textBoxes = first.textBoxes.filter { textBox in
-            guard textBox.role == .templateChrome,
-                  let fingerprint = firstTextFingerprintByKey[textBox.id]
-            else {
-                return false
-            }
-            return sharedTextFingerprints.contains(fingerprint)
-                && textBox.canRecreateOnLayeredTemplate
+
+        func isHeaderOrFooter(_ bounds: CGRect) -> Bool {
+            let center = (bounds.midY - first.cropBox.minY)
+                / max(1, first.cropBox.height)
+            return center <= 0.18 || center >= 0.82
         }
 
-        let canPromoteImages = sameCanvas
-            && scene.pages.allSatisfy { !$0.usesPageRasterFallback }
-        let commonImageKeys: Set<String>
-        if canPromoteImages {
-            commonImageKeys = scene.pages
-                .map { page in
-                    Set(
-                        page.images
-                            .filter {
-                                $0.hasVisibleReferenceContribution
-                                    && $0.canRecreate(
-                                        onPageSafetyNet: false,
-                                        options: options
-                                    )
-                            }
-                            .map(templateImageKey)
-                    )
-                }
-                .dropFirst()
-                .reduce(
-                    Set(
-                        first.images
-                            .filter {
-                                $0.hasVisibleReferenceContribution
-                                    && $0.canRecreate(
-                                        onPageSafetyNet: false,
-                                        options: options
-                                    )
-                            }
-                            .map(templateImageKey)
-                    )
-                ) { partial, next in
-                    partial.intersection(next)
-                }
-        } else {
-            commonImageKeys = []
+        var textCounts: [String: Int] = [:]
+        var textRepresentatives: [String: PDFSceneTextBox] = [:]
+        for page in scene.pages {
+            for textBox in page.textBoxes where textBox.role == .templateChrome {
+                guard textBox.canRecreateOnLayeredTemplate,
+                      isHeaderOrFooter(textBox.bounds)
+                else { continue }
+                let key = wordTemplateTextKey(textBox)
+                textCounts[key, default: 0] += 1
+                textRepresentatives[key] = textBox
+            }
         }
+        let commonTextKeys = Set(
+            textCounts.compactMap { key, count in
+                count >= minimumRepeatedPages ? key : nil
+            }
+        )
+
+        var imageCounts: [String: Int] = [:]
+        var imageRepresentatives: [String: PDFSceneImage] = [:]
+        for page in scene.pages {
+            let candidates = page.images.filter { image in
+                let isFullPage = image.bounds.minX <= page.cropBox.minX + 0.5
+                    && image.bounds.minY <= page.cropBox.minY + 0.5
+                    && image.bounds.maxX >= page.cropBox.maxX - 0.5
+                    && image.bounds.maxY >= page.cropBox.maxY - 0.5
+                return image.hasVisibleReferenceContribution
+                    && (isHeaderOrFooter(image.bounds) || isFullPage)
+                    && image.canRecreate(
+                        onPageSafetyNet: page.usesPageRasterFallback,
+                        options: options
+                    )
+            }
+            for image in candidates {
+                let key = wordTemplateImageKey(image)
+                imageCounts[key, default: 0] += 1
+                imageRepresentatives[key] = image
+            }
+        }
+        let commonImageKeys = Set(
+            imageCounts.compactMap { key, count in
+                count >= minimumRepeatedPages ? key : nil
+            }
+        )
+
+        var vectorCounts: [String: Int] = [:]
+        var vectorRepresentatives: [String: PDFSceneVector] = [:]
+        for page in scene.pages {
+            guard !page.usesPageRasterFallback else { continue }
+            let candidates = page.vectors.filter { vector in
+                isHeaderOrFooter(vector.bounds)
+                    && vector.canRecreate(
+                        onPageSafetyNet: false,
+                        options: options
+                    )
+            }
+            for vector in candidates {
+                let key = wordTemplateVectorKey(vector)
+                vectorCounts[key, default: 0] += 1
+                vectorRepresentatives[key] = vector
+            }
+        }
+        let commonVectorKeys = Set(
+            vectorCounts.compactMap { key, count in
+                count >= minimumRepeatedPages ? key : nil
+            }
+        )
 
         let backgroundKey = commonImageKeys.first { key in
-            first.images.contains { image in
-                templateImageKey(image) == key
-                    && image.bounds.minX <= first.cropBox.minX + 0.5
-                    && image.bounds.minY <= first.cropBox.minY + 0.5
-                    && image.bounds.maxX >= first.cropBox.maxX - 0.5
-                    && image.bounds.maxY >= first.cropBox.maxY - 0.5
-                    && !image.hasAlpha
-                    && !image.maskApplied
-            }
+            guard let image = imageRepresentatives[key] else { return false }
+            return image.bounds.minX <= first.cropBox.minX + 0.5
+                && image.bounds.minY <= first.cropBox.minY + 0.5
+                && image.bounds.maxX >= first.cropBox.maxX - 0.5
+                && image.bounds.maxY >= first.cropBox.maxY - 0.5
+                && !image.hasAlpha
+                && !image.maskApplied
         }
-        let backgroundImage = backgroundKey.flatMap { key in
-            first.images.first { templateImageKey($0) == key }
+        let backgroundImage = backgroundKey.flatMap { imageRepresentatives[$0] }
+        let allTemplateTextBoxes = commonTextKeys.compactMap { textRepresentatives[$0] }
+        let footerTextBoxes = allTemplateTextBoxes.filter {
+            let center = ($0.bounds.midY - first.cropBox.minY) / max(1, first.cropBox.height)
+            return center <= 0.18
         }
-        let images = first.images.filter {
-            let key = templateImageKey($0)
-            return commonImageKeys.contains(key) && key != backgroundKey
+        let actualHeaderTextBoxes = allTemplateTextBoxes.filter { textBox in
+            !footerTextBoxes.contains { footerBox in footerBox.id == textBox.id }
         }
-        let imageKeys = Set(images.map(templateImageKey))
-            .union(backgroundImage.map { [templateImageKey($0)] } ?? [])
+        let images = commonImageKeys
+            .subtracting(backgroundKey.map { [$0] } ?? [])
+            .compactMap { imageRepresentatives[$0] }
+        let footerImages = images.filter {
+            ($0.bounds.midY - first.cropBox.minY) / max(1, first.cropBox.height) <= 0.18
+        }
+        let headerImages = images.filter { image in
+            !footerImages.contains { footerImage in footerImage.id == image.id }
+        }
+        let vectors = commonVectorKeys.compactMap { vectorRepresentatives[$0] }
+        let footerVectors = vectors.filter {
+            ($0.bounds.midY - first.cropBox.minY) / max(1, first.cropBox.height) <= 0.18
+        }
+        let headerVectors = vectors.filter { vector in
+            !footerVectors.contains { footerVector in footerVector.id == vector.id }
+        }
+
         return WordTemplatePlan(
-            backgroundImage: backgroundImage,
-            textBoxes: textBoxes,
-            textBoxKeys: Set(textBoxes.map(templateTextKey)),
-            images: images,
-            imageKeys: imageKeys
+            header: WordTemplateLayer(
+                backgroundImage: backgroundImage,
+                textBoxes: actualHeaderTextBoxes,
+                images: headerImages,
+                vectors: headerVectors
+            ),
+            footer: WordTemplateLayer(
+                backgroundImage: nil,
+                textBoxes: footerTextBoxes,
+                images: footerImages,
+                vectors: footerVectors
+            )
         )
     }
 
     func templateTextKey(_ textBox: PDFSceneTextBox) -> String {
-        "\(textBox.text)|\(textBox.bounds.debugDescription)|\(textBox.alignment.rawValue)"
+        wordTemplateTextKey(textBox)
     }
 
     func templateImageKey(_ image: PDFSceneImage) -> String {
-        let digest = SHA256.hash(data: image.pngData)
-            .prefix(16)
-            .map { String(format: "%02x", $0) }
-            .joined()
-        let clipDescription = image.clip?.bounds.debugDescription ?? ""
-        return "\(digest)|\(image.bounds.debugDescription)|\(clipDescription)"
+        wordTemplateImageKey(image)
+    }
+
+    func templateVectorKey(_ vector: PDFSceneVector) -> String {
+        wordTemplateVectorKey(vector)
     }
 
     func makeHeaderXML(
         firstPage: PDFScenePage,
-        plan: WordTemplatePlan,
+        layer: WordTemplateLayer,
+        geometry: WordPageGeometry,
+        imageRelationships: [(image: PDFSceneImage, id: String)]
+    ) -> String {
+        makeTemplateXML(
+            rootElement: "w:hdr",
+            firstPage: firstPage,
+            layer: layer,
+            geometry: geometry,
+            imageRelationships: imageRelationships
+        )
+    }
+
+    func makeFooterXML(
+        firstPage: PDFScenePage,
+        layer: WordTemplateLayer,
+        geometry: WordPageGeometry,
+        imageRelationships: [(image: PDFSceneImage, id: String)]
+    ) -> String {
+        makeTemplateXML(
+            rootElement: "w:ftr",
+            firstPage: firstPage,
+            layer: layer,
+            geometry: geometry,
+            imageRelationships: imageRelationships
+        )
+    }
+
+    func makeTemplateXML(
+        rootElement: String,
+        firstPage: PDFScenePage,
+        layer: WordTemplateLayer,
         geometry: WordPageGeometry,
         imageRelationships: [(image: PDFSceneImage, id: String)]
     ) -> String {
@@ -409,14 +632,23 @@ private extension WordprocessingMLWriter {
             cx: emu(geometry.widthPoints),
             cy: emu(geometry.heightPoints)
         )
-        if let backgroundImage = plan.backgroundImage,
+        if let backgroundImage = layer.backgroundImage,
            let relationshipID = imageRelationships.first(where: {
                templateImageKey($0.image) == templateImageKey(backgroundImage)
            })?.id {
             drawings += "<w:r><w:drawing>\(imageAnchor(page: firstPage, geometry: geometry, relationshipID: relationshipID, docPrID: nextDocPrID, extent: imageExtent))</w:drawing></w:r>"
             nextDocPrID += 1
         }
-        for image in plan.images {
+        for vector in layer.vectors.sorted(by: { $0.paintOrder < $1.paintOrder }) {
+            let bounds = vector.bounds
+            let x = emu((bounds.minX - firstPage.cropBox.minX) * geometry.scale)
+            let y = emu((firstPage.height - (bounds.maxY - firstPage.cropBox.minY)) * geometry.scale)
+            let width = emu(max(1, bounds.width * geometry.scale))
+            let height = emu(max(1, bounds.height * geometry.scale))
+            drawings += "<w:r><w:drawing>\(vectorAnchor(vector: vector, x: x, y: y, width: width, height: height, docPrID: nextDocPrID))</w:drawing></w:r>"
+            nextDocPrID += 1
+        }
+        for image in layer.images {
             guard let relationshipID = imageRelationships.first(where: {
                 templateImageKey($0.image) == templateImageKey(image)
             })?.id else {
@@ -430,7 +662,7 @@ private extension WordprocessingMLWriter {
             drawings += "<w:r><w:drawing>\(imageAnchor(image: image, x: x, y: y, width: width, height: height, relationshipID: relationshipID, docPrID: nextDocPrID))</w:drawing></w:r>"
             nextDocPrID += 1
         }
-        for textBox in plan.textBoxes {
+        for textBox in layer.textBoxes {
             let bounds = textBox.officeBounds
             let x = emu((bounds.minX - firstPage.cropBox.minX) * geometry.scale)
             let y = emu((firstPage.height - (bounds.maxY - firstPage.cropBox.minY)) * geometry.scale)
@@ -441,7 +673,7 @@ private extension WordprocessingMLWriter {
         }
         return """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:hdr xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" mc:Ignorable="w14 wp14"><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr>\(drawings)</w:p></w:hdr>
+        <\(rootElement) xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" mc:Ignorable="w14 wp14"><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr>\(drawings)</w:p></\(rootElement)>
         """
     }
 
@@ -453,7 +685,8 @@ private extension WordprocessingMLWriter {
         nextDocPrID: inout Int,
         options: DocumentConversionPipelineOptions,
         templateTextBoxKeys: Set<String>,
-        templateImageKeys: Set<String>
+        templateImageKeys: Set<String>,
+        templateVectorKeys: Set<String>
     ) -> String {
         let imageExtent = (
             cx: emu(geometry.widthPoints),
@@ -484,7 +717,7 @@ private extension WordprocessingMLWriter {
             $0.canRecreate(
                 onPageSafetyNet: page.usesPageRasterFallback,
                 options: options
-            )
+            ) && !templateVectorKeys.contains(templateVectorKey($0))
         }
         let overlays: [Overlay]
         if page.usesPageRasterFallback {
@@ -943,6 +1176,23 @@ private extension WordprocessingMLWriter {
                 )
             ]
             : textBox.lines
+        if isDynamicPageNumber(textBox),
+           let firstLine = lines.first {
+            let runs = firstLine.runs.isEmpty
+                ? wordRun(
+                    PDFSceneTextRun(
+                        PDFTextRun(
+                            text: firstLine.text,
+                            fontName: textBox.fontName,
+                            fontSize: textBox.fontSize,
+                            textColor: textBox.color,
+                            isOfficeCompatible: true
+                        )
+                    )
+                )
+                : firstLine.runs.map(wordRun).joined()
+            return "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"1\" w:lineRule=\"atLeast\"/><w:jc w:val=\"\(alignment)\"/></w:pPr><w:fldSimple w:instr=\" PAGE \">\(runs)</w:fldSimple></w:p>"
+        }
         return lines.enumerated().map { index, line in
             let previousLine = index > 0 ? lines[index - 1] : nil
             let spacing = lineSpacingTwips(
@@ -1063,13 +1313,17 @@ private extension WordprocessingMLWriter {
 
     func sectionProperties(
         for geometry: WordPageGeometry,
-        headerRelationshipID: String? = nil
+        headerRelationshipID: String? = nil,
+        footerRelationshipID: String? = nil
     ) -> String {
         let orientation = geometry.widthPoints > geometry.heightPoints ? " w:orient=\"landscape\"" : ""
         let header = headerRelationshipID.map {
             "<w:headerReference w:type=\"default\" r:id=\"\(XMLValue.attribute($0))\"/>"
         } ?? ""
-        return "\(header)<w:pgSz w:w=\"\(geometry.widthTwips)\" w:h=\"\(geometry.heightTwips)\"\(orientation)/><w:pgMar w:top=\"0\" w:right=\"0\" w:bottom=\"0\" w:left=\"0\" w:header=\"0\" w:footer=\"0\" w:gutter=\"0\"/><w:cols w:space=\"0\"/><w:docGrid w:linePitch=\"1\"/>"
+        let footer = footerRelationshipID.map {
+            "<w:footerReference w:type=\"default\" r:id=\"\(XMLValue.attribute($0))\"/>"
+        } ?? ""
+        return "\(header)\(footer)<w:pgSz w:w=\"\(geometry.widthTwips)\" w:h=\"\(geometry.heightTwips)\"\(orientation)/><w:pgMar w:top=\"0\" w:right=\"0\" w:bottom=\"0\" w:left=\"0\" w:header=\"0\" w:footer=\"0\" w:gutter=\"0\"/><w:cols w:space=\"0\"/><w:docGrid w:linePitch=\"1\"/>"
     }
 
     func emu(_ points: CGFloat) -> Int {
@@ -1112,7 +1366,7 @@ private extension WordprocessingMLWriter {
     static let coreProperties = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><dc:title>KC DeepL PDF 변환</dc:title><dc:creator>KC DeepL</dc:creator><cp:lastModifiedBy>KC DeepL</cp:lastModifiedBy><dcterms:created xsi:type=\"dcterms:W3CDTF\">2000-01-01T00:00:00Z</dcterms:created></cp:coreProperties>"
     static let appProperties = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\"><Application>KC DeepL</Application><AppVersion>1.0</AppVersion></Properties>"
 
-    static func contentTypes(pageCount: Int, hasHeader: Bool = false) -> String {
+    static func contentTypes(pageCount: Int, hasHeader: Bool = false, hasFooter: Bool = false) -> String {
         let overrides = [
             "/word/document.xml|application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
             "/word/styles.xml|application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
@@ -1121,6 +1375,8 @@ private extension WordprocessingMLWriter {
             "/word/fontTable.xml|application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"
         ] + (hasHeader
             ? ["/word/header1.xml|application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"]
+            : []) + (hasFooter
+            ? ["/word/footer1.xml|application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"]
             : [])
         let images = (1...pageCount).map { _ in "" }.joined()
         _ = images

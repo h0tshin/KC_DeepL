@@ -24,7 +24,8 @@ struct PDFSceneExtractor {
     func extract(
         sourceURL: URL,
         layoutTarget: PDFOfficeLayoutTarget = .presentation,
-        options: DocumentConversionPipelineOptions = .default
+        options: DocumentConversionPipelineOptions = .default,
+        progress: (@Sendable (_ fraction: Double, _ phase: DocumentConversionProgress.Phase, _ completedPage: Int, _ totalPages: Int, _ message: String) -> Void)? = nil
     ) throws -> PDFSceneDocument {
         guard sourceURL.isFileURL,
               sourceURL.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame
@@ -48,6 +49,8 @@ struct PDFSceneExtractor {
             throw DocumentConversionError.emptyPDF
         }
 
+        progress?(0.02, .preparing, 0, document.pageCount, "PDF 페이지를 준비하는 중입니다.")
+
         let sha = Self.sha256(data)
         let analysis = try? PDFDocumentAnalysisService(
             includeOCR: true,
@@ -55,7 +58,10 @@ struct PDFSceneExtractor {
             maximumOCRImageDimension: 2_400,
             requiresSourceMaskHaloValidation: true,
             retainDocumentChromeForTemplate: true
-        ).analyze(sourceURL: sourceURL)
+        ).analyze(sourceURL: sourceURL) { completedPage, totalPages in
+            let fraction = 0.05 + 0.35 * Double(completedPage) / Double(max(1, totalPages))
+            progress?(fraction, .analyzing, completedPage, totalPages, "텍스트와 문단 구조를 분석하는 중입니다. (\(completedPage)/\(totalPages))")
+        }
 
         var pages: [PDFScenePage] = []
         pages.reserveCapacity(document.pageCount)
@@ -97,23 +103,59 @@ struct PDFSceneExtractor {
                 in: imageSummary.images,
                 cropBox: cropBox
             )
-            let resolvedImages = Self.promotingVisibleLayeredAlphaImages(
+            var resolvedImages = Self.promotingVisibleLayeredAlphaImages(
                 in: imageSummary.images,
                 background: layeredBackground,
                 referencePagePNG: referenceImageData,
                 vectors: graphics.vectors
             )
+            let nativeCanvasColor: PDFTextColor?
+            if analysis == nil {
+                nativeCanvasColor = nil
+            } else {
+                nativeCanvasColor = Self.uniformBackgroundColor(
+                    in: referenceImageData,
+                    cropBox: cropBox,
+                    foregroundBounds: textBoxes.map(\.officeBounds)
+                        + resolvedImages.map(\.bounds)
+                        + graphics.vectors.map(\.bounds)
+                )
+            }
+            if let nativeCanvasColor {
+                // A white (or otherwise uniform) PDF canvas is a real
+                // reconstruction layer, not a reason to flatten the page.
+                // Image safety-net comparison is intentionally conservative
+                // for colour-managed JPEGs and soft masks; use a second proof
+                // against the known canvas to recover visible source images
+                // without promoting an image that is completely hidden.
+                resolvedImages = Self.promotingNativeCanvasImages(
+                    in: resolvedImages,
+                    referencePagePNG: referenceImageData,
+                    cropBox: cropBox,
+                    canvasColor: nativeCanvasColor
+                )
+            }
             let usesLayeredTemplate = Self.canUseLayeredTemplate(
                 background: layeredBackground,
                 textBoxes: textBoxes,
                 images: resolvedImages,
                 vectors: graphics.vectors,
-                options: options
+                options: options,
+                nativeCanvasColorAvailable: nativeCanvasColor != nil
             )
             let imageData: Data
+            let isNativeCanvasBackground: Bool
             if usesLayeredTemplate,
                let layeredBackground {
                 imageData = layeredBackground.pngData
+                isNativeCanvasBackground = false
+            } else if layeredBackground == nil, nativeCanvasColor != nil {
+                // Keep the immutable source render for diagnostics and the
+                // orientation contract of PDFScenePage. Writers omit this
+                // raster when `isNativeCanvasBackground` is true and use the
+                // proven uniform canvas plus native objects instead.
+                imageData = referenceImageData
+                isNativeCanvasBackground = true
             } else {
                 let masks = Self.rasterRepairMasks(
                     pageAnalysis: pageAnalysis,
@@ -128,6 +170,7 @@ struct PDFSceneExtractor {
                     cropBox: cropBox,
                     masks: masks
                 )
+                isNativeCanvasBackground = false
             }
 
             var pageWarnings = pageAnalysis?.warnings.map(\.message) ?? []
@@ -176,13 +219,18 @@ struct PDFSceneExtractor {
                 extractedImageCount: imageSummary.extractedImageCount,
                 nativeVectorCount: graphics.vectors.filter(\.nativeEligible).count,
                 warnings: pageWarnings,
-                usesPageRasterFallback: usesFallback
+                usesPageRasterFallback: usesFallback,
+                isNativeCanvasBackground: isNativeCanvasBackground
             )
             pages.append(scenePage)
             documentWarnings.append(contentsOf: pageWarnings)
+            let completedPage = pageIndex + 1
+            let fraction = 0.40 + 0.35 * Double(completedPage) / Double(max(1, document.pageCount))
+            progress?(fraction, .extracting, completedPage, document.pageCount, "페이지의 텍스트·이미지·도형을 추출하는 중입니다. (\(completedPage)/\(document.pageCount))")
         }
 
         let classifiedPages = Self.classifyRepeatedTemplates(in: pages)
+        progress?(0.78, .extracting, document.pageCount, document.pageCount, "반복되는 템플릿 요소를 분류하는 중입니다.")
         return PDFSceneDocument(
             sourceURL: sourceURL.standardizedFileURL,
             sourceSHA256: sha,
@@ -536,19 +584,197 @@ private extension PDFSceneExtractor {
         return Double(matchingSamples) / Double(contributingSamples) >= 0.64
     }
 
+    /// Promotes visible image occurrences on a proven uniform canvas even
+    /// when the normal page-safety-net matcher rejects them. JPEG colour
+    /// management and PDF soft-mask sampling can make a pixel-for-pixel
+    /// comparison fail although the image is plainly a separate source
+    /// object. This proof compares only non-canvas ink and requires that the
+    /// rendered page contains the same ink at the original placement, so a
+    /// completely covered resource is still left in the authoritative raster.
+    static func promotingNativeCanvasImages(
+        in images: [PDFSceneImage],
+        referencePagePNG: Data,
+        cropBox: CGRect,
+        canvasColor: PDFTextColor
+    ) -> [PDFSceneImage] {
+        guard let referenceBitmap = NSBitmapImageRep(data: referencePagePNG),
+              referenceBitmap.pixelsWide > 0,
+              referenceBitmap.pixelsHigh > 0
+        else {
+            return images
+        }
+
+        var resolved = images
+        for index in resolved.indices {
+            let image = resolved[index]
+            guard image.hasRepresentableGeometry,
+                  image.clip == nil,
+                  image.bounds.width > 1,
+                  image.bounds.height > 1,
+                  !image.hasVisibleReferenceContribution,
+                  let imageBitmap = NSBitmapImageRep(data: image.pngData),
+                  imageBitmap.pixelsWide > 1,
+                  imageBitmap.pixelsHigh > 1,
+                  nativeCanvasImageHasVisibleInk(
+                      imageBitmap: imageBitmap,
+                      imageBounds: image.bounds,
+                      cropBox: cropBox,
+                      referenceBitmap: referenceBitmap,
+                      canvasColor: canvasColor
+                  )
+            else {
+                continue
+            }
+            resolved[index] = PDFSceneImage(
+                id: image.id,
+                sourceName: image.sourceName,
+                bounds: image.bounds,
+                pngData: image.pngData,
+                paintOrder: image.paintOrder,
+                hasAlpha: image.hasAlpha,
+                maskApplied: image.maskApplied,
+                backdropColor: image.backdropColor,
+                isBackdropIndependent: image.isBackdropIndependent,
+                isSafetyNetVerifiedOpaque: image.isSafetyNetVerifiedOpaque,
+                hasRepresentableGeometry: image.hasRepresentableGeometry,
+                isNativeObjectEligible: image.isNativeObjectEligible,
+                isLayeredTemplateEligible: true,
+                hasVisibleReferenceContribution: true,
+                clip: image.clip
+            )
+        }
+        return resolved
+    }
+
+    private static func nativeCanvasImageHasVisibleInk(
+        imageBitmap: NSBitmapImageRep,
+        imageBounds: CGRect,
+        cropBox: CGRect,
+        referenceBitmap: NSBitmapImageRep,
+        canvasColor: PDFTextColor
+    ) -> Bool {
+        let columns = min(64, max(16, Int((imageBounds.width / 6).rounded())))
+        let rows = min(64, max(16, Int((imageBounds.height / 6).rounded())))
+        let pageScaleX = CGFloat(referenceBitmap.pixelsWide) / cropBox.width
+        let pageScaleY = CGFloat(referenceBitmap.pixelsHigh) / cropBox.height
+        let canvasRed = canvasColor.red * 255
+        let canvasGreen = canvasColor.green * 255
+        let canvasBlue = canvasColor.blue * 255
+
+        func color(
+            _ bitmap: NSBitmapImageRep,
+            x: Int,
+            y: Int
+        ) -> PDFTextColor? {
+            guard let value = bitmap.colorAt(x: x, y: y)?
+                .usingColorSpace(.deviceRGB)
+            else { return nil }
+            return PDFTextColor(
+                red: value.redComponent,
+                green: value.greenComponent,
+                blue: value.blueComponent,
+                alpha: value.alphaComponent
+            )
+        }
+
+        func evaluate(flipVertically: Bool) -> (ink: Int, matches: Int, renderedInk: Int) {
+            var sourceInk = 0
+            var matchingInk = 0
+            var renderedInk = 0
+            for row in 0..<rows {
+                let v = (CGFloat(row) + 0.5) / CGFloat(rows)
+                let sourceV = flipVertically ? 1 - v : v
+                let imageY = min(
+                    imageBitmap.pixelsHigh - 1,
+                    max(0, Int((sourceV * CGFloat(imageBitmap.pixelsHigh - 1)).rounded()))
+                )
+                let pageY = min(
+                    referenceBitmap.pixelsHigh - 1,
+                    max(0, Int(((cropBox.maxY - (imageBounds.maxY - v * imageBounds.height)) * pageScaleY).rounded()))
+                )
+                for column in 0..<columns {
+                    let u = (CGFloat(column) + 0.5) / CGFloat(columns)
+                    let imageX = min(
+                        imageBitmap.pixelsWide - 1,
+                        max(0, Int((u * CGFloat(imageBitmap.pixelsWide - 1)).rounded()))
+                    )
+                    let pageX = min(
+                        referenceBitmap.pixelsWide - 1,
+                        max(0, Int((((imageBounds.minX + u * imageBounds.width) - cropBox.minX) * pageScaleX).rounded()))
+                    )
+                    guard let source = color(imageBitmap, x: imageX, y: imageY),
+                          let rendered = color(referenceBitmap, x: pageX, y: pageY)
+                    else { continue }
+                    let sourceAlpha = min(max(source.alpha, 0), 1)
+                    let expectedRed = sourceAlpha * source.red * 255 + (1 - sourceAlpha) * canvasRed
+                    let expectedGreen = sourceAlpha * source.green * 255 + (1 - sourceAlpha) * canvasGreen
+                    let expectedBlue = sourceAlpha * source.blue * 255 + (1 - sourceAlpha) * canvasBlue
+                    let sourceInkDistance = max(
+                        abs(expectedRed - canvasRed),
+                        abs(expectedGreen - canvasGreen),
+                        abs(expectedBlue - canvasBlue)
+                    )
+                    let renderedInkDistance = max(
+                        abs(rendered.red * 255 - canvasRed),
+                        abs(rendered.green * 255 - canvasGreen),
+                        abs(rendered.blue * 255 - canvasBlue)
+                    )
+                    // Transparent pixels and JPEG's clean white backdrop do
+                    // not prove that an occurrence contributes to the page.
+                    guard sourceAlpha >= 0.04, sourceInkDistance >= 10 else {
+                        continue
+                    }
+                    sourceInk += 1
+                    if renderedInkDistance >= 8 {
+                        renderedInk += 1
+                    }
+                    let directDifference = max(
+                        abs(expectedRed - rendered.red * 255),
+                        abs(expectedGreen - rendered.green * 255),
+                        abs(expectedBlue - rendered.blue * 255)
+                    )
+                    if directDifference <= 48 {
+                        matchingInk += 1
+                    }
+                }
+            }
+            return (sourceInk, matchingInk, renderedInk)
+        }
+
+        let normal = evaluate(flipVertically: false)
+        let flipped = evaluate(flipVertically: true)
+        let best = normal.matches >= flipped.matches ? normal : flipped
+        guard best.ink >= 8, best.renderedInk >= 6 else { return false }
+        return Double(best.matches) / Double(best.ink) >= 0.28
+    }
+
     static func canUseLayeredTemplate(
         background: PDFSceneImage?,
         textBoxes: [PDFSceneTextBox],
         images: [PDFSceneImage],
         vectors: [PDFSceneVector],
-        options: DocumentConversionPipelineOptions = .default
+        options: DocumentConversionPipelineOptions = .default,
+        nativeCanvasColorAvailable: Bool = false
     ) -> Bool {
-        guard let background,
-              textBoxes
-                .filter(\.hasVisibleReferenceContribution)
-                .allSatisfy(\.canRecreateOnLayeredTemplate)
+        guard textBoxes
+            .filter(\.hasVisibleReferenceContribution)
+            .allSatisfy(\.canRecreateOnLayeredTemplate)
         else {
             return false
+        }
+        guard let background else {
+            // A PDF with no full-page image can still be reconstructed from
+            // its native objects when the remaining canvas is proven to be a
+            // uniform colour.  The extractor replaces that canvas with a
+            // tiny, non-content background raster; it never captures the
+            // page's foreground into the fallback image.
+            guard nativeCanvasColorAvailable else { return false }
+            return images.allSatisfy {
+                $0.hasVisibleReferenceContribution
+                    && $0.canRecreate(onPageSafetyNet: false, options: options)
+            } && vectors.allSatisfy {
+                $0.canRecreate(onPageSafetyNet: false, options: options)
+            }
         }
         let foregroundImages = images.filter {
             $0.id != background.id && $0.hasVisibleReferenceContribution
@@ -559,6 +785,89 @@ private extension PDFSceneExtractor {
             && vectors.allSatisfy {
                 $0.canRecreate(onPageSafetyNet: false, options: options)
             }
+    }
+
+    /// Returns a stable canvas colour only when samples along the page edges
+    /// agree and are not covered by any extracted foreground object.  This is
+    /// intentionally conservative: a gradient, watermark, pattern, or
+    /// unsupported paint path fails the proof and keeps the authoritative page
+    /// safety-net instead of silently dropping it.
+    static func uniformBackgroundColor(
+        in pagePNG: Data,
+        cropBox: CGRect,
+        foregroundBounds: [CGRect]
+    ) -> PDFTextColor? {
+        guard let bitmap = NSBitmapImageRep(data: pagePNG),
+              bitmap.pixelsWide > 0,
+              bitmap.pixelsHigh > 0,
+              cropBox.width > 0,
+              cropBox.height > 0
+        else {
+            return nil
+        }
+
+        let edgeSamples: [(CGFloat, CGFloat)] = [
+            (0.02, 0.02), (0.25, 0.02), (0.50, 0.02), (0.75, 0.02), (0.98, 0.02),
+            (0.02, 0.25), (0.02, 0.50), (0.02, 0.75),
+            (0.98, 0.25), (0.98, 0.50), (0.98, 0.75),
+            (0.02, 0.98), (0.25, 0.98), (0.50, 0.98), (0.75, 0.98), (0.98, 0.98),
+            // Interior probes catch gradients or unsupported full-page
+            // artwork whose border happens to be uniform.
+            (0.18, 0.18), (0.50, 0.18), (0.82, 0.18),
+            (0.18, 0.50), (0.50, 0.50), (0.82, 0.50),
+            (0.18, 0.82), (0.50, 0.82), (0.82, 0.82)
+        ]
+
+        func isForeground(_ normalized: (CGFloat, CGFloat)) -> Bool {
+            let pagePoint = CGPoint(
+                x: cropBox.minX + normalized.0 * cropBox.width,
+                y: cropBox.maxY - normalized.1 * cropBox.height
+            )
+            return foregroundBounds.contains { bounds in
+                bounds.insetBy(dx: -2, dy: -2).contains(pagePoint)
+            }
+        }
+
+        var colours: [PDFTextColor] = []
+        for normalized in edgeSamples where !isForeground(normalized) {
+            let x = min(
+                bitmap.pixelsWide - 1,
+                max(0, Int((normalized.0 * CGFloat(bitmap.pixelsWide)).rounded(.down)))
+            )
+            let y = min(
+                bitmap.pixelsHigh - 1,
+                max(0, Int((normalized.1 * CGFloat(bitmap.pixelsHigh)).rounded(.down)))
+            )
+            guard let colour = bitmap.colorAt(x: x, y: y)?
+                .usingColorSpace(.deviceRGB)
+            else { continue }
+            let value = PDFTextColor(
+                red: colour.redComponent,
+                green: colour.greenComponent,
+                blue: colour.blueComponent,
+                alpha: colour.alphaComponent
+            )
+            guard value.alpha >= 0.98 else { return nil }
+            colours.append(value)
+        }
+        guard colours.count >= 4 else { return nil }
+        let reference = colours[0]
+        guard colours.allSatisfy({ colour in
+            max(
+                abs(colour.red - reference.red),
+                abs(colour.green - reference.green),
+                abs(colour.blue - reference.blue)
+            ) <= 0.045
+        }) else {
+            return nil
+        }
+        let count = CGFloat(colours.count)
+        return PDFTextColor(
+            red: colours.reduce(0) { $0 + $1.red } / count,
+            green: colours.reduce(0) { $0 + $1.green } / count,
+            blue: colours.reduce(0) { $0 + $1.blue } / count,
+            alpha: 1
+        )
     }
 
     static func textBoxes(
@@ -1790,7 +2099,8 @@ private extension PDFSceneExtractor {
                 extractedImageCount: page.extractedImageCount,
                 nativeVectorCount: page.nativeVectorCount,
                 warnings: page.warnings,
-                usesPageRasterFallback: page.usesPageRasterFallback
+                usesPageRasterFallback: page.usesPageRasterFallback,
+                isNativeCanvasBackground: page.isNativeCanvasBackground
             )
         }
     }
@@ -3603,10 +3913,23 @@ private enum PDFImageExtractor {
                             bitsPerComponent: Int(bits)
                         )
                     let maxSample = Double((1 << Int(bits)) - 1)
-                    let normalized = Double(sample) / maxSample
-                    let low = decodeValues[channel * 2]
-                    let high = decodeValues[channel * 2 + 1]
-                    samples[channel] = low + normalized * (high - low)
+                    // Indexed PDF colour spaces address a palette with the
+                    // decoded sample value (0...maxIndex), not a normalized
+                    // 0...1 component. Mapping an 8-bit index through the
+                    // generic component path collapses indices 0, 1 and 2 to
+                    // the first palette entry and turns real logos into white
+                    // silhouettes when a soft mask is present.
+                    if case let .indexed(indexed) = effectiveColorSpace {
+                        samples[channel] = min(
+                            Double(indexed.maximumIndex),
+                            Double(sample)
+                        )
+                    } else {
+                        let normalized = Double(sample) / maxSample
+                        let low = decodeValues[channel * 2]
+                        let high = decodeValues[channel * 2 + 1]
+                        samples[channel] = low + normalized * (high - low)
+                    }
                 }
 
                 let isColorKeyTransparent = colorKeyRanges.map {
