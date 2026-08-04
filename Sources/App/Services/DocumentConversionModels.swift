@@ -83,6 +83,28 @@ enum DocumentTemplatePriority: String, CaseIterable, Codable, Identifiable, Send
             "반복되는 안전한 요소를 PPTX 슬라이드 마스터 또는 DOCX 공통 헤더 레이어로 이동합니다."
         }
     }
+
+    /// Word does not expose a slide-master UI.  Keep the persisted enum
+    /// shared with PPTX, but present the choice to users as the actual Word
+    /// behavior: whether repeated header/footer formatting is emitted into
+    /// the document's common header/footer parts.
+    var wordDisplayName: String {
+        switch self {
+        case .perPage:
+            "페이지별 오브젝트"
+        case .repeatedToTemplate:
+            "꼬리말 사용"
+        }
+    }
+
+    var wordDetail: String {
+        switch self {
+        case .perPage:
+            "반복되는 머릿말·꼬리말과 공통 선·이미지를 각 페이지의 본문 오브젝트로 보존합니다."
+        case .repeatedToTemplate:
+            "반복되는 머릿말·꼬리말과 공통 선·이미지를 DOCX 공통 머리글·꼬리말 영역으로 분리하고 본문에서 제거합니다."
+        }
+    }
 }
 
 /// Controls how decoded PDF image assets are represented in the Office
@@ -251,7 +273,10 @@ struct PresentationConversionOptions: Codable, Equatable, Sendable {
 }
 
 struct WordConversionOptions: Codable, Equatable, Sendable {
-    var templatePriority: DocumentTemplatePriority = .perPage
+    // Shared header/footer formatting is the useful Word default.  The
+    // persisted enum remains backward compatible, so an existing saved
+    // preference of `.perPage` is still respected until the user changes it.
+    var templatePriority: DocumentTemplatePriority = .repeatedToTemplate
     var textRepresentation: WordTextRepresentation = .textBoxes
     var textBoxAllowance: WordTextBoxAllowance = .balanced
     var imageGroupingLevel: DocumentImageGroupingLevel = .split

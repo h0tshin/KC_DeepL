@@ -345,7 +345,15 @@ private func wordTemplateVectorKey(_ vector: PDFSceneVector) -> String {
         .joined()
 }
 
-private func wordTemplateTextKey(_ textBox: PDFSceneTextBox) -> String {
+private enum WordTemplateTextBand: String {
+    case header
+    case footer
+}
+
+private func wordTemplateTextKey(
+    _ textBox: PDFSceneTextBox,
+    band: WordTemplateTextBand
+) -> String {
     let compactText = textBox.text
         .split(whereSeparator: { $0.isWhitespace })
         .joined(separator: " ")
@@ -355,17 +363,11 @@ private func wordTemplateTextKey(_ textBox: PDFSceneTextBox) -> String {
     let canonicalText = isDynamicPageNumber(textBox)
         ? "__page_number__"
         : compactText
-    func quantize(_ value: CGFloat, step: CGFloat) -> Int {
-        Int((value / step).rounded())
-    }
-    let bounds = textBox.bounds
-    let geometry = [
-        quantize(bounds.minX, step: 8),
-        quantize(bounds.minY, step: 8),
-        quantize(bounds.width, step: 4),
-        quantize(bounds.height, step: 4)
-    ].map(String.init).joined(separator: ",")
-    return "\(canonicalText)|\(geometry)|\(textBox.alignment.rawValue)"
+    // Header/footer bounds and even the inferred alignment can legitimately
+    // move between mirrored (even/odd) PDF pages.  The caller supplies the
+    // semantic band from that page's crop box, so the key never depends on a
+    // fixed absolute page height or on one page's glyph-box measurements.
+    return "\(canonicalText)|\(band.rawValue)"
 }
 
 private func isDynamicPageNumber(_ textBox: PDFSceneTextBox) -> Bool {
@@ -374,12 +376,15 @@ private func isDynamicPageNumber(_ textBox: PDFSceneTextBox) -> Bool {
 }
 
 private struct WordTemplateLayer {
+    let textBand: WordTemplateTextBand
     let backgroundImage: PDFSceneImage?
     let textBoxes: [PDFSceneTextBox]
     let images: [PDFSceneImage]
     let vectors: [PDFSceneVector]
 
-    var textBoxKeys: Set<String> { Set(textBoxes.map(wordTemplateTextKey)) }
+    var textBoxKeys: Set<String> {
+        Set(textBoxes.map { wordTemplateTextKey($0, band: textBand) })
+    }
     var imageKeys: Set<String> { Set(images.map(wordTemplateImageKey)) }
     var vectorKeys: Set<String> { Set(vectors.map(wordTemplateVectorKey)) }
 
@@ -388,6 +393,7 @@ private struct WordTemplateLayer {
     }
 
     static let empty = WordTemplateLayer(
+        textBand: .header,
         backgroundImage: nil,
         textBoxes: [],
         images: [],
@@ -465,7 +471,12 @@ private extension WordprocessingMLWriter {
                 guard textBox.canRecreateOnLayeredTemplate,
                       isHeaderOrFooter(textBox.bounds)
                 else { continue }
-                let key = wordTemplateTextKey(textBox)
+                let center = (textBox.bounds.midY - first.cropBox.minY)
+                    / max(1, first.cropBox.height)
+                let band: WordTemplateTextBand = center <= 0.18
+                    ? .footer
+                    : .header
+                let key = wordTemplateTextKey(textBox, band: band)
                 textCounts[key, default: 0] += 1
                 textRepresentatives[key] = textBox
             }
@@ -563,12 +574,14 @@ private extension WordprocessingMLWriter {
 
         return WordTemplatePlan(
             header: WordTemplateLayer(
+                textBand: .header,
                 backgroundImage: backgroundImage,
                 textBoxes: actualHeaderTextBoxes,
                 images: headerImages,
                 vectors: headerVectors
             ),
             footer: WordTemplateLayer(
+                textBand: .footer,
                 backgroundImage: nil,
                 textBoxes: footerTextBoxes,
                 images: footerImages,
@@ -577,8 +590,16 @@ private extension WordprocessingMLWriter {
         )
     }
 
-    func templateTextKey(_ textBox: PDFSceneTextBox) -> String {
-        wordTemplateTextKey(textBox)
+    func templateTextKey(
+        _ textBox: PDFSceneTextBox,
+        page: PDFScenePage
+    ) -> String {
+        let center = (textBox.bounds.midY - page.cropBox.minY)
+            / max(1, page.cropBox.height)
+        let band: WordTemplateTextBand = center <= 0.18
+            ? .footer
+            : .header
+        return wordTemplateTextKey(textBox, band: band)
     }
 
     func templateImageKey(_ image: PDFSceneImage) -> String {
@@ -769,7 +790,7 @@ private extension WordprocessingMLWriter {
             ? []
             : page.textBoxes.filter {
                 $0.role == .templateChrome && $0.canRecreateOnLayeredTemplate
-                    && !templateTextBoxKeys.contains(templateTextKey($0))
+                    && !templateTextBoxKeys.contains(templateTextKey($0, page: page))
             }
         let contentTextBoxes = page.textBoxes.filter {
             $0.role == .editableContent
@@ -810,7 +831,7 @@ private extension WordprocessingMLWriter {
             .filter {
                 $0.role == .editableContent
                     && $0.canRecreateOnLayeredTemplate
-                    && !templateTextBoxKeys.contains(templateTextKey($0))
+                    && !templateTextBoxKeys.contains(templateTextKey($0, page: page))
                     && !shouldUseFloatingTextBox($0, options: options)
             }
             // PDF content streams are not required to be emitted in visual

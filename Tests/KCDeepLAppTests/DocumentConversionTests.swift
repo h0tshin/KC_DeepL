@@ -1445,6 +1445,26 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertFalse(decoded.pipeline(for: .docx).preserveNativeVectors)
     }
 
+    func testWordCommonFormattingOptionUsesFooterTerminology() {
+        XCTAssertEqual(
+            DocumentTemplatePriority.repeatedToTemplate.wordDisplayName,
+            "꼬리말 사용"
+        )
+        XCTAssertEqual(
+            DocumentTemplatePriority.perPage.wordDisplayName,
+            "페이지별 오브젝트"
+        )
+        XCTAssertEqual(
+            WordConversionOptions().templatePriority,
+            .repeatedToTemplate
+        )
+        XCTAssertTrue(
+            DocumentTemplatePriority.repeatedToTemplate.wordDetail.contains(
+                "공통 머리글·꼬리말"
+            )
+        )
+    }
+
     func testTemplatePriorityUsesPPTMasterAndDOCXHeaderLayer() throws {
         let scene = makeTemplateScene()
         var options = DocumentConversionPipelineOptions.default
@@ -1509,7 +1529,15 @@ final class DocumentConversionTests: XCTestCase {
         )
         let documentXML = try XCTUnwrap(String(data: documentPart.data, encoding: .utf8))
         XCTAssertTrue(documentXML.contains("<w:headerReference"))
+        XCTAssertTrue(documentXML.contains("<w:footerReference"))
         XCTAssertFalse(documentXML.contains("Shared chrome"))
+        XCTAssertFalse(documentXML.contains("Shared footer"))
+        let footerPart = try XCTUnwrap(
+            wordParts.first(where: { $0.name == "word/footer1.xml" })
+        )
+        let footerXML = try XCTUnwrap(String(data: footerPart.data, encoding: .utf8))
+        XCTAssertTrue(footerXML.contains("Shared footer"))
+        XCTAssertTrue(footerXML.contains("PAGE"))
     }
 
     @MainActor
@@ -1554,41 +1582,89 @@ private final class ProgressRecorder: @unchecked Sendable {
 
 private extension DocumentConversionTests {
     func makeTemplateScene() -> PDFSceneDocument {
-        let bounds = CGRect(x: 72, y: 720, width: 160, height: 18)
-        let run = PDFSceneTextRun(
-            PDFTextRun(
-                text: "Shared chrome",
+        func makeTextBox(
+            id: String,
+            lineID: String,
+            text: String,
+            bounds: CGRect,
+            alignment: PDFTextAlignment = .left
+        ) -> PDFSceneTextBox {
+            let run = PDFSceneTextRun(
+                PDFTextRun(
+                    text: text,
+                    fontName: "Arial",
+                    fontSize: 12,
+                    textColor: .black,
+                    isOfficeCompatible: true
+                )
+            )
+            let line = PDFSceneTextLine(
+                id: lineID,
+                text: text,
+                bounds: bounds,
+                runs: [run],
+                sourceMaskBounds: bounds,
+                sourceMaskIsSafe: true,
+                hasVisibleInk: true,
+                extractionSource: .native
+            )
+            return PDFSceneTextBox(
+                id: id,
+                text: text,
+                bounds: bounds,
+                layoutBounds: bounds,
                 fontName: "Arial",
                 fontSize: 12,
-                textColor: .black,
-                isOfficeCompatible: true
+                color: .black,
+                alignment: alignment,
+                lineCount: 1,
+                sourceLineIDs: [line.id],
+                extractionSource: .native,
+                lines: [line],
+                visualPolicy: .replaceSourcePaint,
+                role: .templateChrome
             )
-        )
-        let line = PDFSceneTextLine(
-            id: "template-line",
-            text: "Shared chrome",
-            bounds: bounds,
-            runs: [run],
-            sourceMaskBounds: bounds,
-            sourceMaskIsSafe: true,
-            hasVisibleInk: true,
-            extractionSource: .native
-        )
-        let textBox = PDFSceneTextBox(
+        }
+
+        let bounds = CGRect(x: 72, y: 720, width: 160, height: 18)
+        let textBox = makeTextBox(
             id: "template-template-line",
+            lineID: "template-line",
             text: "Shared chrome",
-            bounds: bounds,
-            layoutBounds: bounds,
-            fontName: "Arial",
-            fontSize: 12,
-            color: .black,
-            alignment: .left,
-            lineCount: 1,
-            sourceLineIDs: [line.id],
-            extractionSource: .native,
-            lines: [line],
-            visualPolicy: .replaceSourcePaint,
-            role: .templateChrome
+            bounds: bounds
+        )
+        let footerBounds = CGRect(x: 72, y: 24, width: 180, height: 18)
+        let footerTextBox = makeTextBox(
+            id: "template-footer-line",
+            lineID: "template-footer-line",
+            text: "Shared footer",
+            bounds: footerBounds
+        )
+        let pageNumberBounds = CGRect(x: 540, y: 24, width: 24, height: 18)
+        let pageNumberTextBox = makeTextBox(
+            id: "template-page-number",
+            lineID: "template-page-number",
+            text: "5",
+            bounds: pageNumberBounds,
+            alignment: .right
+        )
+        // PDFKit can infer a different alignment and x-origin for a mirrored
+        // page even when the source header is the same shared object.  The
+        // writer must still place this text in one DOCX header, rather than
+        // leaking the second copy into the document body.
+        let mirroredTextBox = makeTextBox(
+            id: "template-mirrored-line",
+            lineID: "template-mirrored-line",
+            text: "Shared chrome",
+            bounds: CGRect(x: 120, y: 720, width: 160, height: 18),
+            alignment: .center
+        )
+        let mirroredPageNumberTextBox = makeTextBox(
+            id: "template-mirrored-page-number",
+            lineID: "template-mirrored-page-number",
+            text: "6",
+            bounds: CGRect(x: 540, y: 24, width: 24, height: 18),
+            alignment: .center
         )
         let image = PDFSceneImage(
             id: "shared-logo",
@@ -1616,7 +1692,9 @@ private extension DocumentConversionTests {
                     cropBox: CGRect(x: 0, y: 0, width: 612, height: 792),
                     rotation: 0,
                     pageImagePNG: Data([8, UInt8(index)]),
-                    textBoxes: [textBox],
+                    textBoxes: index == 0
+                        ? [textBox, footerTextBox, pageNumberTextBox]
+                        : [mirroredTextBox, footerTextBox, mirroredPageNumberTextBox],
                     images: [image],
                     vectors: [],
                     templateObjects: [
@@ -1626,6 +1704,20 @@ private extension DocumentConversionTests {
                             bounds: bounds,
                             confidence: 0.99,
                             sourceFingerprint: "chrome-fp"
+                        ),
+                        PDFSceneTemplateObject(
+                            id: "template-footer-\(footerTextBox.id)",
+                            role: .footer,
+                            bounds: footerBounds,
+                            confidence: 0.99,
+                            sourceFingerprint: "footer-fp"
+                        ),
+                        PDFSceneTemplateObject(
+                            id: "template-page-number-\(pageNumberTextBox.id)",
+                            role: .footer,
+                            bounds: pageNumberBounds,
+                            confidence: 0.99,
+                            sourceFingerprint: "page-number-fp"
                         )
                     ],
                     imageOccurrenceCount: 1,

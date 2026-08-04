@@ -254,19 +254,19 @@ struct DocumentConversionSection: View {
             Label("DOC 변환 옵션", systemImage: "doc.text")
                 .font(.headline)
 
-            Text("템플릿화 우선")
+            Text("꼬리말 사용")
                 .font(.subheadline.weight(.medium))
             Picker(
-                "템플릿화 우선",
+                "꼬리말 사용",
                 selection: wordBinding(\.templatePriority)
             ) {
                 ForEach(DocumentTemplatePriority.allCases) { priority in
-                    Text(priority.displayName).tag(priority)
+                    Text(priority.wordDisplayName).tag(priority)
                 }
             }
             .labelsHidden()
 
-            Text(conversionViewModel.options.word.templatePriority.detail)
+            Text(conversionViewModel.options.word.templatePriority.wordDetail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

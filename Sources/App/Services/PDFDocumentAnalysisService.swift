@@ -271,11 +271,13 @@ struct PDFDocumentAnalysisService: Sendable {
             progress?(pageIndex + 1, document.pageCount)
         }
 
+        let normalizedPages = try promoteRepeatedEdgeChrome(in: pages)
+
         return PDFDocumentAnalysis(
             sourceURL: sourceURL.standardizedFileURL,
             sourceData: sourceData,
             pageCount: document.pageCount,
-            pages: pages,
+            pages: normalizedPages,
             warnings: documentWarnings
         )
     }
@@ -1919,6 +1921,153 @@ private extension PDFDocumentAnalysisService {
             ))
         }
         return blocks
+    }
+
+    /// Promotes repeated text at the physical page edges into document
+    /// chrome after all pages have been analysed.  A local footer heuristic
+    /// can recognise legal markers and page numbers, but it cannot know that
+    /// an otherwise ordinary title/header string is repeated on every page.
+    /// Cross-page matching is therefore the authoritative decision for
+    /// common Word headers/footers and PPT slide-master text.
+    func promoteRepeatedEdgeChrome(
+        in pages: [PDFPageAnalysis]
+    ) throws -> [PDFPageAnalysis] {
+        guard pages.count > 1 else { return pages }
+
+        struct EdgeLineCandidate {
+            let pageIndex: Int
+            let line: PDFTextLine
+            let edge: String
+            let key: String
+        }
+
+        func normalizedForMatch(_ text: String) -> String {
+            let compact = text
+                .split(whereSeparator: { $0.isWhitespace })
+                .joined(separator: " ")
+                .lowercased()
+            let isPageNumber = !compact.isEmpty
+                && compact.allSatisfy(\.isNumber)
+            return isPageNumber ? "__page_number__" : compact
+        }
+
+        func quantized(_ value: CGFloat, step: CGFloat) -> Int {
+            Int((value / step).rounded())
+        }
+
+        func candidate(for page: PDFPageAnalysis, line: PDFTextLine) -> EdgeLineCandidate? {
+            let relativeCenter = (line.bounds.midY - page.cropBox.minY)
+                / max(1, page.cropBox.height)
+            let edge: String
+            if relativeCenter >= 0.82 {
+                edge = "header"
+            } else if relativeCenter <= 0.18 {
+                edge = "footer"
+            } else {
+                return nil
+            }
+
+            let text = normalizedForMatch(line.text)
+            guard !text.isEmpty else { return nil }
+            // Keep geometry tolerant enough for PDFKit's fractional glyph
+            // bounds while preventing repeated body phrases in an edge band
+            // from being mistaken for shared chrome.
+            // PDF generators often emit the same shared header/footer with
+            // different horizontal bounds on even/odd pages (or after a
+            // centered line is converted to PDF glyph bounds).  The edge
+            // band, text identity, and normalized font scale are stable
+            // enough for common-format detection; retaining x/width here
+            // would leave one copy in the body and defeat separation.
+            let fontScale = quantized(
+                line.fontSize / max(1, page.cropBox.height),
+                step: 0.004
+            )
+            let key = [edge, text, String(fontScale)]
+                .joined(separator: "|")
+            return EdgeLineCandidate(
+                pageIndex: page.pageIndex,
+                line: line,
+                edge: edge,
+                key: key
+            )
+        }
+
+        let candidates = pages.flatMap { page in
+            page.lines.compactMap { candidate(for: page, line: $0) }
+        }
+        guard !candidates.isEmpty else { return pages }
+
+        var pagesByKey: [String: Set<Int>] = [:]
+        for item in candidates {
+            pagesByKey[item.key, default: []].insert(item.pageIndex)
+        }
+        let minimumRepeatedPages = max(
+            2,
+            Int(ceil(Double(pages.count) * 0.5))
+        )
+        let repeatedKeys = Set(
+            pagesByKey.compactMap { key, pageIndexes in
+                pageIndexes.count >= minimumRepeatedPages ? key : nil
+            }
+        )
+        guard !repeatedKeys.isEmpty else { return pages }
+
+        var promotedIDsByPage: [Int: Set<String>] = [:]
+        var promotedLinesByPage: [Int: [PDFTextLine]] = [:]
+        for item in candidates where repeatedKeys.contains(item.key) {
+            var promoted = item.line
+            if !promoted.isDocumentChrome {
+                promoted = PDFTextLine(
+                    id: item.line.id,
+                    text: item.line.text,
+                    runs: item.line.runs,
+                    bounds: item.line.bounds,
+                    inkTopY: item.line.inkTopY,
+                    sourceMaskBounds: item.line.sourceMaskBounds,
+                    sourceMaskIsSafe: item.line.sourceMaskIsSafe,
+                    hasVisibleInk: item.line.hasVisibleInk,
+                    fontName: item.line.fontName,
+                    fontSize: item.line.fontSize,
+                    textColor: item.line.textColor,
+                    backgroundColor: item.line.backgroundColor,
+                    alignment: item.line.alignment,
+                    readingOrder: item.line.readingOrder,
+                    columnIndex: item.line.columnIndex,
+                    extractionSource: item.line.extractionSource,
+                    isDocumentChrome: true
+                )
+            }
+            promotedIDsByPage[item.pageIndex, default: []].insert(item.line.id)
+            promotedLinesByPage[item.pageIndex, default: []].append(promoted)
+        }
+
+        return try pages.map { page in
+            let promotedIDs = promotedIDsByPage[page.pageIndex] ?? []
+            guard !promotedIDs.isEmpty else { return page }
+            let bodyLines = page.lines.filter { !promotedIDs.contains($0.id) }
+            let bodyBlocks = try makeBlocks(from: bodyLines, pageIndex: page.pageIndex)
+            let alignedBodyLines = Self.alignListBlockLines(
+                bodyLines,
+                blocks: bodyBlocks
+            )
+            let existingChromeIDs = Set(page.templateChromeLines.map(\.id))
+            let additionalChrome = (promotedLinesByPage[page.pageIndex] ?? [])
+                .filter { !existingChromeIDs.contains($0.id) }
+            return PDFPageAnalysis(
+                id: page.id,
+                pageIndex: page.pageIndex,
+                mediaBox: page.mediaBox,
+                cropBox: page.cropBox,
+                bleedBox: page.bleedBox,
+                trimBox: page.trimBox,
+                artBox: page.artBox,
+                rotation: page.rotation,
+                lines: alignedBodyLines,
+                blocks: bodyBlocks,
+                templateChromeLines: page.templateChromeLines + additionalChrome,
+                warnings: page.warnings
+            )
+        }
     }
 
     static func alignListBlockLines(
