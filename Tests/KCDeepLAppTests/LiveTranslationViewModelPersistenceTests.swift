@@ -60,6 +60,48 @@ final class LiveTranslationViewModelPersistenceTests: XCTestCase {
         let titles = Set(store.currentSnapshot().conversations.map(\.title))
         XCTAssertEqual(titles, ["Existing", "새 대화 1"])
     }
+
+    func testDeletingSelectedConversationSelectsTheNextConversation() async throws {
+        let first = LiveConversation(title: "First")
+        let second = LiveConversation(title: "Second")
+        let store = InMemoryLiveConversationStore(
+            snapshot: LiveConversationSnapshot(
+                conversations: [first, second],
+                selectedConversationID: first.id
+            )
+        )
+        let viewModel = LiveTranslationViewModel(store: store)
+        try await Task.sleep(for: .milliseconds(50))
+
+        viewModel.deleteSelectedConversation()
+        await PendingPersistenceRegistry.shared.flushAll()
+
+        XCTAssertEqual(viewModel.selectedConversationID, second.id)
+        XCTAssertEqual(viewModel.conversations.map(\.title), ["Second"])
+        XCTAssertEqual(store.currentSnapshot().conversations.map(\.title), ["Second"])
+    }
+
+    func testConversationCSVEscapesFieldsAndIncludesUTF8BOM() throws {
+        let conversation = LiveConversation(
+            title: "회의, 1",
+            messages: [
+                LiveConversationMessage(
+                    speaker: .other,
+                    originalText: "hello, \"world\"",
+                    translatedText: "안녕\n하세요",
+                    timestamp: Date(timeIntervalSince1970: 0)
+                )
+            ]
+        )
+
+        let data = LiveConversationCSVExporter.data(for: conversation)
+        XCTAssertEqual(Array(data.prefix(3)), [0xEF, 0xBB, 0xBF])
+
+        let csv = try XCTUnwrap(String(data: Data(data.dropFirst(3)), encoding: .utf8))
+        XCTAssertTrue(csv.contains("\"회의, 1\""))
+        XCTAssertTrue(csv.contains("\"hello, \"\"world\"\"\""))
+        XCTAssertTrue(csv.contains("\"안녕\n하세요\""))
+    }
 }
 
 private final class InMemoryLiveConversationStore: LiveConversationStoring, @unchecked Sendable {

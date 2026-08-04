@@ -166,6 +166,49 @@ final class LiveTranslationViewModel: ObservableObject {
         persist(status: "새 대화를 만들었습니다.")
     }
 
+    func deleteSelectedConversation() {
+        guard let index = selectedConversationIndex,
+              conversations.indices.contains(index)
+        else {
+            statusMessage = "삭제할 대화를 선택해 주세요."
+            return
+        }
+
+        let deletedTitle = conversations[index].title
+        stopLiveActivity()
+        conversations.remove(at: index)
+
+        if conversations.isEmpty {
+            let replacement = LiveConversation(title: "새 대화")
+            conversations = [replacement]
+            selectedConversationID = replacement.id
+            provisionalConversationID = replacement.id
+        } else {
+            let nextIndex = min(index, conversations.count - 1)
+            selectedConversationID = conversations[nextIndex].id
+            provisionalConversationID = nil
+        }
+
+        resetDrafts()
+        resetOutgoingKaraoke(clearHighlights: true)
+        persist(status: "'\(deletedTitle)' 대화를 삭제했습니다.")
+        statusMessage = "'\(deletedTitle)' 대화를 삭제했습니다."
+    }
+
+    func saveSelectedConversationCSV(to url: URL) {
+        guard let conversation = selectedConversation else {
+            statusMessage = "저장할 대화를 선택해 주세요."
+            return
+        }
+
+        do {
+            try LiveConversationCSVExporter.write(conversation, to: url)
+            statusMessage = "대화를 CSV 파일로 저장했습니다: \(url.lastPathComponent)"
+        } catch {
+            statusMessage = "대화 CSV 저장에 실패했습니다: \(error.localizedDescription)"
+        }
+    }
+
     private func stopLiveActivity() {
         if !incomingDraft.isEmpty {
             finishDraft(direction: .incoming)

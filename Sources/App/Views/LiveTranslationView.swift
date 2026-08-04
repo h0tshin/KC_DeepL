@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import KCDeepLCore
 
 struct LiveTranslationWorkspace: View {
@@ -16,6 +18,8 @@ struct LiveTranslationWorkspace: View {
                 showsVolumePopover: $showsVolumePopover,
                 showTools: $showTools,
                 onNewConversation: viewModel.newConversation,
+                onDeleteConversation: viewModel.deleteSelectedConversation,
+                onSaveConversation: saveSelectedConversation,
                 onTitleSubmit: {
                     viewModel.updateSelectedTitle(editableTitle)
                 },
@@ -66,6 +70,34 @@ struct LiveTranslationWorkspace: View {
             editableTitle = newValue
         }
     }
+
+    private func saveSelectedConversation() {
+        guard let conversation = viewModel.selectedConversation else {
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "csv") ?? .commaSeparatedText
+        ]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = LiveConversationCSVExporter.suggestedFilename(
+            for: conversation
+        )
+        panel.message = "현재 선택된 Live 대화를 CSV 파일로 저장합니다."
+
+        guard panel.runModal() == .OK,
+              let selectedURL = panel.url
+        else {
+            return
+        }
+
+        let destinationURL = selectedURL.pathExtension.isEmpty
+            ? selectedURL.appendingPathExtension("csv")
+            : selectedURL
+        viewModel.saveSelectedConversationCSV(to: destinationURL)
+    }
 }
 
 private struct LiveTranslationTopBar: View {
@@ -75,6 +107,8 @@ private struct LiveTranslationTopBar: View {
     @Binding var showsVolumePopover: Bool
     @Binding var showTools: Bool
     let onNewConversation: () -> Void
+    let onDeleteConversation: () -> Void
+    let onSaveConversation: () -> Void
     let onTitleSubmit: () -> Void
     let onToggleOnAir: () -> Void
 
@@ -89,6 +123,26 @@ private struct LiveTranslationTopBar: View {
             .frame(height: 30)
             .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 6))
             .help("새 대화")
+
+            Button(action: onDeleteConversation) {
+                Label("대화 삭제", systemImage: "trash")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 6))
+            .help("현재 선택된 대화 삭제")
+
+            Button(action: onSaveConversation) {
+                Label("대화 저장", systemImage: "square.and.arrow.down")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 6))
+            .help("현재 선택된 대화를 CSV로 저장")
 
             TextField("대화방 이름", text: $title)
                 .textFieldStyle(.plain)

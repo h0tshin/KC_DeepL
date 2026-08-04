@@ -96,12 +96,6 @@ struct FileTranslationWorkspace: View {
         mode == .conversion
     }
 
-    private var workspaceTitle: String {
-        isConversionMode
-            ? "PDF -> PPT / DOC 변환"
-            : "PDF 문서의 기존형식을 유지하고 번역합니다"
-    }
-
     private var importContentTypes: [UTType] {
         if isConversionMode {
             return [.pdf]
@@ -171,18 +165,19 @@ struct FileTranslationWorkspace: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text(workspaceTitle)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                Spacer()
-            }
-            .padding(.horizontal, 18)
-            .frame(height: 42)
-            .background(AppTheme.panelBackground)
+            if isConversionMode {
+                HStack {
+                    Text("PDF -> PPT / DOC 변환")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                }
+                .padding(.horizontal, 18)
+                .frame(height: 42)
+                .background(AppTheme.panelBackground)
 
-            fileToolbar
-            Divider()
+                Divider()
+            }
 
             HSplitView {
                 previewPane
@@ -229,82 +224,6 @@ struct FileTranslationWorkspace: View {
         .onAppear {
             normalizeEngineAvailability()
         }
-    }
-
-    private var fileToolbar: some View {
-        HStack(spacing: 12) {
-            if isConversionMode {
-                Label("PDF 문서", systemImage: "doc.richtext")
-                    .font(.system(size: 13, weight: .semibold))
-                    .padding(.horizontal, 10)
-                    .frame(height: 30)
-                    .background(
-                        AppTheme.controlBackground,
-                        in: RoundedRectangle(cornerRadius: 7)
-                    )
-
-                Text("편집 가능한 PPTX 또는 DOCX로 저장")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            } else {
-                Menu {
-                    ForEach(LanguageOption.sourceLanguages) { language in
-                        Button(language.displayName) {
-                            sourceLanguage = language
-                        }
-                    }
-                } label: {
-                    LanguageSelectionLabel(language: sourceLanguage)
-                }
-                .menuStyle(.borderlessButton)
-                .frame(width: 160)
-
-                Button(action: swapLanguages) {
-                    Image(systemName: "arrow.left.arrow.right")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.plain)
-                .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 6))
-                .help("언어 바꾸기")
-
-                Menu {
-                    ForEach(LanguageOption.targetLanguages) { language in
-                        Button(language.displayName) {
-                            targetLanguage = language
-                        }
-                    }
-                } label: {
-                    LanguageSelectionLabel(language: targetLanguage)
-                }
-                .menuStyle(.borderlessButton)
-                .frame(width: 160)
-
-                Spacer()
-
-                Picker("번역 엔진", selection: engineBinding) {
-                    ForEach(FileTranslationEngine.allCases) { candidate in
-                        Text(engineTitle(candidate)).tag(candidate)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 210)
-            }
-
-            if !isConversionMode {
-                Spacer(minLength: 0)
-            }
-
-            Button(isConversionMode ? "PDF 파일 선택" : "파일 선택", systemImage: "doc.badge.plus") {
-                isShowingImporter = true
-            }
-            .keyboardShortcut("o", modifiers: [.command])
-        }
-        .padding(.horizontal, 18)
-        .frame(height: 54)
-        .background(AppTheme.toolbarBackground)
-        .disabled(isAnyFileOperationBusy)
     }
 
     @ViewBuilder
