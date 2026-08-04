@@ -279,7 +279,10 @@ struct FileTranslationWorkspace: View {
         if viewModel.documentKind != nil {
             VStack(spacing: 0) {
                 HStack {
-                    Label("문서 미리보기", systemImage: "rectangle.split.2x1")
+                    Label(
+                        "문서 미리보기",
+                        systemImage: isConversionMode ? "doc.richtext" : "rectangle.split.2x1"
+                    )
                         .font(.headline)
 
                     Spacer()
@@ -302,40 +305,14 @@ struct FileTranslationWorkspace: View {
 
                 Divider()
 
-                HSplitView {
-                    if viewModel.isTextDocument,
-                       let sourceText = viewModel.sourceText {
-                        textPreview(
-                            title: "원본",
-                            subtitle: "원문 \(activeDocumentKind.displayName)",
-                            text: sourceText,
-                            isTranslated: false
-                        )
-                    } else if let sourceData = viewModel.sourceData {
-                        documentPreview(
-                            title: "원본",
-                            subtitle: "원문 PDF",
-                            data: sourceData,
-                            version: viewModel.sourceDocumentVersion,
-                            isTranslated: false
-                        )
-                    }
-
-                    if viewModel.isTextDocument {
-                        textPreview(
-                            title: "번역본",
-                            subtitle: translatedTextPreviewSubtitle,
-                            text: viewModel.translatedText,
-                            isTranslated: true
-                        )
+                Group {
+                    if isConversionMode {
+                        sourcePreview
                     } else {
-                        documentPreview(
-                            title: "번역본",
-                            subtitle: translatedPreviewSubtitle,
-                            data: viewModel.outputData,
-                            version: viewModel.outputDocumentVersion,
-                            isTranslated: true
-                        )
+                        HSplitView {
+                            sourcePreview
+                            translatedPreview
+                        }
                     }
                 }
                 .dropDestination(for: URL.self) { urls, _ in
@@ -380,6 +357,53 @@ struct FileTranslationWorkspace: View {
             } isTargeted: { isTargeted in
                 isDropTargeted = isTargeted
             }
+        }
+    }
+
+    @ViewBuilder
+    private var sourcePreview: some View {
+        if viewModel.isTextDocument,
+           let sourceText = viewModel.sourceText {
+            textPreview(
+                title: "원본",
+                subtitle: "원문 \(activeDocumentKind.displayName)",
+                text: sourceText,
+                isTranslated: false
+            )
+        } else if let sourceData = viewModel.sourceData {
+            documentPreview(
+                title: "원본",
+                subtitle: "원문 PDF",
+                data: sourceData,
+                version: viewModel.sourceDocumentVersion,
+                isTranslated: false
+            )
+        } else {
+            ContentUnavailableView(
+                "원본 문서를 불러올 수 없습니다",
+                systemImage: "doc.richtext",
+                description: Text("문서를 닫은 뒤 다시 선택해 주세요.")
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var translatedPreview: some View {
+        if viewModel.isTextDocument {
+            textPreview(
+                title: "번역본",
+                subtitle: translatedTextPreviewSubtitle,
+                text: viewModel.translatedText,
+                isTranslated: true
+            )
+        } else {
+            documentPreview(
+                title: "번역본",
+                subtitle: translatedPreviewSubtitle,
+                data: viewModel.outputData,
+                version: viewModel.outputDocumentVersion,
+                isTranslated: true
+            )
         }
     }
 
