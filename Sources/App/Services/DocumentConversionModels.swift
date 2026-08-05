@@ -712,6 +712,12 @@ struct PDFSceneTextLine {
     let bounds: CGRect
     let runs: [PDFSceneTextRun]
     let sourceMaskBounds: CGRect
+    /// The local backdrop sampled around the source glyphs.  Keeping this in
+    /// the scene is important for DOCX structure decisions: a run painted on
+    /// a stable shaded panel belongs in a panel/text box (or table cell), not
+    /// in a free-flowing paragraph whose background is emitted as unrelated
+    /// horizontal rectangles.
+    let backgroundColor: PDFTextColor
     let sourceMaskIsSafe: Bool
     /// A source-render visibility proof for template text. It remains true
     /// when the surrounding template is complex, so visual presence and safe
@@ -730,6 +736,7 @@ struct PDFSceneTextLine {
         bounds: CGRect,
         runs: [PDFSceneTextRun],
         sourceMaskBounds: CGRect,
+        backgroundColor: PDFTextColor = .white,
         sourceMaskIsSafe: Bool,
         hasVisibleInk: Bool = false,
         extractionSource: PDFTextExtractionSource,
@@ -740,6 +747,7 @@ struct PDFSceneTextLine {
         self.bounds = bounds
         self.runs = runs
         self.sourceMaskBounds = sourceMaskBounds
+        self.backgroundColor = backgroundColor
         self.sourceMaskIsSafe = sourceMaskIsSafe
         self.hasVisibleInk = hasVisibleInk
         self.extractionSource = extractionSource

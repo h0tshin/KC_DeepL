@@ -149,11 +149,17 @@ struct PDFSceneExtractor {
                let layeredBackground {
                 imageData = layeredBackground.pngData
                 isNativeCanvasBackground = false
-            } else if layeredBackground == nil, nativeCanvasColor != nil {
-                // Keep the immutable source render for diagnostics and the
-                // orientation contract of PDFScenePage. Writers omit this
-                // raster when `isNativeCanvasBackground` is true and use the
-                // proven uniform canvas plus native objects instead.
+            } else if usesLayeredTemplate,
+                      layeredBackground == nil,
+                      nativeCanvasColor != nil {
+                // A proven uniform canvas is only a native background when
+                // every visible foreground object can be replayed. Keep the
+                // immutable source render as the diagnostic/safety image for
+                // this native-object path; writers suppress it because the
+                // flag below tells them to emit the canvas colour instead.
+                // If an unsupported object makes the page use the raster
+                // safety net, execution reaches the branch below and keeps
+                // the repaired full-page render instead.
                 imageData = referenceImageData
                 isNativeCanvasBackground = true
             } else {
@@ -917,6 +923,7 @@ private extension PDFSceneExtractor {
                     bounds: line.bounds,
                     runs: officeRuns.map(PDFSceneTextRun.init),
                     sourceMaskBounds: line.sourceMaskBounds,
+                    backgroundColor: line.backgroundColor,
                     sourceMaskIsSafe: line.sourceMaskIsSafe,
                     hasVisibleInk: line.hasVisibleInk,
                     extractionSource: line.extractionSource,
@@ -978,6 +985,7 @@ private extension PDFSceneExtractor {
                 bounds: line.bounds,
                 runs: sourceRuns.map(PDFSceneTextRun.init),
                 sourceMaskBounds: line.sourceMaskBounds,
+                backgroundColor: line.backgroundColor,
                 sourceMaskIsSafe: line.sourceMaskIsSafe,
                 hasVisibleInk: line.hasVisibleInk,
                 extractionSource: line.extractionSource
@@ -2291,7 +2299,95 @@ private final class PDFGraphicsTrace {
                 )
             )
         }
-        return Result(vectors: verifiedVectors)
+        return Result(vectors: consolidatedBackgroundVectors(verifiedVectors))
+    }
+
+    /// PDF producers frequently paint one callout/table background as a
+    /// large rectangle and then replay the same fill for every text line.
+    /// Emitting those redundant child rectangles as independent Office
+    /// shapes creates the visible horizontal bars reported by users and can
+    /// cover text when Office resolves anchors in a different order.  Keep
+    /// the visually authoritative outer rectangle and discard only an
+    /// entirely contained, same-colour opaque fill; strokes, transparent
+    /// paint, and non-rectangular geometry remain untouched.
+    static func consolidatedBackgroundVectors(
+        _ vectors: [PDFSceneVector]
+    ) -> [PDFSceneVector] {
+        var kept: [PDFSceneVector] = []
+        kept.reserveCapacity(vectors.count)
+
+        for vector in vectors.sorted(by: {
+            if $0.paintOrder != $1.paintOrder {
+                return $0.paintOrder < $1.paintOrder
+            }
+            return $0.id < $1.id
+        }) {
+            guard isConsolidatableBackground(vector) else {
+                kept.append(vector)
+                continue
+            }
+
+            let isContainedByExisting = kept.contains { outer in
+                isConsolidatableBackground(outer)
+                    && sameOpaqueFill(outer.fill, vector.fill)
+                    && containsWithTolerance(outer.bounds, vector.bounds)
+            }
+            if isContainedByExisting {
+                continue
+            }
+
+            kept.removeAll { inner in
+                isConsolidatableBackground(inner)
+                    && sameOpaqueFill(inner.fill, vector.fill)
+                    && containsWithTolerance(vector.bounds, inner.bounds)
+            }
+            kept.append(vector)
+        }
+
+        return kept.sorted(by: {
+            if $0.paintOrder != $1.paintOrder {
+                return $0.paintOrder < $1.paintOrder
+            }
+            return $0.id < $1.id
+        })
+    }
+
+    private static func isConsolidatableBackground(
+        _ vector: PDFSceneVector
+    ) -> Bool {
+        vector.kind == .rectangle
+            && vector.rotation.isZero
+            && vector.pathCommands.isEmpty
+            && vector.stroke == nil
+            && (vector.fill?.alpha ?? 0) >= 0.999
+            && vector.bounds.width > 1
+            && vector.bounds.height > 1
+    }
+
+    private static func sameOpaqueFill(
+        _ lhs: PDFTextColor?,
+        _ rhs: PDFTextColor?
+    ) -> Bool {
+        guard let lhs, let rhs else { return false }
+        let difference = max(
+            max(abs(lhs.red - rhs.red), abs(lhs.green - rhs.green)),
+            max(abs(lhs.blue - rhs.blue), abs(lhs.alpha - rhs.alpha))
+        )
+        return difference <= 0.012
+    }
+
+    private static func containsWithTolerance(
+        _ outer: CGRect,
+        _ inner: CGRect
+    ) -> Bool {
+        // A repeated line-fill often leaves only a few points of inset from
+        // the outer panel. Use an absolute margin instead of a percentage:
+        // the panel may be only slightly wider than its child while still
+        // being the authoritative background.
+        guard outer.width - inner.width >= 2,
+              outer.height - inner.height >= 2
+        else { return false }
+        return outer.insetBy(dx: -0.75, dy: -0.75).contains(inner)
     }
 
     func drawXObject(_ scanner: CGPDFScannerRef) {

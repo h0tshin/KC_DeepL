@@ -870,6 +870,7 @@ private extension WordprocessingMLWriter {
                             )
                         ],
                         sourceMaskBounds: box.bounds,
+                        backgroundColor: .white,
                         sourceMaskIsSafe: true,
                         hasVisibleInk: true,
                         extractionSource: box.extractionSource
@@ -985,6 +986,27 @@ private extension WordprocessingMLWriter {
             return false
         case .conservative, .balanced, .permissive:
             break
+        }
+
+        // A PDF shaded callout/table cell is not ordinary paragraph flow.
+        // The analyser samples the backdrop independently for every source
+        // line; when that backdrop is a stable non-white colour, retaining
+        // the block as one floating Word text frame preserves the panel's
+        // geometry and prevents Word's line-height reflow from clipping the
+        // bottom of glyphs.  The `.never` setting above remains an explicit
+        // opt-out for users who require paragraphs at any cost.
+        let shadedLines = textBox.lines.filter { line in
+            let colour = line.backgroundColor
+            let distanceFromWhite = max(
+                abs(colour.red - 1),
+                abs(colour.green - 1),
+                abs(colour.blue - 1)
+            )
+            return colour.alpha >= 0.96 && distanceFromWhite >= 0.08
+        }
+        if !shadedLines.isEmpty,
+           shadedLines.count == textBox.lines.count || textBox.lines.count == 1 {
+            return true
         }
 
         let fontNames = Set(textBox.lines.flatMap { $0.runs.map(\.fontName) })
@@ -1192,6 +1214,7 @@ private extension WordprocessingMLWriter {
                         )
                     ],
                     sourceMaskBounds: textBox.bounds,
+                    backgroundColor: .white,
                     sourceMaskIsSafe: true,
                     extractionSource: textBox.extractionSource
                 )

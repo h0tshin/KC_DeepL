@@ -1417,6 +1417,81 @@ final class DocumentConversionTests: XCTestCase {
         XCTAssertTrue(slideXML.contains("<a:spcPts val=\"2000\"/>"))
     }
 
+    func testWordDocumentTextPromotesShadedLineToEditableTextBox() throws {
+        let shaded = PDFTextColor(red: 0.86, green: 0.86, blue: 0.86, alpha: 1)
+        let line = PDFSceneTextLine(
+            id: "shaded-line",
+            text: "Important shaded content",
+            bounds: CGRect(x: 72, y: 640, width: 220, height: 14),
+            runs: [
+                PDFSceneTextRun(
+                    PDFTextRun(
+                        text: "Important shaded content",
+                        fontName: "Arial",
+                        fontSize: 10,
+                        textColor: .black,
+                        isOfficeCompatible: true
+                    )
+                )
+            ],
+            sourceMaskBounds: CGRect(x: 72, y: 640, width: 220, height: 14),
+            backgroundColor: shaded,
+            sourceMaskIsSafe: true,
+            extractionSource: .native
+        )
+        let textBox = PDFSceneTextBox(
+            id: "shaded-box",
+            text: line.text,
+            bounds: line.bounds,
+            layoutBounds: line.bounds,
+            fontName: "Arial",
+            fontSize: 10,
+            color: .black,
+            alignment: .left,
+            lineCount: 1,
+            sourceLineIDs: [line.id],
+            extractionSource: .native,
+            lines: [line],
+            visualPolicy: .replaceSourcePaint
+        )
+        let page = PDFScenePage(
+            id: "shaded-page",
+            pageIndex: 0,
+            cropBox: CGRect(x: 0, y: 0, width: 612, height: 792),
+            rotation: 0,
+            pageImagePNG: Data([0]),
+            textBoxes: [textBox],
+            images: [],
+            vectors: [],
+            templateObjects: [],
+            imageOccurrenceCount: 0,
+            extractedImageCount: 0,
+            nativeVectorCount: 0,
+            warnings: [],
+            usesPageRasterFallback: true
+        )
+        let scene = PDFSceneDocument(
+            sourceURL: URL(fileURLWithPath: "/tmp/shaded-content.pdf"),
+            sourceSHA256: "shaded-content-fixture",
+            pages: [page],
+            warnings: []
+        )
+        var options = DocumentConversionPipelineOptions.default
+        options.wordTextRepresentation = .documentText
+        options.wordTextBoxAllowance = .balanced
+
+        let parts = try WordprocessingMLWriter().makeParts(
+            scene: scene,
+            options: options
+        )
+        let document = try XCTUnwrap(
+            parts.first(where: { $0.name == "word/document.xml" })
+        )
+        let xml = try XCTUnwrap(String(data: document.data, encoding: .utf8))
+        XCTAssertTrue(xml.contains("<w:txbxContent>"))
+        XCTAssertTrue(xml.contains("Important shaded content"))
+    }
+
     func testConversionOptionsRoundTripAndTargetMapping() throws {
         var options = DocumentConversionOptions.default
         options.presentation.templatePriority = .repeatedToTemplate
