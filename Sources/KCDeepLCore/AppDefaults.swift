@@ -4,13 +4,9 @@ public enum PreferenceKeys {
     public static let mainSourceLanguage = "kc.main.sourceLanguage"
     public static let mainTargetLanguage = "kc.main.targetLanguage"
     public static let launchAtLogin = "kc.general.launchAtLogin"
-    public static let quickAccessMode = "kc.general.quickAccessMode"
-    public static let closeBehavior = "kc.general.closeBehavior"
     public static let selectedTextShortcut = "kc.shortcuts.selectedText"
     public static let rewriteShortcut = "kc.shortcuts.rewriteText"
-    public static let screenCaptureShortcut = "kc.shortcuts.screenCapture"
     public static let readingFontSize = "kc.accessibility.readingFontSize"
-    public static let speechSpeed = "kc.accessibility.speechSpeed"
     public static let downloadLocation = "kc.files.downloadLocation"
     public static let historyEnabled = "kc.files.historyEnabled"
     public static let fileTranslationEngine = "kc.files.translationEngine"
@@ -70,13 +66,9 @@ public extension UserDefaults {
             PreferenceKeys.mainSourceLanguage: LanguageOption.english.code,
             PreferenceKeys.mainTargetLanguage: LanguageOption.korean.code,
             PreferenceKeys.launchAtLogin: true,
-            PreferenceKeys.quickAccessMode: "floating",
-            PreferenceKeys.closeBehavior: "background",
             PreferenceKeys.selectedTextShortcut: "⌃⇧1",
             PreferenceKeys.rewriteShortcut: "⌃⇧2",
-            PreferenceKeys.screenCaptureShortcut: "⌃⇧3",
             PreferenceKeys.readingFontSize: ReadingFontSize.defaultValue.rawValue,
-            PreferenceKeys.speechSpeed: "1.0",
             PreferenceKeys.downloadLocation: "desktop",
             PreferenceKeys.historyEnabled: true,
             PreferenceKeys.fileTranslationEngine: AppDefaults.defaultFileTranslationEngine.rawValue,

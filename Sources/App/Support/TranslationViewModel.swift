@@ -61,7 +61,6 @@ final class TranslationViewModel: ObservableObject {
     @Published private(set) var appleRequestGeneration: UInt = 0
     @Published var statusMessage = "시스템과 API 상태를 확인하는 중입니다."
     @Published var errorMessage: String?
-    @Published var captureState: CaptureState?
     @Published private(set) var history: [TranslationHistoryItem] = []
 
     private let apiClient: TranslationClient
@@ -298,12 +297,8 @@ final class TranslationViewModel: ObservableObject {
         }
 
         guard backend == .codexAppServer || provider == .gemini else {
-            errorMessage = nil
-            llmTranslatedText = "현재 목업에서는 Gemini 번역 호출만 연결되어 있습니다. \(provider.displayName) 연동은 고급 설정 설계 범위에 포함되어 있습니다."
-            selectTranslationEngine(.llm)
-            statusMessage = "선택한 공급자의 실제 호출은 다음 구현 단계에서 연결됩니다."
-            isLLMTranslating = false
-            updateTranslationActivityState()
+            errorMessage = "\(provider.displayName) API 번역은 지원하지 않습니다. 설정에서 Gemini API 또는 Codex App Server를 선택해 주세요."
+            statusMessage = "LLM 번역 설정을 확인해 주세요."
             return
         }
 
@@ -784,21 +779,6 @@ final class TranslationViewModel: ObservableObject {
         resetTranslationResults()
     }
 
-    func beginScreenCaptureMock() {
-        captureState = CaptureState(
-            title: "텍스트 화면 캡처",
-            message: "캡처 영역 선택까지 준비되었습니다. OCR 인식과 자동 삽입은 다음 단계 기능입니다."
-        )
-        statusMessage = "화면 캡처 영역 선택 대기 중"
-    }
-
-    func completeScreenCaptureMock() {
-        let capturedMarker = "[캡처된 화면 영역]\nOCR 텍스트 인식은 다음 구현 단계에서 Vision 프레임워크로 연결됩니다."
-        setSourceText(sourceText.isEmpty ? capturedMarker : "\(sourceText)\n\n\(capturedMarker)")
-        captureState = nil
-        statusMessage = "캡처가 입력 영역에 첨부되었습니다. OCR은 to-be 기능입니다."
-    }
-
     func deleteHistoryItem(id: TranslationHistoryItem.ID) {
         if !isHistoryLoaded {
             historyMutatedBeforeLoad = true
@@ -948,10 +928,4 @@ private actor TranslationHistoryRepository {
     func save(_ items: [TranslationHistoryItem]) throws {
         try store.save(items)
     }
-}
-
-struct CaptureState: Identifiable, Equatable {
-    let id = UUID()
-    let title: String
-    let message: String
 }

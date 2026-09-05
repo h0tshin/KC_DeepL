@@ -5,6 +5,45 @@ import KCDeepLCore
 
 @MainActor
 final class TranslationViewModelTests: XCTestCase {
+    func testUnsupportedAPIProvidersReportErrorsWithoutCreatingTranslationResults() async throws {
+        for provider in [LLMProvider.chatGPT, .claude, .custom] {
+            let apiClient = RecordingTranslationClient(output: "unexpected API result")
+            let codexClient = RecordingTranslationClient(output: "unexpected Codex result")
+            let viewModel = TranslationViewModel(
+                client: apiClient,
+                appServerClient: codexClient,
+                historyStore: InMemoryTranslationHistoryStore()
+            )
+            viewModel.setSourceText("Translate this")
+
+            await viewModel.translate(
+                sourceLanguage: .english,
+                targetLanguage: .korean,
+                provider: provider,
+                modelID: "unsupported-model",
+                apiKey: "test-key",
+                temperature: 0.2,
+                historyEnabled: true
+            )
+
+            XCTAssertTrue(viewModel.errorMessage?.contains(provider.displayName) == true)
+            XCTAssertTrue(viewModel.llmTranslatedText.isEmpty)
+            XCTAssertTrue(viewModel.translatedText.isEmpty)
+            XCTAssertTrue(viewModel.history.isEmpty)
+            XCTAssertFalse(viewModel.isLLMTranslating)
+            let apiRequests = await apiClient.requestsSnapshot()
+            let codexRequests = await codexClient.requestsSnapshot()
+            XCTAssertTrue(apiRequests.isEmpty)
+            XCTAssertTrue(codexRequests.isEmpty)
+
+            // An unavailable LLM provider must not block the independent Apple result.
+            let pending = try XCTUnwrap(viewModel.pendingAppleTranslation)
+            viewModel.reportAppleTranslationResult("Apple 번역 결과", generation: pending.generation)
+            XCTAssertEqual(viewModel.translatedText, "Apple 번역 결과")
+            XCTAssertFalse(viewModel.isTranslating)
+        }
+    }
+
     func testCodexBackendUsesAppServerWithoutAPIKeyAndUpdatesExistingResultFlow() async throws {
         let apiClient = RecordingTranslationClient(output: "unexpected API result")
         let codexClient = RecordingTranslationClient(output: "Codex 번역 결과")

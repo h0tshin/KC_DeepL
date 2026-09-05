@@ -31,6 +31,8 @@ KC DeepL은 DeepL 스타일의 macOS 즉석 번역 앱입니다. 텍스트 번�
 - **LLM API 사용**: 기존 Gemini API 경로입니다. 신규 설치와 기존 설치 모두 이 경로가 기본이며, 기본 텍스트 모델 `gemini-2.5-flash-lite`, 공급자, 모델, API 키 설정은 그대로 유지됩니다.
 - **Codex App Server 사용**: 이 Mac에 설치된 `codex` 실행 파일로 `codex app-server --listen stdio://`를 시작합니다. 별도 API 키 대신 기존 Codex 로그인을 사용하며, 실행 중인 App Server의 모델 목록을 동적으로 불러와 선택할 수 있습니다.
 
+LLM API 공급자는 현재 Gemini만 지원합니다. 과거 설정에 남아 있는 미지원 공급자는 설정에서 Gemini 또는 Codex App Server로 변경할 수 있으며, 미지원 요청의 안내 문구를 번역 결과로 표시하지 않습니다.
+
 Codex 번역은 이름이 **`KC DeepL 번역`**인 전용 Codex 작업을 계속 재사용합니다. 작업 ID와 선택 모델은 앱 설정에 저장되며, Codex 작업의 대화 내역은 KC DeepL의 로컬 번역 기록과 별개로 유지됩니다. 따라서 KC DeepL에서 로컬 기록 저장을 꺼도 Codex 작업 내역이 자동으로 삭제되지는 않습니다.
 
 상단의 **번역비교**에서는 같은 원문을 SOL, Terra, Luna, 5.5, 5.4, 5.4 mini, 5.3의 7개 Codex 모델로 번역하고 탭별 결과를 비교할 수 있습니다. 고정 Codex 작업을 안전하게 공유하도록 모델 요청은 순서대로 실행되며, 한 모델이 실패해도 나머지 비교는 계속됩니다.
@@ -38,6 +40,8 @@ Codex 번역은 이름이 **`KC DeepL 번역`**인 전용 Codex 작업을 계속
 LLM API 키는 앱에 포함되지 않습니다. 첫 실행 후 **설정 > LLM 번역 / LLM Live**에서 필요한 키를 직접 입력하면 이 Mac의 앱 설정(`UserDefaults`)에 저장됩니다. Codex App Server 경로에는 API 키가 필요하지 않습니다.
 
 ## 실행
+
+빌드와 모듈 캐시는 시스템 임시 폴더의 외부 SwiftPM scratch를 사용하므로 프로젝트에 `.build`를 만들지 않습니다.
 
 ```bash
 ./script/build_and_run.sh
@@ -57,22 +61,27 @@ Developer ID Release 번들:
 
 Release 모드는 `Developer ID Application` 인증서, Hardened Runtime, 보안 타임스탬프와 마이크 입력 entitlement를 적용해 `dist/KCDeepL.app`을 생성합니다. App Store 밖에서 다른 Mac에 배포하려면 이 번들을 Apple 공증한 뒤 공증 티켓을 stapling해야 합니다.
 
-Finder에서 직접 실행할 사용자 전달용 번들을 최신 빌드로 교체하려면, 명시적으로 다음 명령을 실행합니다. 기본 실행 경로는 의도적으로 `dist/KCDeepL.app`만 갱신하며, 이 명령만 `/Applications/KCDeepL.app`을 안전하게 교체합니다.
+Finder에서 직접 실행할 사용자 전달용 번들을 최신 빌드로 교체하고 `.build`나 외부 build scratch에 의존하지 않는지 확인하려면 다음 명령을 실행합니다. 검증 중에는 SwiftPM scratch를 잠시 숨기고 `/Applications/KCDeepL.app`을 실행해 프로세스 유지와 새 충돌 보고서 부재를 확인합니다. 검증에 실패하면 이전 설치본을 복구합니다.
 
 ```bash
-./script/build_and_run.sh --install-application
+./script/build_and_run.sh --install-and-verify
 ```
+
+실행 검증 없이 설치본만 교체해야 할 때는 `--install-application`을 사용합니다. 기본 실행 경로는 의도적으로 `dist/KCDeepL.app`만 갱신합니다.
 
 테스트:
 
 ```bash
-swift test
+kc_build_temp="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+CLANG_MODULE_CACHE_PATH="$kc_build_temp/KCDeepL-module-cache/clang" \
+SWIFTPM_MODULECACHE_OVERRIDE="$kc_build_temp/KCDeepL-module-cache/swiftpm" \
+swift test --scratch-path "$kc_build_temp/KCDeepL-swiftpm"
 ```
 
 ## 현재 구현
 
 - macOS SwiftUI 2패널 번역 UI
-- 오른쪽 도구 패널
+- 오른쪽 최근 기록 패널
 - 별도 설정 창
 - 텍스트 번역용 Codex App Server / LLM API 백엔드 선택
 - 설치된 Codex 실행 파일 탐색, 로컬 stdio App Server 연결, 동적 모델 선택
@@ -90,7 +99,6 @@ swift test
 - Gemini Live 실시간 음성 번역과 오디오 By Pass
 - `UserDefaults` 기반 API 설정 저장
 - 엔진·모델 정보와 원문/결과 전체를 표시하는 로컬 번역 기록
-- 화면 캡처 진입 목업
 - 번역 프롬프트/응답 파서 단위 테스트
 
 ## 보안 주의

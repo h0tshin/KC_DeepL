@@ -2,6 +2,15 @@
 set -euo pipefail
 
 MODE="${1:-run}"
+case "$MODE" in
+  run|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify|--release|release|--install-application|install-application|--install-and-verify|install-and-verify)
+    ;;
+  *)
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--release|--install-application|--install-and-verify]" >&2
+    exit 2
+    ;;
+esac
+
 APP_NAME="KCDeepL"
 BUNDLE_ID="com.h0tshin.KCDeepL"
 PACKAGE_RESOURCE_BUNDLE_NAME="${APP_NAME}_${APP_NAME}.bundle"
@@ -34,6 +43,8 @@ DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APPLICATION_DIR="/Applications"
 APPLICATION_BUNDLE="$APPLICATION_DIR/$APP_NAME.app"
+SWIFTPM_SCRATCH_PATH="${KCDEEPL_SWIFTPM_SCRATCH_PATH:-${TMPDIR:-/tmp}/KCDeepL-swiftpm}"
+MODULE_CACHE_ROOT="${KCDEEPL_MODULE_CACHE_ROOT:-${TMPDIR:-/tmp}/KCDeepL-module-cache}"
 STAGING_ROOT="${TMPDIR:-/tmp}/KCDeepL-build.$$"
 STAGING_BUNDLE="$STAGING_ROOT/$APP_NAME.app"
 APP_CONTENTS="$STAGING_BUNDLE/Contents"
@@ -42,13 +53,86 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICON_SOURCE="$ROOT_DIR/Sources/App/Resources/AppIcon.icns"
-MENU_BAR_ICON_SOURCE="$ROOT_DIR/Sources/App/Resources/MenuBarIcon.png"
-FONT_SIZE_DECREASE_ICON_SOURCE="$ROOT_DIR/Sources/App/Resources/FontSizeDecrease.png"
-FONT_SIZE_INCREASE_ICON_SOURCE="$ROOT_DIR/Sources/App/Resources/FontSizeIncrease.png"
 ENTITLEMENTS_FILE="$ROOT_DIR/Sources/App/KCDeepL.entitlements"
 CODESIGN_IDENTITY="${KCDEEPL_CODESIGN_IDENTITY:-}"
 REQUIREMENTS_FILE="$STAGING_ROOT/KCDeepL.requirements"
 SIGNED_ENTITLEMENTS_FILE="$STAGING_ROOT/KCDeepL.signed.entitlements"
+APPLICATION_BACKUP=""
+HIDDEN_SWIFTPM_SCRATCH_PATH=""
+CRASH_REPORT_MARKER=""
+
+prepare_external_build_paths() {
+  mkdir -p \
+    "$SWIFTPM_SCRATCH_PATH" \
+    "$MODULE_CACHE_ROOT/clang" \
+    "$MODULE_CACHE_ROOT/swiftpm"
+
+  SWIFTPM_SCRATCH_PATH="$(cd "$SWIFTPM_SCRATCH_PATH" && pwd -P)"
+  MODULE_CACHE_ROOT="$(cd "$MODULE_CACHE_ROOT" && pwd -P)"
+
+  local path
+  for path in "$SWIFTPM_SCRATCH_PATH" "$MODULE_CACHE_ROOT"; do
+    case "$path" in
+      "$ROOT_DIR"|"$ROOT_DIR"/*)
+        echo "error: Build and module caches must stay outside the project: $path" >&2
+        exit 1
+        ;;
+    esac
+  done
+}
+
+swift_build() {
+  env \
+    CLANG_MODULE_CACHE_PATH="$MODULE_CACHE_ROOT/clang" \
+    SWIFTPM_MODULECACHE_OVERRIDE="$MODULE_CACHE_ROOT/swiftpm" \
+    swift build \
+      --scratch-path "$SWIFTPM_SCRATCH_PATH" \
+      -c "$BUILD_CONFIGURATION" \
+      "$@"
+}
+
+stop_running_application() {
+  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    if ! pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  echo "error: $APP_NAME is still running." >&2
+  return 1
+}
+
+installed_application_pid() {
+  local pid
+  local command
+
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$command" == "$APPLICATION_BUNDLE/Contents/MacOS/$APP_NAME"* ]]; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+  done < <(pgrep -x "$APP_NAME" 2>/dev/null || true)
+
+  return 1
+}
+
+restore_hidden_build_scratch() {
+  if [[ -n "$HIDDEN_SWIFTPM_SCRATCH_PATH" \
+        && -d "$HIDDEN_SWIFTPM_SCRATCH_PATH" \
+        && ! -e "$SWIFTPM_SCRATCH_PATH" ]]; then
+    mv "$HIDDEN_SWIFTPM_SCRATCH_PATH" "$SWIFTPM_SCRATCH_PATH"
+  fi
+  HIDDEN_SWIFTPM_SCRATCH_PATH=""
+
+  if [[ -n "$CRASH_REPORT_MARKER" && -e "$CRASH_REPORT_MARKER" ]]; then
+    rm -f "$CRASH_REPORT_MARKER"
+  fi
+  CRASH_REPORT_MARKER=""
+}
 
 # Accessibility and login-item grants are keyed to the app's designated
 # requirement. Never fall back to ad-hoc signing, which changes that identity.
@@ -73,12 +157,14 @@ if [[ "$IS_RELEASE_BUILD" == "true" && ! -f "$ENTITLEMENTS_FILE" ]]; then
 fi
 
 cd "$ROOT_DIR"
+prepare_external_build_paths
 if [[ "$IS_RELEASE_BUILD" != "true" ]]; then
-  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+  stop_running_application
 fi
 
-swift build -c "$BUILD_CONFIGURATION"
-BUILD_OUTPUT_DIR="$(swift build -c "$BUILD_CONFIGURATION" --show-bin-path)"
+printf 'SwiftPM scratch: %s\n' "$SWIFTPM_SCRATCH_PATH"
+swift_build --product "$APP_NAME"
+BUILD_OUTPUT_DIR="$(swift_build --show-bin-path)"
 BUILD_BINARY="$BUILD_OUTPUT_DIR/$APP_NAME"
 PACKAGE_RESOURCE_BUNDLE_SOURCE="$BUILD_OUTPUT_DIR/$PACKAGE_RESOURCE_BUNDLE_NAME"
 
@@ -98,18 +184,6 @@ cp -R \
 
 if [[ -f "$ICON_SOURCE" ]]; then
   cp "$ICON_SOURCE" "$APP_RESOURCES/AppIcon.icns"
-fi
-
-if [[ -f "$MENU_BAR_ICON_SOURCE" ]]; then
-  cp "$MENU_BAR_ICON_SOURCE" "$APP_RESOURCES/MenuBarIcon.png"
-fi
-
-if [[ -f "$FONT_SIZE_DECREASE_ICON_SOURCE" ]]; then
-  cp "$FONT_SIZE_DECREASE_ICON_SOURCE" "$APP_RESOURCES/FontSizeDecrease.png"
-fi
-
-if [[ -f "$FONT_SIZE_INCREASE_ICON_SOURCE" ]]; then
-  cp "$FONT_SIZE_INCREASE_ICON_SOURCE" "$APP_RESOURCES/FontSizeIncrease.png"
 fi
 
 cat >"$INFO_PLIST" <<PLIST
@@ -282,10 +356,10 @@ open_app() {
 # before replacing the copy a user may launch directly from Finder.
 install_application_bundle() {
   local install_staging="$APPLICATION_DIR/.${APP_NAME}.app.staging.$$"
-  local install_backup="$APPLICATION_DIR/.${APP_NAME}.app.backup.$$"
+  APPLICATION_BACKUP="$APPLICATION_DIR/.${APP_NAME}.app.backup.$$"
 
   mkdir -p "$APPLICATION_DIR"
-  rm -rf "$install_staging" "$install_backup"
+  rm -rf "$install_staging" "$APPLICATION_BACKUP"
   /usr/bin/ditto "$APP_BUNDLE" "$install_staging"
   # Copying through a file-provider-backed folder can add Finder metadata to
   # the staging bundle. It is not executable content, but codesign correctly
@@ -295,32 +369,123 @@ install_application_bundle() {
 
   # Replacing a running bundle can leave Finder launching an old executable.
   # Stop only this app name, then wait briefly for its process to exit.
-  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
-  for _ in {1..20}; do
-    if ! pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+  stop_running_application
+
+  if [[ -d "$APPLICATION_BUNDLE" ]]; then
+    mv "$APPLICATION_BUNDLE" "$APPLICATION_BACKUP"
+  fi
+  # From the first replacement until verification succeeds, every failure
+  # and interrupt follows the same rollback path.
+  trap rollback_application_install EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  mv "$install_staging" "$APPLICATION_BUNDLE"
+  /usr/bin/xattr -cr "$APPLICATION_BUNDLE"
+  codesign --verify --deep --strict "$APPLICATION_BUNDLE"
+  echo "Installed bundle: $APPLICATION_BUNDLE"
+}
+
+finalize_application_install() {
+  if [[ -n "$APPLICATION_BACKUP" && -d "$APPLICATION_BACKUP" ]]; then
+    rm -rf "$APPLICATION_BACKUP"
+  fi
+  APPLICATION_BACKUP=""
+  trap - EXIT INT TERM
+}
+
+rollback_application_install() {
+  stop_running_application || return 1
+  if [[ -d "$APPLICATION_BUNDLE" ]]; then
+    rm -rf "$APPLICATION_BUNDLE"
+  fi
+  if [[ -n "$APPLICATION_BACKUP" && -d "$APPLICATION_BACKUP" ]]; then
+    mv "$APPLICATION_BACKUP" "$APPLICATION_BUNDLE"
+    echo "Restored previous bundle: $APPLICATION_BUNDLE" >&2
+  fi
+  APPLICATION_BACKUP=""
+}
+
+verify_installed_application_without_build_scratch() {
+  local installed_pid
+  local new_crash_report
+
+  if [[ -e "$ROOT_DIR/.build" ]]; then
+    echo "error: Workspace .build must be absent for installed-app verification." >&2
+    return 1
+  fi
+  if [[ ! -d "$APPLICATION_BUNDLE/Contents/Resources/$PACKAGE_RESOURCE_BUNDLE_NAME" ]]; then
+    echo "error: Installed resource bundle is missing from Contents/Resources." >&2
+    return 1
+  fi
+  if [[ -e "$APPLICATION_BUNDLE/$PACKAGE_RESOURCE_BUNDLE_NAME" ]]; then
+    echo "error: Unexpected app-root resource bundle would mask the regression." >&2
+    return 1
+  fi
+  if [[ ! -d "$SWIFTPM_SCRATCH_PATH" ]]; then
+    echo "error: SwiftPM scratch path is unavailable: $SWIFTPM_SCRATCH_PATH" >&2
+    return 1
+  fi
+
+  HIDDEN_SWIFTPM_SCRATCH_PATH="${SWIFTPM_SCRATCH_PATH}.runtime-hidden.$$"
+  if [[ -e "$HIDDEN_SWIFTPM_SCRATCH_PATH" ]]; then
+    echo "error: Runtime verification path already exists: $HIDDEN_SWIFTPM_SCRATCH_PATH" >&2
+    HIDDEN_SWIFTPM_SCRATCH_PATH=""
+    return 1
+  fi
+  CRASH_REPORT_MARKER="$(mktemp "${TMPDIR:-/tmp}/KCDeepL-crash-marker.XXXXXX")"
+
+  trap 'restore_hidden_build_scratch; rollback_application_install' EXIT
+  mv "$SWIFTPM_SCRATCH_PATH" "$HIDDEN_SWIFTPM_SCRATCH_PATH"
+
+  if ! /usr/bin/open -n "$APPLICATION_BUNDLE"; then
+    echo "error: Could not launch installed bundle." >&2
+    return 1
+  fi
+
+  for _ in {1..30}; do
+    installed_pid="$(installed_application_pid || true)"
+    if [[ -n "$installed_pid" ]]; then
       break
     fi
     sleep 0.1
   done
-  if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
-    echo "error: $APP_NAME is still running; cannot replace $APPLICATION_BUNDLE." >&2
-    exit 1
+  if [[ -z "$installed_pid" ]]; then
+    echo "error: Installed application did not start." >&2
+    return 1
   fi
 
-  if [[ -d "$APPLICATION_BUNDLE" ]]; then
-    mv "$APPLICATION_BUNDLE" "$install_backup"
+  sleep 3
+  if ! kill -0 "$installed_pid" 2>/dev/null; then
+    echo "error: Installed application exited during runtime verification." >&2
+    return 1
   fi
-  if ! mv "$install_staging" "$APPLICATION_BUNDLE"; then
-    if [[ -d "$install_backup" ]]; then
-      mv "$install_backup" "$APPLICATION_BUNDLE"
-    fi
-    echo "error: Could not install $APPLICATION_BUNDLE; the prior bundle was restored." >&2
-    exit 1
+
+  new_crash_report="$(
+    find "$HOME/Library/Logs/DiagnosticReports" \
+      -maxdepth 1 \
+      -type f \
+      -name "${APP_NAME}-*.ips" \
+      -newer "$CRASH_REPORT_MARKER" \
+      -print \
+      -quit \
+      2>/dev/null || true
+  )"
+  if [[ -n "$new_crash_report" ]]; then
+    echo "error: A new crash report was generated: $new_crash_report" >&2
+    return 1
   fi
-  rm -rf "$install_backup"
-  /usr/bin/xattr -cr "$APPLICATION_BUNDLE"
-  codesign --verify --deep --strict "$APPLICATION_BUNDLE"
-  echo "Installed bundle: $APPLICATION_BUNDLE"
+
+  restore_hidden_build_scratch
+  trap rollback_application_install EXIT
+
+  if [[ -e "$ROOT_DIR/.build" ]]; then
+    echo "error: Runtime verification created workspace .build." >&2
+    return 1
+  fi
+
+  printf 'Verified installed bundle without build scratch: %s (pid %s)\n' \
+    "$APPLICATION_BUNDLE" \
+    "$installed_pid"
 }
 
 case "$MODE" in
@@ -348,9 +513,11 @@ case "$MODE" in
     ;;
   --install-application|install-application)
     install_application_bundle
+    finalize_application_install
     ;;
-  *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--release|--install-application]" >&2
-    exit 2
+  --install-and-verify|install-and-verify)
+    install_application_bundle
+    verify_installed_application_without_build_scratch
+    finalize_application_install
     ;;
 esac

@@ -107,7 +107,6 @@ struct ContentView: View {
                                 set: { viewModel.setSourceAttributedText($0) }
                             ),
                             fontSize: readingFontSize,
-                            onCapture: viewModel.beginScreenCaptureMock,
                             onCompare: startTranslationComparison,
                             onCancel: comparisonViewModel.cancelComparison
                         )
@@ -156,7 +155,6 @@ struct ContentView: View {
                             appleErrorMessage: viewModel.appleErrorMessage,
                             errorMessage: viewModel.errorMessage,
                             pasteBackTarget: pasteBackTarget,
-                            onCapture: viewModel.beginScreenCaptureMock,
                             onPasteBack: pasteTranslationBackToSourceApp
                         )
 
@@ -282,11 +280,6 @@ struct ContentView: View {
                 handleCommandAction(action)
             }
         }
-        .sheet(item: $viewModel.captureState) { state in
-            CaptureMockSheet(state: state) {
-                viewModel.completeScreenCaptureMock()
-            }
-        }
     }
 
     private func scheduleAutoTranslation() {
@@ -397,10 +390,6 @@ struct ContentView: View {
         case .fileTranslation:
             selectedMode = .files
             self.pasteBackTarget = nil
-        case .screenCapture:
-            selectedMode = .text
-            self.pasteBackTarget = nil
-            viewModel.beginScreenCaptureMock()
         }
 
         if let statusMessage {
@@ -506,26 +495,16 @@ private struct TitlebarModeControls: View {
     }
 }
 
-private struct MainMenuButton: View {
+private struct MainSettingsButton: View {
     var body: some View {
-        Menu {
-            SettingsLink {
-                Label("설정", systemImage: "gearshape")
-            }
-
-            Divider()
-
-            Button("번역 기록 열기") {}
-            Button("도움말") {}
-            Button("피드백 보내기") {}
-        } label: {
-            Image(systemName: "line.3.horizontal")
+        SettingsLink {
+            Image(systemName: "gearshape")
                 .font(.system(size: 20, weight: .semibold))
         }
-        .menuStyle(.button)
         .buttonStyle(.plain)
         .frame(width: 30, height: 30)
-        .help("메뉴")
+        .help("설정")
+        .accessibilityLabel("설정")
     }
 }
 
@@ -565,7 +544,7 @@ private struct TitlebarMenuAccessory: NSViewRepresentable {
 
             let hostingView = NSHostingView(
                 rootView: HStack(spacing: 0) {
-                    MainMenuButton()
+                    MainSettingsButton()
                     Spacer(minLength: 0)
                 }
                 .frame(width: 58, height: 30)
@@ -809,7 +788,7 @@ private struct ToolPanelToggleButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("툴바")
+        .help("최근 기록")
     }
 }
 
@@ -823,7 +802,6 @@ private struct TranslationWorkspace: View {
     let appleErrorMessage: String?
     let errorMessage: String?
     let pasteBackTarget: PasteBackTarget?
-    let onCapture: () -> Void
     let onPasteBack: () -> Void
     @State private var focusedPane: WorkspacePane?
 
@@ -835,8 +813,7 @@ private struct TranslationWorkspace: View {
                     attributedText: $sourceAttributedText,
                     width: proxy.size.width / 2,
                     fontSize: fontSize,
-                    isFocused: focusedPane == .source,
-                    onCapture: onCapture
+                    isFocused: focusedPane == .source
                 )
                 .onHover { isHovering in
                     focusedPane = isHovering ? .source : nil
@@ -872,7 +849,6 @@ struct SourceEditorPane: View {
     let width: CGFloat
     let fontSize: CGFloat
     let isFocused: Bool
-    let onCapture: () -> Void
 
     private var hasFormatting: Bool {
         RichTextFormatting.hasFormatting(attributedText) || MarkdownFormatting.containsFormatting(in: text)
@@ -888,19 +864,13 @@ struct SourceEditorPane: View {
                 .padding(20)
 
             if text.isEmpty {
-                VStack(alignment: .leading, spacing: 20) {
-                    Text("번역하려는 텍스트를 입력하거나 붙여넣기 하세요")
-                        .font(.system(size: fontSize + 4, weight: .regular))
-                        .foregroundStyle(.secondary)
-                        .frame(width: min(width - 64, 520), alignment: .leading)
-
-                    Text("또는 텍스트를 선택하고 ⌃⇧1를 눌러 빠르게 번역할 수 있습니다")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(.top, 28)
-                .padding(.leading, 28)
-                .allowsHitTesting(false)
+                Text("번역하려는 텍스트를 입력하거나 붙여넣기 하세요")
+                    .font(.system(size: fontSize + 4, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: min(width - 64, 520), alignment: .leading)
+                    .padding(.top, 28)
+                    .padding(.leading, 28)
+                    .allowsHitTesting(false)
             }
 
             if !text.isEmpty {
@@ -923,12 +893,6 @@ struct SourceEditorPane: View {
 
             VStack {
                 Spacer()
-
-                if text.isEmpty {
-                    FileDropMock()
-                        .frame(maxWidth: .infinity)
-                        .padding(.bottom, 54)
-                }
 
                 HStack(spacing: 8) {
                     if hasFormatting {
@@ -963,20 +927,6 @@ struct SourceEditorPane: View {
                     .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
                     .disabled(text.isEmpty)
                     .help("원문 복사")
-
-                    Button(action: onCapture) {
-                        Image(systemName: "selection.pin.in.out")
-                            .font(.system(size: 18, weight: .medium))
-                    }
-                    .buttonStyle(.plain)
-                    .frame(width: 34, height: 34)
-                    .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
-                            .foregroundStyle(Color.gray.opacity(0.82))
-                    )
-                    .help("텍스트 화면 캡처")
                 }
                 .padding(24)
             }
@@ -1192,31 +1142,6 @@ struct MarkdownText: View {
 
     private var attributedText: AttributedString {
         RichTextFormatting.displayAttributedString(markdown: text)
-    }
-}
-
-private struct FileDropMock: View {
-    var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: -2) {
-                ForEach(["docx", "pptx", "pdf", "txt", "html"], id: \.self) { ext in
-                    VStack(spacing: 0) {
-                        Image(systemName: "doc")
-                            .font(.system(size: 18))
-                        Text(ext)
-                            .font(.system(size: 8, weight: .bold))
-                    }
-                    .frame(width: 28, height: 32)
-                }
-            }
-
-            Text("전체 파일을 번역하려면, 여기에 파일을 드래그하여 놓으세요")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -1532,22 +1457,6 @@ private struct ToolsPanel: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text("편집 도구")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    ToolRow(title: "격식/비격식", icon: "text.badge.checkmark", isDisabled: true)
-
-                    Text("사용자 지정")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    ToolRow(title: "스타일 프로필 0/1", icon: "square.grid.2x2", hasToggle: true)
-                    ToolRow(title: "용어집 0/1", icon: "book", hasToggle: true)
-                    ToolRow(title: "스타일 규칙", icon: "quote.opening", hasToggle: true)
-
-                    Divider().opacity(0.25)
-
                     Text("최근 기록")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1587,88 +1496,5 @@ private struct ToolsPanel: View {
                 .fill(AppTheme.panelBorder)
                 .frame(width: 1)
         }
-    }
-}
-
-private struct ToolRow: View {
-    let title: String
-    let icon: String
-    var hasToggle = false
-    var isDisabled = false
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .frame(width: 20)
-            Text(title)
-                .font(.system(size: 13, weight: .semibold))
-            Spacer()
-            if hasToggle {
-                Toggle("", isOn: .constant(false))
-                    .labelsHidden()
-                    .controlSize(.mini)
-            } else {
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-            }
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 34)
-        .background(AppTheme.controlBackground.opacity(isDisabled ? 0.25 : 1), in: RoundedRectangle(cornerRadius: 7))
-        .foregroundStyle(isDisabled ? .tertiary : .primary)
-    }
-}
-
-private struct CaptureMockSheet: View {
-    let state: CaptureState
-    let onConfirm: () -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Label(state.title, systemImage: "selection.pin.in.out")
-                    .font(.title3.bold())
-                Spacer()
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .compactIconButton()
-            }
-
-            Text(state.message)
-                .foregroundStyle(.secondary)
-
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.black.opacity(0.18))
-
-                RoundedRectangle(cornerRadius: 7)
-                    .stroke(style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .padding(28)
-
-                Text("선택 영역 미리보기")
-                    .foregroundStyle(.secondary)
-            }
-            .frame(height: 220)
-
-            HStack {
-                Spacer()
-
-                Button("취소") {
-                    dismiss()
-                }
-
-                Button("캡처 완료") {
-                    onConfirm()
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(24)
-        .frame(width: 520)
     }
 }

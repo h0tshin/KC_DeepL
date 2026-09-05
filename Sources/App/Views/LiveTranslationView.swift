@@ -210,8 +210,8 @@ private struct LiveTranslationTopBar: View {
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
-                .help("툴바")
-                .accessibilityLabel("도구 패널 열기")
+                .help("최근 기록")
+                .accessibilityLabel("최근 기록 패널 열기")
             }
         }
         .padding(.horizontal, 18)

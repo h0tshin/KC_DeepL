@@ -6,7 +6,6 @@ struct TranslationComparisonView: View {
     @Binding var sourceText: String
     @Binding var sourceAttributedText: NSAttributedString
     let fontSize: CGFloat
-    let onCapture: () -> Void
     let onCompare: () -> Void
     let onCancel: () -> Void
 
@@ -20,8 +19,7 @@ struct TranslationComparisonView: View {
                     attributedText: $sourceAttributedText,
                     width: proxy.size.width / 2,
                     fontSize: fontSize,
-                    isFocused: sourceIsFocused,
-                    onCapture: onCapture
+                    isFocused: sourceIsFocused
                 )
                 .onHover { sourceIsFocused = $0 }
 

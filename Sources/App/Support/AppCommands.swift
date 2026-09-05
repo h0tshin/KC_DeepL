@@ -8,13 +8,12 @@ enum AppCommandAction: String, Hashable {
     case textTranslation
     case writing
     case fileTranslation
-    case screenCapture
 
     var capturesSelectedText: Bool {
         switch self {
         case .textTranslation:
             true
-        case .writing, .fileTranslation, .screenCapture:
+        case .writing, .fileTranslation:
             false
         }
     }

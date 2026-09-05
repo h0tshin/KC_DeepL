@@ -319,16 +319,8 @@ struct AppShortcutDefinition: Hashable {
         hotKeyID: 2
     )
 
-    static let screenCapture = AppShortcutDefinition(
-        action: .screenCapture,
-        preferenceKey: PreferenceKeys.screenCaptureShortcut,
-        defaultValue: "⌃⇧3",
-        hotKeyID: 3
-    )
-
     static let all: [AppShortcutDefinition] = [
         .textTranslation,
-        .liveTranslation,
-        .screenCapture
+        .liveTranslation
     ]
 }

@@ -68,15 +68,6 @@ final class AppStatusItemController: NSObject {
             action: #selector(performFileTranslation)
         ))
 
-        let screenCaptureItem = actionItem(
-            title: "화면 캡처",
-            keyEquivalent: "",
-            modifiers: [],
-            action: #selector(performScreenCapture)
-        )
-        shortcutItems[.screenCapture] = screenCaptureItem
-        menu.addItem(screenCaptureItem)
-
         menu.addItem(.separator())
 
         menu.addItem(actionItem(
@@ -150,10 +141,6 @@ final class AppStatusItemController: NSObject {
 
     @objc private func performFileTranslation() {
         AppActionDispatcher.shared.perform(.fileTranslation)
-    }
-
-    @objc private func performScreenCapture() {
-        AppActionDispatcher.shared.perform(.screenCapture)
     }
 
     @objc private func showSettings() {

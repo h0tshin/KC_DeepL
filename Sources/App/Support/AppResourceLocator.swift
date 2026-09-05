@@ -1,5 +1,7 @@
 import Foundation
 
+private final class AppResourceBundleToken: NSObject {}
+
 enum AppResourceLocator {
     private static let packageResourceBundleName = "KCDeepL_KCDeepL.bundle"
 
@@ -33,73 +35,33 @@ enum AppResourceLocator {
     }
 
     private static let candidateBundles: [Bundle] = {
-        // `Bundle.module` is the canonical SwiftPM resource location. The
-        // additional candidates keep the signed app-bundle packaging path and
-        // direct executable/debug launches working as well.
-        var bundles = [Bundle.module, Bundle.main]
-        var bundleURLs = [
-            Bundle.main.bundleURL.appendingPathComponent(
-                packageResourceBundleName,
-                isDirectory: true
-            ),
-            Bundle.main.bundleURL
-                .deletingLastPathComponent()
-                .appendingPathComponent(
-                    packageResourceBundleName,
-                    isDirectory: true
-                )
-        ]
-
-        if let resourceURL = Bundle.main.resourceURL {
-            bundleURLs.append(
-                resourceURL.appendingPathComponent(
-                    packageResourceBundleName,
-                    isDirectory: true
-                )
-            )
-        }
-
-        if let executableURL = Bundle.main.executableURL {
-            bundleURLs.append(
-                executableURL
-                    .deletingLastPathComponent()
-                    .appendingPathComponent(
-                        packageResourceBundleName,
-                        isDirectory: true
-                )
-            )
-        }
-
-#if DEBUG
-        let packageDirectory = URL(
-            fileURLWithPath: FileManager.default.currentDirectoryPath,
-            isDirectory: true
-        )
-        for configuration in ["debug", "release"] {
-            bundleURLs.append(
-                packageDirectory
-                    .appendingPathComponent(".build", isDirectory: true)
-                    .appendingPathComponent(configuration, isDirectory: true)
-                    .appendingPathComponent(
-                        packageResourceBundleName,
-                        isDirectory: true
-                    )
-            )
-        }
-#endif
-
-        var seenPaths = Set(
-            bundles.map { $0.bundleURL.standardizedFileURL.path }
-        )
-        for bundleURL in bundleURLs {
-            let standardizedURL = bundleURL.standardizedFileURL
-            guard seenPaths.insert(standardizedURL.path).inserted,
-                  let bundle = Bundle(url: standardizedURL)
-            else {
-                continue
+        // Bundle.module traps when its build-time path no longer exists.
+        // Use the app/code bundles instead: packaged resources live inside
+        // the app, while SwiftPM test resources sit beside the .xctest bundle.
+        let hostBundles = [Bundle.main, Bundle(for: AppResourceBundleToken.self)]
+        var bundles: [Bundle] = []
+        var seenPaths = Set<String>()
+        for bundle in hostBundles {
+            if seenPaths.insert(bundle.bundleURL.standardizedFileURL.path).inserted {
+                bundles.append(bundle)
             }
+        }
 
-            bundles.append(bundle)
+        for host in hostBundles {
+            let roots = [
+                host.resourceURL,
+                host.bundleURL,
+                host.bundleURL.deletingLastPathComponent()
+            ].compactMap { $0 }
+            for root in roots {
+                let url = root.appendingPathComponent(
+                    packageResourceBundleName,
+                    isDirectory: true
+                ).standardizedFileURL
+                if seenPaths.insert(url.path).inserted, let bundle = Bundle(url: url) {
+                    bundles.append(bundle)
+                }
+            }
         }
 
         return bundles

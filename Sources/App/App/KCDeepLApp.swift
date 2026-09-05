@@ -100,8 +100,6 @@ private struct KCDeepLShortcutCommands: Commands {
     private var selectedTextShortcut = AppShortcutDefinition.textTranslation.defaultValue
     @AppStorage(PreferenceKeys.rewriteShortcut)
     private var liveTranslationShortcut = AppShortcutDefinition.liveTranslation.defaultValue
-    @AppStorage(PreferenceKeys.screenCaptureShortcut)
-    private var screenCaptureShortcut = AppShortcutDefinition.screenCapture.defaultValue
 
     var body: some Commands {
         CommandMenu("KC DeepL") {
@@ -116,12 +114,6 @@ private struct KCDeepLShortcutCommands: Commands {
                 action: .writing,
                 storedValue: liveTranslationShortcut,
                 definition: .liveTranslation
-            )
-            shortcutButton(
-                title: "화면 캡처",
-                action: .screenCapture,
-                storedValue: screenCaptureShortcut,
-                definition: .screenCapture
             )
         }
     }

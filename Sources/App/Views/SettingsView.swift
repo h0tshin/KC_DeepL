@@ -34,16 +34,18 @@ struct SettingsView: View {
                         LLMLiveTranslationSettingsPane()
                     case .files:
                         FileHistorySettingsPane()
-                    case .advanced:
-                        AdvancedSettingsPane()
                     }
                 }
-                .padding(.horizontal, 32)
-                .padding(.vertical, 34)
+                // Keep the same columns in every pane, including those with a scrollbar.
+                .frame(width: 536, alignment: .leading)
+                .padding(20)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .scrollIndicators(.visible)
+            .id(selectedCategory)
         }
-        .frame(width: 1100, height: 720)
+        .frame(width: 760, height: 520)
+        .controlSize(.small)
         .background(AppTheme.panelBackground)
     }
 }
@@ -55,7 +57,6 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     case llmTextTranslation = "LLM 번역"
     case llmLiveTranslation = "LLM Live"
     case files = "파일 번역"
-    case advanced = "고급"
 
     var id: String { rawValue }
 
@@ -73,8 +74,6 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
             "speaker.wave.2"
         case .files:
             "textformat"
-        case .advanced:
-            "slider.horizontal.3"
         }
     }
 }
@@ -83,48 +82,49 @@ private struct SettingsSidebar: View {
     @Binding var selectedCategory: SettingsCategory
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 4) {
             ForEach(SettingsCategory.allCases) { category in
                 Button {
                     selectedCategory = category
                 } label: {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 8) {
                         Image(systemName: category.icon)
-                            .font(.system(size: 18, weight: .semibold))
-                            .frame(width: 24, alignment: .center)
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(width: 18, alignment: .center)
 
                         Text(category.rawValue)
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 13)
-                        .frame(height: 48)
+                        .padding(.horizontal, 10)
+                        .frame(height: 34)
                         .background(
                             selectedCategory == category
                                 ? AppTheme.accent
                                 : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 8)
+                            in: RoundedRectangle(cornerRadius: 6)
                         )
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(category.rawValue)
+                .accessibilityAddTraits(selectedCategory == category ? .isSelected : [])
             }
 
             Spacer()
         }
-        .padding(.top, 60)
-        .padding(.horizontal, 34)
-        .frame(width: 230)
+        .padding(.vertical, 16)
+        .padding(.horizontal, 10)
+        .frame(width: 164)
     }
 }
 
 private struct GeneralSettingsPane: View {
     @ObservedObject private var launchAtLoginController = LaunchAtLoginController.shared
-    @AppStorage(PreferenceKeys.quickAccessMode) private var quickAccessMode = "floating"
-    @AppStorage(PreferenceKeys.closeBehavior) private var closeBehavior = "background"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 30) {
+        VStack(alignment: .leading, spacing: 20) {
             SettingsSection(title: "KC DeepL 번역기") {
                 Toggle(
                     "기기를 켜면 앱이 자동으로 열립니다",
@@ -154,27 +154,6 @@ private struct GeneralSettingsPane: View {
                         launchAtLoginController.openSystemSettings()
                     }
                 }
-            }
-
-            SettingsSection(title: "빠른 액세스 옵션", description: "특정 단축키 또는 부동 KC DeepL 아이콘 사용 시, 번역 또는 개선된 텍스트가 열릴 위치를 선택합니다.") {
-                RadioGroup(
-                    selection: $quickAccessMode,
-                    items: [
-                        RadioItem(id: "floating", title: "작은 플로팅 창에 표시"),
-                        RadioItem(id: "app", title: "앱에 표시")
-                    ]
-                )
-            }
-
-            SettingsSection(title: "KC DeepL 앱 닫기", description: "닫기를 누른 후의 앱 작동 방식을 선택하세요.") {
-                RadioGroup(
-                    selection: $closeBehavior,
-                    items: [
-                        RadioItem(id: "background", title: "단축키로 활성화할 수 있도록 백그라운드에 유지"),
-                        RadioItem(id: "quit", title: "앱을 종료"),
-                        RadioItem(id: "menuBar", title: "메뉴 막대에 유지")
-                    ]
-                )
             }
         }
         .onAppear {
@@ -208,15 +187,14 @@ private struct GeneralSettingsPane: View {
 private struct ShortcutSettingsPane: View {
     @AppStorage(PreferenceKeys.selectedTextShortcut) private var selectedTextShortcut = "⌃⇧1"
     @AppStorage(PreferenceKeys.rewriteShortcut) private var rewriteShortcut = "⌃⇧2"
-    @AppStorage(PreferenceKeys.screenCaptureShortcut) private var screenCaptureShortcut = "⌃⇧3"
     @State private var registrationMessage: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 28) {
+        VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("단축키 설정")
-                    .font(.title3.bold())
-                Text("단축키를 사용하여 번역 워크플로의 효율을 높입니다. 편집하려면 텍스트 영역을 선택한 후, 함께 사용할 새로운 키 조합을 입력하세요.")
+                    .font(.headline)
+                Text("입력 칸을 클릭한 뒤 사용할 키 조합을 누르세요.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -232,33 +210,17 @@ private struct ShortcutSettingsPane: View {
                 description: "텍스트 선택 후 이 단축키를 누르면 KC DeepL 앱에서 번역이 열립니다.",
                 shortcut: $selectedTextShortcut,
                 defaultShortcut: "⌃⇧1",
-                unavailableShortcuts: normalizedShortcuts([
-                    rewriteShortcut,
-                    screenCaptureShortcut
-                ])
+                unavailableShortcuts: normalizedShortcuts([rewriteShortcut])
             )
+
+            Divider()
 
             ShortcutRow(
                 title: "Live 번역",
                 description: "라이브 번역 화면을 단축키로 즉시 열 수 있습니다.",
                 shortcut: $rewriteShortcut,
                 defaultShortcut: "⌃⇧2",
-                unavailableShortcuts: normalizedShortcuts([
-                    selectedTextShortcut,
-                    screenCaptureShortcut
-                ])
-            )
-
-            ShortcutRow(
-                title: "텍스트 화면 캡처",
-                description: "KC DeepL 앱에서 번역하려는 텍스트의 스크린샷을 찍습니다.",
-                shortcut: $screenCaptureShortcut,
-                defaultShortcut: "⌃⇧3",
-                unavailableShortcuts: normalizedShortcuts([
-                    selectedTextShortcut,
-                    rewriteShortcut
-                ]),
-                note: "OCR 인식은 다음 구현 단계에서 연결됩니다."
+                unavailableShortcuts: normalizedShortcuts([selectedTextShortcut])
             )
 
             HStack {
@@ -266,7 +228,6 @@ private struct ShortcutSettingsPane: View {
                 Button("모두 기본값으로 초기화") {
                     selectedTextShortcut = "⌃⇧1"
                     rewriteShortcut = "⌃⇧2"
-                    screenCaptureShortcut = "⌃⇧3"
                 }
             }
         }
@@ -285,38 +246,21 @@ private struct ShortcutSettingsPane: View {
 private struct AccessibilitySettingsPane: View {
     @AppStorage(PreferenceKeys.readingFontSize)
     private var readingFontSize = ReadingFontSize.defaultValue.rawValue
-    @AppStorage(PreferenceKeys.speechSpeed) private var speechSpeed = "1.0"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 30) {
+        VStack(alignment: .leading, spacing: 20) {
             SettingsSection(title: "글꼴 크기", description: "번역된 텍스트를 쉽게 읽을 수 있도록 원하는 글꼴 크기를 선택하세요.") {
                 Text("번역문은 이렇게 표시됩니다.")
                     .font(.system(size: previewFontSize, weight: .semibold))
                     .frame(maxWidth: .infinity)
-                    .frame(height: 128)
+                    .frame(height: 96)
                     .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 5))
 
-                Picker("글꼴 크기 변경", selection: $readingFontSize) {
+                SettingsPickerRow(title: "글꼴 크기", selection: $readingFontSize) {
                     ForEach(ReadingFontSize.allCases) { size in
                         Text("\(size.points) pt").tag(size.rawValue)
                     }
                 }
-                .frame(width: 260)
-            }
-
-            SettingsSection(title: "음성 속도", description: "음성 텍스트 속도를 조절하세요. 천천히 들으며 정확히 이해하거나, 빠르게 재생하여 시간을 절약할 수 있습니다.") {
-                Image(systemName: "speaker.wave.2")
-                    .font(.title2)
-                    .foregroundStyle(AppTheme.accent)
-                    .padding(8)
-                    .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 6))
-
-                Picker("음성 속도 변경", selection: $speechSpeed) {
-                    Text("0.75 (느림)").tag("0.75")
-                    Text("1.0 (보통)").tag("1.0")
-                    Text("1.25 (빠름)").tag("1.25")
-                }
-                .frame(width: 260)
             }
         }
         .onAppear {
@@ -334,14 +278,13 @@ private struct FileHistorySettingsPane: View {
     @AppStorage(PreferenceKeys.historyEnabled) private var historyEnabled = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 30) {
+        VStack(alignment: .leading, spacing: 20) {
             SettingsSection(title: "다운로드 위치", description: "번역 파일을 저장할 위치를 선택합니다.") {
-                Picker("위치", selection: $downloadLocation) {
+                SettingsPickerRow(title: "저장 위치", selection: $downloadLocation) {
                     Text("데스크탑").tag("desktop")
                     Text("다운로드").tag("downloads")
                     Text("매번 묻기").tag("ask")
                 }
-                .frame(width: 240)
             }
 
             SettingsSection(title: "번역 기록", description: "번역을 자동으로 저장하여 이전 번역을 빠르게 찾고 재사용할 수 있습니다. 기록은 이 기기에 로컬로 저장합니다.") {
@@ -393,15 +336,14 @@ private struct LLMTextTranslationSettingsPane: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 30) {
+        VStack(alignment: .leading, spacing: 20) {
             SettingsSection(
                 title: "LLM 번역 모델",
                 description: "텍스트 번역 요청을 처리할 방식과 모델을 선택합니다."
             ) {
                 SettingsPickerRow(
                     title: "번역 방식",
-                    selection: backendBinding,
-                    width: 320
+                    selection: backendBinding
                 ) {
                     ForEach(TranslationBackend.allCases) { backend in
                         Text(backend.displayName).tag(backend)
@@ -456,8 +398,7 @@ private struct LLMTextTranslationSettingsPane: View {
         } else {
             SettingsPickerRow(
                 title: "Codex 모델",
-                selection: $codexModelID,
-                width: 320
+                selection: $codexModelID
             ) {
                 ForEach(codexModelStore.models) { model in
                     Text(model.displayName).tag(model.model)
@@ -503,13 +444,16 @@ private struct LLMTextTranslationSettingsPane: View {
 
     @ViewBuilder
     private var llmAPISettings: some View {
-        SettingsPickerRow(title: "공급자", selection: providerBinding, width: 320) {
-            ForEach(LLMProvider.allCases) { provider in
-                Text(provider.displayName).tag(provider)
+        SettingsPickerRow(title: "공급자", selection: providerBinding) {
+            Text(LLMProvider.gemini.displayName).tag(LLMProvider.gemini)
+            if currentProvider != .gemini {
+                Text("\(currentProvider.displayName) (미지원)")
+                    .tag(currentProvider)
+                    .disabled(true)
             }
         }
 
-        SettingsPickerRow(title: "세부모델", selection: $modelID, width: 320) {
+        SettingsPickerRow(title: "세부모델", selection: $modelID) {
             ForEach(currentProvider.models) { model in
                 Text(model.displayName).tag(model.id)
             }
@@ -517,20 +461,22 @@ private struct LLMTextTranslationSettingsPane: View {
 
         SettingsSecureFieldRow(
             title: "번역 API",
-            text: $apiKey,
-            width: 500
+            text: $apiKey
         )
 
         Text("API 키는 이 Mac의 앱 설정에 저장됩니다.")
             .font(.caption)
             .foregroundStyle(.secondary)
 
-        VStack(alignment: .leading, spacing: 8) {
-            Text("창의성 \(temperature, specifier: "%.1f")")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        HStack(spacing: 12) {
+            SettingsRowTitle("창의성")
             Slider(value: $temperature, in: 0...1, step: 0.1)
-                .frame(maxWidth: 360)
+                .accessibilityLabel("창의성")
+            Text("\(temperature, specifier: "%.1f")")
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 40, alignment: .trailing)
         }
     }
 
@@ -576,13 +522,13 @@ private struct LLMLiveTranslationSettingsPane: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 30) {
+        VStack(alignment: .leading, spacing: 20) {
             SettingsSection(title: "LLM 라이브 번역 모델", description: "실시간 음성 번역에 사용할 모델과 양방향 API 키를 설정합니다.") {
-                SettingsPickerRow(title: "공급자", selection: liveProviderBinding, width: 320) {
+                SettingsPickerRow(title: "공급자", selection: liveProviderBinding) {
                     Text(LLMProvider.gemini.displayName).tag(LLMProvider.gemini)
                 }
 
-                SettingsPickerRow(title: "세부모델", selection: $liveModelID, width: 320) {
+                SettingsPickerRow(title: "세부모델", selection: $liveModelID) {
                     ForEach(liveModelOptions) { model in
                         Text(model.title).tag(model.id)
                     }
@@ -590,13 +536,11 @@ private struct LLMLiveTranslationSettingsPane: View {
 
                 SettingsSecureFieldRow(
                     title: "수화용 API",
-                    text: $listeningAPIKey,
-                    width: 620
+                    text: $listeningAPIKey
                 )
                 SettingsSecureFieldRow(
                     title: "발화용 API",
-                    text: $speakingAPIKey,
-                    width: 620
+                    text: $speakingAPIKey
                 )
 
                 Text("API 키는 이 Mac의 앱 설정에 저장됩니다.")
@@ -604,27 +548,32 @@ private struct LLMLiveTranslationSettingsPane: View {
                     .foregroundStyle(.secondary)
             }
 
-            SettingsSection(title: "Audio Routing") {
+            SettingsSection(title: "오디오 장치") {
                 AudioRoutingPicker(title: "상대방 마이크 입력", selection: $remoteMicInput, options: inputDeviceOptions)
                 AudioRoutingPicker(title: "상대방 스피커 출력", selection: $remoteSpeakerOutput, options: outputDeviceOptions)
                 AudioRoutingPicker(title: "말하는 마이크 입력", selection: $localMicInput, options: inputDeviceOptions)
                 AudioRoutingPicker(title: "듣리는 스피커 출력", selection: $localSpeakerOutput, options: outputDeviceOptions)
             }
 
-            SettingsSection(title: "Translation") {
-                SettingsTextFieldRow(title: "상대방 언어", text: $localTargetLanguage, width: 230)
-                SettingsTextFieldRow(title: "발화자 언어", text: $remoteTargetLanguage, width: 230)
+            SettingsSection(title: "언어와 재생") {
+                HStack(alignment: .top, spacing: 16) {
+                    SettingsTextFieldRow(title: "상대방 언어", text: $localTargetLanguage)
+                    SettingsTextFieldRow(title: "발화자 언어", text: $remoteTargetLanguage)
+                }
 
                 Toggle("내 target 언어 echo", isOn: $localTargetEcho)
                 Toggle("상대방 target 언어 echo", isOn: $remoteTargetEcho)
                 Toggle("대화 시작 중에는 상대방 입력 잠시 중지", isOn: $pauseRemoteInputOnStart)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("듣는 볼륨 \(Int(listenerVolume * 100))%")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    SettingsRowTitle("듣는 볼륨")
                     Slider(value: $listenerVolume, in: 0...1)
-                        .frame(maxWidth: 360)
+                        .accessibilityLabel("듣는 볼륨")
+                    Text("\(Int(listenerVolume * 100))%")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(width: 40, alignment: .trailing)
                 }
             }
         }
@@ -654,16 +603,6 @@ private struct LLMLiveTranslationSettingsPane: View {
     }
 }
 
-private struct AdvancedSettingsPane: View {
-    var body: some View {
-        Text("kc.Shin")
-            .font(.system(size: 34, weight: .semibold, design: .rounded))
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            .frame(minHeight: 560)
-    }
-}
-
 private struct LiveModelOption: Identifiable {
     let id: String
     let title: String
@@ -675,54 +614,55 @@ private struct AudioRoutingPicker: View {
     let options: [String]
 
     var body: some View {
-        HStack(spacing: 16) {
-            Text(title)
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 150, alignment: .leading)
-
-            Picker(title, selection: $selection) {
-                ForEach(options, id: \.self) { option in
-                    Text(option).tag(option)
-                }
+        SettingsPickerRow(title: title, selection: $selection) {
+            ForEach(options, id: \.self) { option in
+                Text(option).tag(option)
             }
-            .labelsHidden()
-            .frame(maxWidth: 640)
         }
+        .help(selection)
     }
 }
 
 private struct SettingsPickerRow<SelectionValue: Hashable, Content: View>: View {
     let title: String
     @Binding var selection: SelectionValue
-    var width: CGFloat
     @ViewBuilder let content: Content
 
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 12) {
             SettingsRowTitle(title)
 
-            Picker(title, selection: $selection) {
-                content
+            Group {
+                if #available(macOS 26.0, *) {
+                    picker.buttonSizing(.flexible)
+                } else {
+                    picker
+                }
             }
-            .labelsHidden()
-            .frame(width: width, alignment: .leading)
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private var picker: some View {
+        Picker(title, selection: $selection) {
+            content
+        }
+        .labelsHidden()
     }
 }
 
 private struct SettingsSecureFieldRow: View {
     let title: String
     @Binding var text: String
-    var width: CGFloat
 
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 12) {
             SettingsRowTitle(title)
 
             SecureField(title, text: $text)
                 .labelsHidden()
                 .textFieldStyle(.roundedBorder)
-                .frame(width: width)
+                .frame(minWidth: 0, maxWidth: .infinity)
         }
     }
 }
@@ -730,16 +670,17 @@ private struct SettingsSecureFieldRow: View {
 private struct SettingsTextFieldRow: View {
     let title: String
     @Binding var text: String
-    var width: CGFloat
 
     var body: some View {
-        HStack(spacing: 16) {
-            SettingsRowTitle(title)
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             TextField(title, text: $text)
                 .labelsHidden()
                 .textFieldStyle(.roundedBorder)
-                .frame(width: width)
+                .frame(minWidth: 0, maxWidth: .infinity)
         }
     }
 }
@@ -753,8 +694,9 @@ private struct SettingsRowTitle: View {
 
     var body: some View {
         Text(title)
-            .font(.system(size: 14, weight: .semibold))
-            .frame(width: 150, alignment: .leading)
+            .font(.system(size: 13, weight: .semibold))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: 112, alignment: .leading)
     }
 }
 
@@ -764,51 +706,21 @@ private struct SettingsSection<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Divider().opacity(0.35)
-
+        VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.title3.bold())
+                    .font(.headline)
 
                 if let description {
                     Text(description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
                 content
-            }
-        }
-    }
-}
-
-private struct RadioItem: Identifiable {
-    let id: String
-    let title: String
-}
-
-private struct RadioGroup: View {
-    @Binding var selection: String
-    let items: [RadioItem]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(items) { item in
-                Button {
-                    selection = item.id
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: selection == item.id ? "largecircle.fill.circle" : "circle")
-                            .foregroundStyle(selection == item.id ? AppTheme.accent : .secondary)
-                        Text(item.title)
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(item.title)
-                .accessibilityValue(selection == item.id ? "선택됨" : "선택 안 됨")
             }
         }
     }
@@ -820,59 +732,45 @@ private struct ShortcutRow: View {
     @Binding var shortcut: String
     let defaultShortcut: String
     let unavailableShortcuts: Set<String>
-    var note: String?
     @State private var validationMessage: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Divider().opacity(0.35)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(title)
+                    .font(.headline)
 
-            HStack(alignment: .center, spacing: 24) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(title)
-                        .font(.title3.bold())
-                    Text(description)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Spacer(minLength: 12)
 
-                    if let note {
-                        Text(note)
-                            .font(.caption)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(AppTheme.controlBackground, in: RoundedRectangle(cornerRadius: 5))
-                    }
-                }
-
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 5) {
-                    ShortcutRecorder(
-                        shortcut: $shortcut,
-                        unavailableShortcuts: unavailableShortcuts,
-                        onValidationError: { validationMessage = $0 }
-                    )
-                    .frame(width: 180)
-
-                    if let validationMessage {
-                        Text(validationMessage)
-                            .font(.caption2)
-                            .foregroundStyle(.red)
-                    } else {
-                        Text("클릭한 뒤 새 조합을 누르세요")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+                ShortcutRecorder(
+                    shortcut: $shortcut,
+                    unavailableShortcuts: unavailableShortcuts,
+                    onValidationError: { validationMessage = $0 }
+                )
+                .frame(width: 180)
 
                 Button {
                     shortcut = defaultShortcut
                     validationMessage = nil
                 } label: {
                     Image(systemName: "arrow.uturn.backward")
+                        .frame(width: 20, height: 24)
                 }
                 .buttonStyle(.plain)
+                .help("기본 단축키로 복원")
                 .accessibilityLabel("\(title) 단축키 기본값으로 초기화")
+            }
+
+            Text(description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let validationMessage {
+                Text(validationMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
